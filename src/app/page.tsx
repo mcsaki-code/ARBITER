@@ -107,20 +107,34 @@ export default function HomePage() {
       if (res.ok) {
         const data = await res.json();
         marketsFound = data.summary?.marketsFound || 0;
-        setPipelineStatus('done');
         setPipelineLog(
-          `${f1 + f2 + (data.summary?.forecasts || 0)} forecasts, ${marketsFound} markets found (${data.summary?.durationMs || 0}ms)`
+          `${f1 + f2 + (data.summary?.forecasts || 0)} forecasts, ${marketsFound} markets. Resolving bets...`
         );
       } else {
-        // Even if trigger fails, we got weather data
         const body = await res.text();
-        setPipelineStatus(f1 + f2 > 0 ? 'done' : 'error');
         setPipelineLog(
           f1 + f2 > 0
-            ? `${f1 + f2} forecasts ingested. Market search issue: ${body.substring(0, 100)}`
-            : `Pipeline error: ${body.substring(0, 120)}`
+            ? `${f1 + f2} forecasts ingested. Market search issue: ${body.substring(0, 80)}. Resolving...`
+            : `Pipeline error: ${body.substring(0, 100)}`
         );
       }
+
+      // Step 4: Resolve any open bets against settled markets
+      try {
+        const resolveRes = await fetch('/api/resolve');
+        if (resolveRes.ok) {
+          const resolveData = await resolveRes.json();
+          if (resolveData.resolved > 0) {
+            setPipelineLog(
+              `${f1 + f2} forecasts, ${marketsFound} markets, ${resolveData.resolved} bets resolved (${resolveData.won}W/${resolveData.lost}L)`
+            );
+          }
+        }
+      } catch {
+        // Resolution is non-critical — don't block pipeline
+      }
+
+      setPipelineStatus(f1 + f2 > 0 || marketsFound > 0 ? 'done' : 'error');
 
       // Reload to show new data
       if (f1 + f2 > 0 || marketsFound > 0) {

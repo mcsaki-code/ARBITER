@@ -25,10 +25,35 @@ interface MarketsResponse {
   lastUpdated: string;
 }
 
+// Only show markets that are actually weather/temperature related
+function isWeatherMarket(m: Market): boolean {
+  const q = m.question.toLowerCase();
+  const weatherTerms = [
+    'temperature', 'weather', '°f', '°c', 'degrees',
+    'high temp', 'low temp', 'precipitation', 'rain',
+    'snow', 'hurricane', 'storm', 'wind', 'heat',
+    'cold', 'frost', 'climate', 'warming',
+  ];
+  // City names that appear in weather markets
+  const cityTerms = [
+    'new york', 'chicago', 'miami', 'seattle', 'denver',
+    'los angeles', 'oklahoma city', 'omaha', 'minneapolis',
+    'phoenix', 'atlanta',
+  ];
+
+  // Must match a weather term
+  const hasWeatherTerm = weatherTerms.some((term) => q.includes(term));
+  // Or have a city match AND category is temperature/weather
+  const hasCityAndCategory = cityTerms.some((c) => q.includes(c)) &&
+    (m.category === 'temperature' || m.category === 'weather');
+
+  return hasWeatherTerm || hasCityAndCategory;
+}
+
 export default function MarketsPage() {
   const [data, setData] = useState<MarketsResponse | null>(null);
   const [state, setState] = useState<DataState>('loading');
-  const [filter, setFilter] = useState<'all' | 'temperature' | 'weather'>('all');
+  const [filter, setFilter] = useState<'all' | 'temperature' | 'weather' | 'city-matched'>('all');
 
   const fetchData = useCallback(async () => {
     try {
@@ -48,10 +73,13 @@ export default function MarketsPage() {
     return () => clearInterval(interval);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const filtered = data?.markets?.filter((m) => {
+  // Filter to weather markets only, then apply sub-filter
+  const weatherMarkets = data?.markets?.filter(isWeatherMarket) || [];
+  const filtered = weatherMarkets.filter((m) => {
     if (filter === 'all') return true;
+    if (filter === 'city-matched') return !!m.city_id;
     return m.category === filter;
-  }) || [];
+  });
 
   const formatDate = (iso: string) => {
     if (!iso) return '—';
@@ -71,26 +99,30 @@ export default function MarketsPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
-      {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-xl font-semibold mb-1">Markets</h1>
           <p className="text-sm text-arbiter-text-2">
-            Active Polymarket weather and temperature contracts
+            Active weather and temperature contracts on Polymarket
           </p>
         </div>
         <div className="flex gap-1 bg-arbiter-card border border-arbiter-border rounded-lg p-1">
-          {(['all', 'temperature', 'weather'] as const).map((f) => (
+          {([
+            { key: 'all', label: 'All' },
+            { key: 'city-matched', label: 'Tracked' },
+            { key: 'temperature', label: 'Temp' },
+            { key: 'weather', label: 'Weather' },
+          ] as const).map((f) => (
             <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1.5 text-xs rounded-md transition-all capitalize ${
-                filter === f
+              key={f.key}
+              onClick={() => setFilter(f.key)}
+              className={`px-3 py-1.5 text-xs rounded-md transition-all ${
+                filter === f.key
                   ? 'bg-arbiter-elevated text-arbiter-text'
                   : 'text-arbiter-text-3 hover:text-arbiter-text-2'
               }`}
             >
-              {f}
+              {f.label}
             </button>
           ))}
         </div>
@@ -103,10 +135,16 @@ export default function MarketsPage() {
         skeletonCount={4}
       >
         {/* Stats bar */}
-        <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="grid grid-cols-4 gap-3 mb-4">
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
-            <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Active Markets</div>
-            <div className="font-mono text-lg">{filtered.length}</div>
+            <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Weather Markets</div>
+            <div className="font-mono text-lg">{weatherMarkets.length}</div>
+          </div>
+          <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
+            <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">City Tracked</div>
+            <div className="font-mono text-lg">
+              {weatherMarkets.filter((m) => m.city_id).length}
+            </div>
           </div>
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
             <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Total Volume</div>
@@ -115,12 +153,23 @@ export default function MarketsPage() {
             </div>
           </div>
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
-            <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">City Matched</div>
+            <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Total Liquidity</div>
             <div className="font-mono text-lg">
-              {filtered.filter((m) => m.city_id).length}
+              {formatUsd(filtered.reduce((sum, m) => sum + m.liquidity_usd, 0))}
             </div>
           </div>
         </div>
+
+        {/* Info banner when no weather markets found */}
+        {weatherMarkets.length === 0 && (data?.markets?.length || 0) > 0 && (
+          <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4 mb-4">
+            <p className="text-sm text-arbiter-text-2">
+              {data?.markets?.length} total Polymarket contracts found, but none match weather/temperature criteria.
+              Temperature markets on Polymarket are typically daily high-temperature bracket bets for major US cities.
+              These appear most frequently on weekdays and resolve using NWS data.
+            </p>
+          </div>
+        )}
 
         {/* Market list */}
         <div className="space-y-2">
@@ -128,6 +177,12 @@ export default function MarketsPage() {
             <MarketCard key={market.id} market={market} formatDate={formatDate} formatUsd={formatUsd} />
           ))}
         </div>
+
+        {filtered.length === 0 && weatherMarkets.length > 0 && (
+          <div className="text-center py-8 text-sm text-arbiter-text-3">
+            No markets match the selected filter
+          </div>
+        )}
       </DataStateWrapper>
     </div>
   );
@@ -161,7 +216,7 @@ function MarketCard({
               <Badge variant={market.category === 'temperature' ? 'amber' : 'blue'}>
                 {market.category}
               </Badge>
-              {hasCity && <Badge variant="green">City Matched</Badge>}
+              {hasCity && <Badge variant="green">Tracked</Badge>}
               <span className="text-[10px] text-arbiter-text-3 font-mono">
                 Vol {formatUsd(market.volume_usd)}
               </span>
