@@ -87,24 +87,48 @@ export default function HomePage() {
 
   const runPipeline = async () => {
     setPipelineStatus('running');
-    setPipelineLog(null);
+    setPipelineLog('Fetching weather data...');
     try {
+      // Step 1: Weather for cities 0-4
+      const w1 = await fetch('/api/trigger/weather?offset=0');
+      const w1Data = w1.ok ? await w1.json() : null;
+      const f1 = w1Data?.summary?.forecasts || 0;
+      setPipelineLog(`Batch 1: ${f1} forecasts. Fetching batch 2...`);
+
+      // Step 2: Weather for cities 5-9
+      const w2 = await fetch('/api/trigger/weather?offset=5');
+      const w2Data = w2.ok ? await w2.json() : null;
+      const f2 = w2Data?.summary?.forecasts || 0;
+      setPipelineLog(`${f1 + f2} forecasts ingested. Searching markets...`);
+
+      // Step 3: Market search + analysis
       const res = await fetch('/api/trigger');
+      let marketsFound = 0;
       if (res.ok) {
         const data = await res.json();
+        marketsFound = data.summary?.marketsFound || 0;
         setPipelineStatus('done');
         setPipelineLog(
-          `${data.summary.forecasts} forecasts, ${data.summary.marketsFound} markets found, ${data.summary.analyzed} analyzed (${data.summary.durationMs}ms)`
+          `${f1 + f2 + (data.summary?.forecasts || 0)} forecasts, ${marketsFound} markets found (${data.summary?.durationMs || 0}ms)`
         );
-        // Reload data
-        setTimeout(() => window.location.reload(), 1500);
       } else {
-        setPipelineStatus('error');
-        setPipelineLog('Pipeline returned an error');
+        // Even if trigger fails, we got weather data
+        const body = await res.text();
+        setPipelineStatus(f1 + f2 > 0 ? 'done' : 'error');
+        setPipelineLog(
+          f1 + f2 > 0
+            ? `${f1 + f2} forecasts ingested. Market search issue: ${body.substring(0, 100)}`
+            : `Pipeline error: ${body.substring(0, 120)}`
+        );
       }
-    } catch {
+
+      // Reload to show new data
+      if (f1 + f2 > 0 || marketsFound > 0) {
+        setTimeout(() => window.location.reload(), 2000);
+      }
+    } catch (err) {
       setPipelineStatus('error');
-      setPipelineLog('Network error — check console');
+      setPipelineLog(`Network error: ${err instanceof Error ? err.message : 'check console'}`);
     }
   };
 
