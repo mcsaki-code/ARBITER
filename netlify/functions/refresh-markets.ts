@@ -1,6 +1,7 @@
 // ============================================================
 // Netlify Scheduled Function: Refresh Markets
 // Runs every 30 minutes — fetches active weather markets from Polymarket
+// Filters out sports/politics/crypto at ingestion time
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -30,24 +31,64 @@ interface GammaEvent {
   markets: GammaMarket[];
 }
 
-// City keyword matching
+// ============================================================
+// Active US cities ONLY
+// ============================================================
 const CITY_KEYWORDS: Record<string, string[]> = {
   'New York City': ['new york', 'nyc', 'manhattan'],
   Chicago: ['chicago'],
   Miami: ['miami'],
   Seattle: ['seattle'],
   Denver: ['denver'],
-  'Los Angeles': ['los angeles', 'la ', 'l.a.'],
-  London: ['london'],
-  'Tel Aviv': ['tel aviv'],
-  Tokyo: ['tokyo'],
-  Paris: ['paris'],
+  'Los Angeles': ['los angeles', 'l.a.'],
   'Oklahoma City': ['oklahoma city', 'okc'],
   Omaha: ['omaha'],
   Minneapolis: ['minneapolis', 'twin cities'],
   Phoenix: ['phoenix'],
   Atlanta: ['atlanta'],
 };
+
+// ============================================================
+// Weather market filter — prevents sports/politics from entering DB
+// ============================================================
+const WEATHER_POSITIVE = [
+  'temperature', 'weather', '°f', '°c', 'degrees fahrenheit', 'degrees celsius',
+  'high temp', 'low temp', 'precipitation', 'rainfall', 'snowfall',
+  'hurricane', 'tropical storm', 'heat wave', 'cold snap', 'frost',
+  'wind chill', 'heat index', 'daily high', 'daily low',
+  'warmest', 'coldest', 'record high', 'record low',
+];
+
+const WEATHER_NEGATIVE = [
+  'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'premier league', 'champions league',
+  'world cup', 'ufc', 'mma', 'boxing', 'tennis', 'golf', 'f1', 'formula',
+  'election', 'president', 'congress', 'senate', 'democrat', 'republican',
+  'bitcoin', 'ethereum', 'crypto', 'stock', 'nasdaq', 's&p',
+  'touchdown', 'field goal', 'three-pointer', 'home run', 'strikeout',
+  'assists', 'rebounds', 'rushing', 'passing yards', 'sacks',
+  'points scored', 'total points', 'over under', 'spread',
+  'winner of', 'win the', 'championship', 'playoff', 'super bowl',
+  'world series', 'stanley cup', 'finals', 'mvp',
+  'oscar', 'emmy', 'grammy', 'box office',
+];
+
+function isWeatherMarket(question: string): boolean {
+  const q = question.toLowerCase();
+
+  for (const term of WEATHER_NEGATIVE) {
+    if (q.includes(term)) return false;
+  }
+
+  for (const term of WEATHER_POSITIVE) {
+    if (q.includes(term)) return true;
+  }
+
+  const degreesPattern = /\d+\s*°|above \d+|below \d+|over \d+|under \d+/;
+  const hasCityMention = Object.values(CITY_KEYWORDS).flat().some((kw) => q.includes(kw));
+  if (hasCityMention && degreesPattern.test(q)) return true;
+
+  return false;
+}
 
 async function fetchGamma(url: string): Promise<unknown[]> {
   try {
@@ -67,7 +108,7 @@ async function fetchGamma(url: string): Promise<unknown[]> {
 export const handler = schedule('*/30 * * * *', async () => {
   console.log('[refresh-markets] Starting market refresh');
 
-  // Get cities for matching
+  // Get cities for matching (active only from DB)
   const { data: cities } = await supabase
     .from('weather_cities')
     .select('id, name')
@@ -92,12 +133,6 @@ export const handler = schedule('*/30 * * * *', async () => {
   }
 
   // ======== MULTI-STRATEGY SEARCH ========
-  // Strategy 1: Tag-based search (markets endpoint)
-  // Strategy 2: Text search on markets
-  // Strategy 3: Events endpoint with tag
-  // Strategy 4: Events endpoint with text search
-  // Strategy 5: Broader keyword search
-
   const allMarkets: GammaMarket[] = [];
   const seenIds = new Set<string>();
 
@@ -108,13 +143,13 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Strategy 1 & 2: Direct market search with tags and text
+  // Market searches — tag + text
   const marketSearches = [
     'https://gamma-api.polymarket.com/markets?tag=temperature&active=true&closed=false&limit=100',
     'https://gamma-api.polymarket.com/markets?tag=weather&active=true&closed=false&limit=100',
     'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature',
     'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=weather+high',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees+fahrenheit',
   ];
 
   for (const url of marketSearches) {
@@ -124,7 +159,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Strategy 3 & 4: Events endpoint
+  // Event searches
   const eventSearches = [
     'https://gamma-api.polymarket.com/events?tag=temperature&active=true&closed=false&limit=50',
     'https://gamma-api.polymarket.com/events?tag=weather&active=true&closed=false&limit=50',
@@ -143,11 +178,19 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  console.log(`[refresh-markets] Found ${allMarkets.length} markets across all strategies`);
+  console.log(`[refresh-markets] Found ${allMarkets.length} raw markets across all strategies`);
 
-  // Upsert each market
+  // ======== WEATHER FILTER — reject non-weather markets ========
+  const weatherOnly = allMarkets.filter((m) => isWeatherMarket(m.question));
+  const rejected = allMarkets.length - weatherOnly.length;
+  if (rejected > 0) {
+    console.log(`[refresh-markets] Filtered out ${rejected} non-weather markets`);
+  }
+  console.log(`[refresh-markets] ${weatherOnly.length} weather markets to upsert`);
+
+  // Upsert each weather market
   let upserted = 0;
-  for (const m of allMarkets) {
+  for (const m of weatherOnly) {
     try {
       let outcomes: string[];
       let outcomePrices: number[];
@@ -201,6 +244,6 @@ export const handler = schedule('*/30 * * * *', async () => {
     .lt('updated_at', new Date(Date.now() - 7200000).toISOString())
     .eq('is_active', true);
 
-  console.log(`[refresh-markets] Done. Upserted ${upserted} markets`);
+  console.log(`[refresh-markets] Done. Upserted ${upserted} weather markets`);
   return { statusCode: 200 };
 });

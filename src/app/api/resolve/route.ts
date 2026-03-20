@@ -113,9 +113,9 @@ export async function GET() {
       if (gamma) {
         // Check Gamma API: if closed and prices show clear winner (one at ~1.0)
         const prices = parseOutcomePrices(gamma.outcomePrices);
-        const maxPrice = Math.max(...prices);
+        const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-        if (gamma.closed && maxPrice >= 0.95) {
+        if (gamma.closed && prices.length > 0 && maxPrice >= 0.95) {
           isResolved = true;
           winningOutcomeIndex = prices.indexOf(maxPrice);
           log.push(
@@ -133,13 +133,15 @@ export async function GET() {
       } else if (isPastResolution) {
         // Can't reach Gamma but past resolution — check DB market prices
         const dbPrices = market.outcome_prices || [];
-        const maxDbPrice = Math.max(...dbPrices);
-        if (maxDbPrice >= 0.90) {
-          isResolved = true;
-          winningOutcomeIndex = dbPrices.indexOf(maxDbPrice);
-          log.push(
-            `Market ${market.condition_id.substring(0, 12)}: RESOLVED via DB prices (past resolution)`
-          );
+        if (dbPrices.length > 0) {
+          const maxDbPrice = Math.max(...dbPrices);
+          if (maxDbPrice >= 0.90) {
+            isResolved = true;
+            winningOutcomeIndex = dbPrices.indexOf(maxDbPrice);
+            log.push(
+              `Market ${market.condition_id.substring(0, 12)}: RESOLVED via DB prices (past resolution)`
+            );
+          }
         }
       }
 
@@ -180,10 +182,11 @@ export async function GET() {
       // If we lost: pnl = -amount
       let pnl: number;
       let exitPrice: number;
+      const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
 
       if (betWon) {
         exitPrice = 1.0; // Won = shares worth $1 each
-        pnl = bet.amount_usd * ((1.0 / bet.entry_price) - 1);
+        pnl = bet.amount_usd * ((1.0 / entryPrice) - 1);
       } else {
         exitPrice = 0.0; // Lost = shares worth $0
         pnl = -bet.amount_usd;

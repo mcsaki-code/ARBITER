@@ -25,29 +25,55 @@ interface MarketsResponse {
   lastUpdated: string;
 }
 
-// Only show markets that are actually weather/temperature related
+// ============================================================
+// Weather market validation — matches server-side filter
+// ============================================================
+const WEATHER_POSITIVE = [
+  'temperature', 'weather', '°f', '°c', 'degrees fahrenheit', 'degrees celsius',
+  'high temp', 'low temp', 'precipitation', 'rainfall', 'snowfall',
+  'hurricane', 'tropical storm', 'heat wave', 'cold snap', 'frost',
+  'wind chill', 'heat index', 'daily high', 'daily low',
+  'warmest', 'coldest', 'record high', 'record low',
+];
+
+const WEATHER_NEGATIVE = [
+  'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'premier league', 'champions league',
+  'world cup', 'ufc', 'mma', 'boxing', 'tennis', 'golf', 'f1', 'formula',
+  'election', 'president', 'congress', 'senate', 'democrat', 'republican',
+  'bitcoin', 'ethereum', 'crypto', 'stock', 'nasdaq', 's&p',
+  'touchdown', 'field goal', 'three-pointer', 'home run', 'strikeout',
+  'assists', 'rebounds', 'rushing', 'passing yards', 'sacks',
+  'points scored', 'total points', 'over under', 'spread',
+  'winner of', 'win the', 'championship', 'playoff', 'super bowl',
+  'world series', 'stanley cup', 'finals', 'mvp',
+  'oscar', 'emmy', 'grammy', 'box office',
+];
+
+const CITY_TERMS = [
+  'new york', 'nyc', 'manhattan', 'chicago', 'miami', 'seattle', 'denver',
+  'los angeles', 'l.a.', 'oklahoma city', 'okc', 'omaha',
+  'minneapolis', 'twin cities', 'phoenix', 'atlanta',
+];
+
 function isWeatherMarket(m: Market): boolean {
   const q = m.question.toLowerCase();
-  const weatherTerms = [
-    'temperature', 'weather', '°f', '°c', 'degrees',
-    'high temp', 'low temp', 'precipitation', 'rain',
-    'snow', 'hurricane', 'storm', 'wind', 'heat',
-    'cold', 'frost', 'climate', 'warming',
-  ];
-  // City names that appear in weather markets
-  const cityTerms = [
-    'new york', 'chicago', 'miami', 'seattle', 'denver',
-    'los angeles', 'oklahoma city', 'omaha', 'minneapolis',
-    'phoenix', 'atlanta',
-  ];
 
-  // Must match a weather term
-  const hasWeatherTerm = weatherTerms.some((term) => q.includes(term));
-  // Or have a city match AND category is temperature/weather
-  const hasCityAndCategory = cityTerms.some((c) => q.includes(c)) &&
-    (m.category === 'temperature' || m.category === 'weather');
+  // Reject sports/politics/crypto
+  for (const term of WEATHER_NEGATIVE) {
+    if (q.includes(term)) return false;
+  }
 
-  return hasWeatherTerm || hasCityAndCategory;
+  // Accept if positive weather term found
+  for (const term of WEATHER_POSITIVE) {
+    if (q.includes(term)) return true;
+  }
+
+  // Accept if city mention + degree pattern
+  const degreesPattern = /\d+\s*°|above \d+|below \d+|over \d+|under \d+/;
+  const hasCityMention = CITY_TERMS.some((c) => q.includes(c));
+  if (hasCityMention && degreesPattern.test(q)) return true;
+
+  return false;
 }
 
 export default function MarketsPage() {

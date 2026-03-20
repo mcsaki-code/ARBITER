@@ -94,9 +94,9 @@ export const handler = schedule('0 * * * *', async () => {
     if (gamma) {
       const prices = parseOutcomePrices(gamma.outcomePrices);
       const outcomes = parseOutcomes(gamma.outcomes);
-      const maxPrice = Math.max(...prices);
+      const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-      if (gamma.closed && maxPrice >= 0.95) {
+      if (gamma.closed && prices.length > 0 && maxPrice >= 0.95) {
         const winIdx = prices.indexOf(maxPrice);
         winningOutcome = outcomes[winIdx] || null;
       } else if (gamma.closed && isPast) {
@@ -106,10 +106,12 @@ export const handler = schedule('0 * * * *', async () => {
     } else if (isPast) {
       // Fallback to DB prices
       const dbPrices = market.outcome_prices || [];
-      const maxP = Math.max(...dbPrices);
-      if (maxP >= 0.90) {
-        const winIdx = dbPrices.indexOf(maxP);
-        winningOutcome = market.outcomes?.[winIdx] || null;
+      if (dbPrices.length > 0) {
+        const maxP = Math.max(...dbPrices);
+        if (maxP >= 0.90) {
+          const winIdx = dbPrices.indexOf(maxP);
+          winningOutcome = market.outcomes?.[winIdx] || null;
+        }
       }
     }
 
@@ -128,8 +130,9 @@ export const handler = schedule('0 * * * *', async () => {
 
     // Resolve the bet
     const betWon = bet.outcome_label === winningOutcome;
+    const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
     const pnl = betWon
-      ? Math.round(bet.amount_usd * ((1.0 / bet.entry_price) - 1) * 100) / 100
+      ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;
 
     await supabase

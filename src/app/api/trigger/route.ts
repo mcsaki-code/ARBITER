@@ -21,23 +21,64 @@ interface GammaMarket {
   closed: boolean;
 }
 
+// ============================================================
+// Active US cities ONLY
+// ============================================================
 const CITY_KEYWORDS: Record<string, string[]> = {
   'New York City': ['new york', 'nyc', 'manhattan'],
   Chicago: ['chicago'],
   Miami: ['miami'],
   Seattle: ['seattle'],
   Denver: ['denver'],
-  'Los Angeles': ['los angeles', 'la ', 'l.a.'],
-  London: ['london'],
-  'Tel Aviv': ['tel aviv'],
-  Tokyo: ['tokyo'],
-  Paris: ['paris'],
+  'Los Angeles': ['los angeles', 'l.a.'],
   'Oklahoma City': ['oklahoma city', 'okc'],
   Omaha: ['omaha'],
   Minneapolis: ['minneapolis', 'twin cities'],
   Phoenix: ['phoenix'],
   Atlanta: ['atlanta'],
 };
+
+// ============================================================
+// Weather market filter — prevents sports/politics from entering DB
+// ============================================================
+const WEATHER_POSITIVE = [
+  'temperature', 'weather', '°f', '°c', 'degrees fahrenheit', 'degrees celsius',
+  'high temp', 'low temp', 'precipitation', 'rainfall', 'snowfall',
+  'hurricane', 'tropical storm', 'heat wave', 'cold snap', 'frost',
+  'wind chill', 'heat index', 'daily high', 'daily low',
+  'warmest', 'coldest', 'record high', 'record low',
+];
+
+const WEATHER_NEGATIVE = [
+  'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'premier league', 'champions league',
+  'world cup', 'ufc', 'mma', 'boxing', 'tennis', 'golf', 'f1', 'formula',
+  'election', 'president', 'congress', 'senate', 'democrat', 'republican',
+  'bitcoin', 'ethereum', 'crypto', 'stock', 'nasdaq', 's&p',
+  'touchdown', 'field goal', 'three-pointer', 'home run', 'strikeout',
+  'assists', 'rebounds', 'rushing', 'passing yards', 'sacks',
+  'points scored', 'total points', 'over under', 'spread',
+  'winner of', 'win the', 'championship', 'playoff', 'super bowl',
+  'world series', 'stanley cup', 'finals', 'mvp',
+  'oscar', 'emmy', 'grammy', 'box office',
+];
+
+function isWeatherMarket(question: string): boolean {
+  const q = question.toLowerCase();
+
+  for (const term of WEATHER_NEGATIVE) {
+    if (q.includes(term)) return false;
+  }
+
+  for (const term of WEATHER_POSITIVE) {
+    if (q.includes(term)) return true;
+  }
+
+  const degreesPattern = /\d+\s*°|above \d+|below \d+|over \d+|under \d+/;
+  const hasCityMention = Object.values(CITY_KEYWORDS).flat().some((kw) => q.includes(kw));
+  if (hasCityMention && degreesPattern.test(q)) return true;
+
+  return false;
+}
 
 async function safeFetchJson(url: string, timeoutMs = 6000): Promise<unknown[]> {
   try {
@@ -71,7 +112,7 @@ export async function GET() {
       return NextResponse.json({ success: false, log }, { status: 500 });
     }
 
-    log.push(`Found ${cities.length} cities`);
+    log.push(`Found ${cities.length} active cities`);
 
     // Process first 3 cities in parallel
     const weatherBatch = cities.slice(0, 3);
@@ -102,7 +143,7 @@ export async function GET() {
               const params = new URLSearchParams({
                 latitude: city.lat.toString(),
                 longitude: city.lon.toString(),
-                daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+                daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,rain_sum,snowfall_sum',
                 models: model.key,
                 forecast_days: '3',
                 temperature_unit: 'fahrenheit',
@@ -267,12 +308,12 @@ export async function GET() {
           'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=weather+high'
         ),
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees+fahrenheit'
         ),
       ]);
 
     log.push(
-      `  tag=temperature: ${tagTemp.length}, tag=weather: ${tagWeather.length}, search=temperature: ${searchTemp.length}, search=weather+high: ${searchWeatherHigh.length}, search=degrees: ${searchDegrees.length}`
+      `  tag=temperature: ${tagTemp.length}, tag=weather: ${tagWeather.length}, search=temperature: ${searchTemp.length}, search=weather+high: ${searchWeatherHigh.length}, search=degrees+fahrenheit: ${searchDegrees.length}`
     );
 
     // Deduplicate
@@ -295,9 +336,17 @@ export async function GET() {
 
     log.push(`  ${allMarkets.length} unique markets after dedup`);
 
+    // Weather filter
+    const weatherOnly = allMarkets.filter((m) => isWeatherMarket(m.question));
+    const rejected = allMarkets.length - weatherOnly.length;
+    if (rejected > 0) {
+      log.push(`  Filtered out ${rejected} non-weather markets`);
+    }
+    log.push(`  ${weatherOnly.length} weather markets to upsert`);
+
     // Upsert
     let upserted = 0;
-    for (const m of allMarkets) {
+    for (const m of weatherOnly) {
       try {
         let outcomes: string[];
         let outcomePrices: number[];
@@ -360,7 +409,7 @@ export async function GET() {
       }
     }
 
-    log.push(`  Upserted ${upserted} markets`);
+    log.push(`  Upserted ${upserted} weather markets`);
 
     const elapsed = Date.now() - startTime;
     log.push(`Done in ${elapsed}ms`);
@@ -371,7 +420,7 @@ export async function GET() {
         cities: weatherBatch.length,
         totalCities: cities.length,
         forecasts: totalForecasts,
-        marketsFound: allMarkets.length,
+        marketsFound: weatherOnly.length,
         marketsUpserted: upserted,
         durationMs: elapsed,
       },
