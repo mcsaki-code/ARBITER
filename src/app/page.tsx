@@ -7,10 +7,39 @@ import { BankrollCard } from '@/components/BankrollCard';
 import { EdgeMeter } from '@/components/EdgeMeter';
 import { CityWeatherCard } from '@/lib/types';
 
+interface CitySignal {
+  city_name: string;
+  city_id: string;
+  consensus_high_f: number | null;
+  model_spread_f: number | null;
+  agreement: string | null;
+  market_question: string | null;
+  market_outcomes: string[] | null;
+  market_prices: number[] | null;
+  best_outcome_label: string | null;
+  edge: number | null;
+  true_prob: number | null;
+  market_price: number | null;
+  direction: string | null;
+  confidence: string | null;
+  reasoning: string | null;
+  rec_bet_usd: number | null;
+  analyzed_at: string | null;
+  nws_high: number | null;
+  gfs_high: number | null;
+  ecmwf_high: number | null;
+  icon_high: number | null;
+  signal_type: 'edge' | 'near_miss' | 'pass' | 'no_market';
+}
+
 export default function HomePage() {
   const [weatherData, setWeatherData] = useState<CityWeatherCard[]>([]);
   const [config, setConfig] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [signals, setSignals] = useState<CitySignal[]>([]);
+  const [citySnapshots, setCitySnapshots] = useState<CitySignal[]>([]);
+  const [pipelineStatus, setPipelineStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [pipelineLog, setPipelineLog] = useState<string | null>(null);
   const [betsData, setBetsData] = useState<{ wins: number; losses: number; pnl: number }>({
     wins: 0,
     losses: 0,
@@ -20,9 +49,10 @@ export default function HomePage() {
   useEffect(() => {
     async function load() {
       try {
-        const [weatherRes, betsRes] = await Promise.all([
+        const [weatherRes, betsRes, signalsRes] = await Promise.all([
           fetch('/api/weather'),
           fetch('/api/bets'),
+          fetch('/api/signals'),
         ]);
 
         if (weatherRes.ok) {
@@ -40,6 +70,12 @@ export default function HomePage() {
             pnl: bets.reduce((sum: number, b: { pnl: number | null }) => sum + (b.pnl || 0), 0),
           });
         }
+
+        if (signalsRes.ok) {
+          const sData = await signalsRes.json();
+          setSignals(sData.signals || []);
+          setCitySnapshots(sData.citySnapshots || []);
+        }
       } catch (err) {
         console.error('Failed to load home data:', err);
       } finally {
@@ -48,6 +84,29 @@ export default function HomePage() {
     }
     load();
   }, []);
+
+  const runPipeline = async () => {
+    setPipelineStatus('running');
+    setPipelineLog(null);
+    try {
+      const res = await fetch('/api/trigger');
+      if (res.ok) {
+        const data = await res.json();
+        setPipelineStatus('done');
+        setPipelineLog(
+          `${data.summary.forecasts} forecasts, ${data.summary.marketsFound} markets found, ${data.summary.analyzed} analyzed (${data.summary.durationMs}ms)`
+        );
+        // Reload data
+        setTimeout(() => window.location.reload(), 1500);
+      } else {
+        setPipelineStatus('error');
+        setPipelineLog('Pipeline returned an error');
+      }
+    } catch {
+      setPipelineStatus('error');
+      setPipelineLog('Network error — check console');
+    }
+  };
 
   const bankroll = parseFloat(config.paper_bankroll || '500');
   const totalBets = betsData.wins + betsData.losses;
@@ -66,17 +125,22 @@ export default function HomePage() {
     return hours > 0 && hours < 24;
   });
 
+  // Cities with forecast data (even without markets)
+  const citiesWithData = citySnapshots.filter((s) => s.consensus_high_f !== null);
+
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left column — Intelligence placeholder */}
+        {/* Left column */}
         <div className="lg:col-span-2 space-y-4">
           {/* Hero status bar */}
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-2 h-2 bg-arbiter-green rounded-full pulse-dot" />
+              <div className={`w-2 h-2 rounded-full ${citiesWithData.length > 0 ? 'bg-arbiter-green pulse-dot' : 'bg-arbiter-text-3'}`} />
               <span className="text-sm text-arbiter-text-2">
-                Systems online — Weather pipeline active
+                {citiesWithData.length > 0
+                  ? `Systems online — ${citiesWithData.length} cities tracked`
+                  : 'Pipeline initializing — run manual sync below'}
               </span>
             </div>
             <span className="font-mono text-xs text-arbiter-text-3">
@@ -84,39 +148,100 @@ export default function HomePage() {
             </span>
           </div>
 
-          {/* Phase 2 placeholder */}
+          {/* Recent Signals — the 3 closest opportunities */}
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
-            <div className="border-b border-arbiter-border px-5 py-3">
+            <div className="border-b border-arbiter-border px-5 py-3 flex items-center justify-between">
               <h2 className="text-xs text-arbiter-text-3 uppercase tracking-widest">
-                Intelligence Feed
+                Recent Signals
               </h2>
+              <span className="text-[10px] text-arbiter-text-3 uppercase tracking-wider">
+                Last 24h
+              </span>
             </div>
-            <div className="p-8">
-              <div className="text-center max-w-sm mx-auto">
+            {loading ? (
+              <div className="p-5 space-y-4">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="skeleton h-20 rounded" />
+                ))}
+              </div>
+            ) : signals.length > 0 ? (
+              <div className="divide-y divide-arbiter-border/50">
+                {signals.map((signal) => (
+                  <SignalCard key={signal.city_id} signal={signal} />
+                ))}
+              </div>
+            ) : citiesWithData.length > 0 ? (
+              /* Show city forecast snapshots when we have weather data but no analyzed signals */
+              <div className="divide-y divide-arbiter-border/50">
+                {citiesWithData.slice(0, 3).map((snap) => (
+                  <div key={snap.city_id} className="px-5 py-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{snap.city_name}</span>
+                        {snap.agreement && (
+                          <Badge
+                            variant={snap.agreement === 'HIGH' ? 'green' : snap.agreement === 'MEDIUM' ? 'amber' : 'red'}
+                          >
+                            {snap.agreement}
+                          </Badge>
+                        )}
+                      </div>
+                      <span className="font-mono text-lg font-medium">
+                        {snap.consensus_high_f !== null ? `${snap.consensus_high_f}°F` : '—'}
+                      </span>
+                    </div>
+                    <div className="flex gap-4 text-[11px] text-arbiter-text-3 font-mono">
+                      {snap.gfs_high !== null && <span>GFS {snap.gfs_high}°</span>}
+                      {snap.ecmwf_high !== null && <span>ECMWF {snap.ecmwf_high}°</span>}
+                      {snap.icon_high !== null && <span>ICON {snap.icon_high}°</span>}
+                      {snap.nws_high !== null && <span>NWS {snap.nws_high}°</span>}
+                    </div>
+                    {snap.model_spread_f !== null && (
+                      <div className="mt-1.5 text-[10px] text-arbiter-text-3">
+                        Spread: {snap.model_spread_f}°F
+                        {!snap.market_question && (
+                          <span className="ml-2 text-arbiter-text-3/60">No active market matched</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="px-5 py-10 text-center">
                 <div className="w-10 h-10 rounded-lg bg-arbiter-elevated border border-arbiter-border flex items-center justify-center mx-auto mb-4">
                   <svg viewBox="0 0 20 20" fill="currentColor" width="20" height="20" className="text-arbiter-text-3">
-                    <path fillRule="evenodd" d="M2 5a2 2 0 012-2h8a2 2 0 012 2v10a2 2 0 002 2H4a2 2 0 01-2-2V5zm3 1h6v4H5V6zm6 6H5v2h6v-2z" clipRule="evenodd" />
-                    <path d="M15 7h1a2 2 0 012 2v5.5a1.5 1.5 0 01-3 0V7z" />
+                    <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
                   </svg>
                 </div>
-                <p className="text-sm text-arbiter-text-2 mb-4 leading-relaxed">
-                  Phase 2 adds real-time news intelligence from AP, Reuters, and BBC with AI-powered
-                  analysis and a CONFIRMED / DISPUTED / UNVERIFIED verdict system.
+                <p className="text-sm text-arbiter-text-2 mb-1">No data yet</p>
+                <p className="text-xs text-arbiter-text-3 mb-4">
+                  Run the pipeline to start ingesting weather forecasts and scanning markets
                 </p>
-                <div className="flex flex-wrap justify-center gap-2">
-                  {['Global Feed', 'AI Summaries', 'Hotspot Map', 'Ask ARBITER', 'News-Markets Link'].map(
-                    (feature) => (
-                      <span
-                        key={feature}
-                        className="px-2 py-1 text-[10px] uppercase tracking-wider text-arbiter-text-3 border border-arbiter-border rounded"
-                      >
-                        {feature}
-                      </span>
-                    )
-                  )}
-                </div>
+                <button
+                  onClick={runPipeline}
+                  disabled={pipelineStatus === 'running'}
+                  className={`px-5 py-2.5 rounded-lg text-xs font-medium tracking-wide uppercase transition-all ${
+                    pipelineStatus === 'running'
+                      ? 'bg-arbiter-elevated text-arbiter-text-3 cursor-wait'
+                      : pipelineStatus === 'done'
+                      ? 'bg-arbiter-green/20 text-arbiter-green border border-arbiter-green/30'
+                      : 'bg-arbiter-amber/20 text-arbiter-amber border border-arbiter-amber/30 hover:bg-arbiter-amber/30'
+                  }`}
+                >
+                  {pipelineStatus === 'running'
+                    ? 'Running pipeline...'
+                    : pipelineStatus === 'done'
+                    ? 'Complete — reloading'
+                    : 'Run Pipeline Now'}
+                </button>
+                {pipelineLog && (
+                  <p className={`text-[10px] mt-2 font-mono ${pipelineStatus === 'error' ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
+                    {pipelineLog}
+                  </p>
+                )}
               </div>
-            </div>
+            )}
           </div>
 
           {/* Quick nav cards */}
@@ -166,6 +291,35 @@ export default function HomePage() {
 
         {/* Right column — Edge Panel */}
         <div className="space-y-4">
+          {/* Pipeline trigger (compact, always visible in sidebar) */}
+          {citiesWithData.length > 0 && (
+            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs text-arbiter-text-3 uppercase tracking-widest">
+                  Pipeline
+                </h3>
+                <button
+                  onClick={runPipeline}
+                  disabled={pipelineStatus === 'running'}
+                  className={`px-3 py-1.5 rounded text-[10px] font-medium uppercase tracking-wider transition-all ${
+                    pipelineStatus === 'running'
+                      ? 'bg-arbiter-elevated text-arbiter-text-3 cursor-wait'
+                      : pipelineStatus === 'done'
+                      ? 'bg-arbiter-green/20 text-arbiter-green'
+                      : 'bg-arbiter-amber/15 text-arbiter-amber hover:bg-arbiter-amber/25'
+                  }`}
+                >
+                  {pipelineStatus === 'running' ? 'Running...' : pipelineStatus === 'done' ? 'Done' : 'Sync Now'}
+                </button>
+              </div>
+              {pipelineLog && (
+                <p className={`text-[10px] font-mono ${pipelineStatus === 'error' ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
+                  {pipelineLog}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Weather Edges */}
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
             <div className="px-4 py-3 border-b border-arbiter-border flex items-center justify-between">
@@ -208,17 +362,53 @@ export default function HomePage() {
                   </Link>
                 ))
               ) : (
-                <div className="px-4 py-8 text-center">
+                <div className="px-4 py-6 text-center">
                   <p className="text-xs text-arbiter-text-3">
                     No active edges detected
                   </p>
                   <p className="text-[10px] text-arbiter-text-3 mt-1">
-                    Pipeline scans every 15 min
+                    {citiesWithData.length > 0 ? 'Monitoring markets for mispricings' : 'Awaiting pipeline data'}
                   </p>
                 </div>
               )}
             </div>
           </div>
+
+          {/* City Forecast Grid (compact) */}
+          {citiesWithData.length > 0 && (
+            <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
+              <div className="px-4 py-3 border-b border-arbiter-border">
+                <h3 className="text-xs text-arbiter-text-3 uppercase tracking-widest">
+                  Forecast Snapshot
+                </h3>
+              </div>
+              <div className="divide-y divide-arbiter-border/50">
+                {citiesWithData.map((snap) => (
+                  <Link
+                    key={snap.city_id}
+                    href="/weather"
+                    className="flex items-center justify-between py-2.5 px-4 hover:bg-arbiter-elevated/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className={`w-1.5 h-1.5 rounded-full ${
+                        snap.agreement === 'HIGH' ? 'bg-arbiter-green' :
+                        snap.agreement === 'MEDIUM' ? 'bg-arbiter-amber' : 'bg-arbiter-red'
+                      }`} />
+                      <span className="text-xs text-arbiter-text-2">{snap.city_name}</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-xs">
+                        {snap.consensus_high_f}°F
+                      </span>
+                      <span className="font-mono text-[10px] text-arbiter-text-3">
+                        ±{snap.model_spread_f}°
+                      </span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Bankroll */}
           <BankrollCard
@@ -261,5 +451,95 @@ export default function HomePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ============================================================
+// Signal Card Component — shows analyzed opportunity details
+// ============================================================
+function SignalCard({ signal }: { signal: CitySignal }) {
+  const isEdge = signal.signal_type === 'edge';
+  const isNearMiss = signal.signal_type === 'near_miss';
+
+  return (
+    <Link
+      href="/weather"
+      className="block px-5 py-4 hover:bg-arbiter-elevated/50 transition-colors"
+    >
+      {/* Header row */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <div className={`w-2 h-2 rounded-full ${
+            isEdge ? 'bg-arbiter-amber' : isNearMiss ? 'bg-arbiter-text-3' : 'bg-arbiter-border'
+          }`} />
+          <span className="text-sm font-medium">{signal.city_name}</span>
+          {signal.agreement && (
+            <Badge
+              variant={signal.agreement === 'HIGH' ? 'green' : signal.agreement === 'MEDIUM' ? 'amber' : 'red'}
+            >
+              {signal.agreement}
+            </Badge>
+          )}
+        </div>
+        <div className="text-right">
+          {isEdge ? (
+            <Badge variant="amber">EDGE</Badge>
+          ) : isNearMiss ? (
+            <Badge variant="gray">NEAR MISS</Badge>
+          ) : (
+            <Badge variant="gray">PASS</Badge>
+          )}
+        </div>
+      </div>
+
+      {/* Forecast row */}
+      <div className="flex items-baseline gap-4 mb-2">
+        <span className="font-mono text-xl font-medium">
+          {signal.consensus_high_f !== null ? `${signal.consensus_high_f}°F` : '—'}
+        </span>
+        <div className="flex gap-3 text-[10px] text-arbiter-text-3 font-mono">
+          {signal.gfs_high !== null && <span>GFS {signal.gfs_high}°</span>}
+          {signal.ecmwf_high !== null && <span>ECM {signal.ecmwf_high}°</span>}
+          {signal.icon_high !== null && <span>ICN {signal.icon_high}°</span>}
+          {signal.nws_high !== null && <span>NWS {signal.nws_high}°</span>}
+        </div>
+      </div>
+
+      {/* Edge details */}
+      {signal.edge !== null && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-arbiter-text-3">{signal.best_outcome_label}</span>
+            {signal.market_price !== null && (
+              <span className="font-mono text-arbiter-text-3">
+                mkt ${signal.market_price.toFixed(2)}
+              </span>
+            )}
+            {signal.true_prob !== null && (
+              <span className="font-mono text-arbiter-text-2">
+                est {(signal.true_prob * 100).toFixed(0)}%
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {signal.edge > 0 && (
+              <EdgeMeter edge={signal.edge} className="w-16" />
+            )}
+            {signal.rec_bet_usd !== null && signal.rec_bet_usd > 0 && (
+              <span className="font-mono text-[10px] text-arbiter-amber">
+                ${signal.rec_bet_usd.toFixed(0)}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Reasoning snippet */}
+      {signal.reasoning && (
+        <p className="text-[10px] text-arbiter-text-3 mt-2 leading-relaxed line-clamp-2">
+          {signal.reasoning}
+        </p>
+      )}
+    </Link>
   );
 }

@@ -23,6 +23,13 @@ interface GammaMarket {
   closed: boolean;
 }
 
+interface GammaEvent {
+  id: string;
+  title: string;
+  slug: string;
+  markets: GammaMarket[];
+}
+
 // City keyword matching
 const CITY_KEYWORDS: Record<string, string[]> = {
   'New York City': ['new york', 'nyc', 'manhattan'],
@@ -36,6 +43,21 @@ const CITY_KEYWORDS: Record<string, string[]> = {
   Tokyo: ['tokyo'],
   Paris: ['paris'],
 };
+
+async function fetchGamma(url: string): Promise<unknown[]> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!res.ok) {
+      console.log(`[refresh-markets] ${url} returned ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (err) {
+    console.error(`[refresh-markets] Fetch error: ${url}`, err);
+    return [];
+  }
+}
 
 export const handler = schedule('*/30 * * * *', async () => {
   console.log('[refresh-markets] Starting market refresh');
@@ -64,30 +86,63 @@ export const handler = schedule('*/30 * * * *', async () => {
     return null;
   }
 
-  // Fetch from Gamma API
-  const markets: GammaMarket[] = [];
-  for (const tag of ['temperature', 'weather']) {
-    try {
-      const res = await fetch(
-        `https://gamma-api.polymarket.com/markets?tag=${tag}&active=true&limit=100`,
-        { signal: AbortSignal.timeout(10000) }
-      );
-      if (!res.ok) continue;
-      const data: GammaMarket[] = await res.json();
-      for (const m of data) {
-        if (!markets.some((e) => e.conditionId === m.conditionId)) {
-          markets.push(m);
-        }
-      }
-    } catch (err) {
-      console.error(`[refresh-markets] Fetch error for tag=${tag}:`, err);
+  // ======== MULTI-STRATEGY SEARCH ========
+  // Strategy 1: Tag-based search (markets endpoint)
+  // Strategy 2: Text search on markets
+  // Strategy 3: Events endpoint with tag
+  // Strategy 4: Events endpoint with text search
+  // Strategy 5: Broader keyword search
+
+  const allMarkets: GammaMarket[] = [];
+  const seenIds = new Set<string>();
+
+  function addMarket(m: GammaMarket) {
+    if (!seenIds.has(m.conditionId)) {
+      seenIds.add(m.conditionId);
+      allMarkets.push(m);
     }
   }
 
-  console.log(`[refresh-markets] Found ${markets.length} markets`);
+  // Strategy 1 & 2: Direct market search with tags and text
+  const marketSearches = [
+    'https://gamma-api.polymarket.com/markets?tag=temperature&active=true&closed=false&limit=100',
+    'https://gamma-api.polymarket.com/markets?tag=weather&active=true&closed=false&limit=100',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=weather+high',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees',
+  ];
+
+  for (const url of marketSearches) {
+    const results = (await fetchGamma(url)) as GammaMarket[];
+    for (const m of results) {
+      if (m.conditionId && m.question) addMarket(m);
+    }
+  }
+
+  // Strategy 3 & 4: Events endpoint
+  const eventSearches = [
+    'https://gamma-api.polymarket.com/events?tag=temperature&active=true&closed=false&limit=50',
+    'https://gamma-api.polymarket.com/events?tag=weather&active=true&closed=false&limit=50',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=weather+high',
+  ];
+
+  for (const url of eventSearches) {
+    const events = (await fetchGamma(url)) as GammaEvent[];
+    for (const event of events) {
+      if (event.markets && Array.isArray(event.markets)) {
+        for (const m of event.markets) {
+          if (m.conditionId && m.question) addMarket(m);
+        }
+      }
+    }
+  }
+
+  console.log(`[refresh-markets] Found ${allMarkets.length} markets across all strategies`);
 
   // Upsert each market
-  for (const m of markets) {
+  let upserted = 0;
+  for (const m of allMarkets) {
     try {
       let outcomes: string[];
       let outcomePrices: number[];
@@ -95,22 +150,26 @@ export const handler = schedule('*/30 * * * *', async () => {
       try {
         outcomes = JSON.parse(m.outcomes);
       } catch {
-        outcomes = m.outcomes.split(',').map((s: string) => s.trim());
+        outcomes = m.outcomes?.split(',').map((s: string) => s.trim()) || ['Yes', 'No'];
       }
 
       try {
         outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p));
       } catch {
-        outcomePrices = m.outcomePrices.split(',').map((s: string) => parseFloat(s.trim()));
+        outcomePrices = m.outcomePrices?.split(',').map((s: string) => parseFloat(s.trim())) || [0.5, 0.5];
       }
 
       const cityId = matchCity(m.question);
+      const q = m.question.toLowerCase();
+      const category = q.includes('temperature') || q.includes('°f') || q.includes('°c') || q.includes('degrees')
+        ? 'temperature'
+        : 'weather';
 
-      await supabase.from('markets').upsert(
+      const { error } = await supabase.from('markets').upsert(
         {
           condition_id: m.conditionId,
           question: m.question,
-          category: m.question.toLowerCase().includes('temperature') ? 'temperature' : 'weather',
+          category,
           city_id: cityId,
           outcomes,
           outcome_prices: outcomePrices,
@@ -122,18 +181,21 @@ export const handler = schedule('*/30 * * * *', async () => {
         },
         { onConflict: 'condition_id' }
       );
+
+      if (!error) upserted++;
+      else console.error(`[refresh-markets] Upsert error for ${m.conditionId}:`, error.message);
     } catch (err) {
       console.error(`[refresh-markets] Error processing ${m.conditionId}:`, err);
     }
   }
 
-  // Mark old markets as inactive
+  // Mark old markets as inactive (not updated in last 2 hours)
   await supabase
     .from('markets')
     .update({ is_active: false })
-    .lt('updated_at', new Date(Date.now() - 3600000).toISOString())
+    .lt('updated_at', new Date(Date.now() - 7200000).toISOString())
     .eq('is_active', true);
 
-  console.log('[refresh-markets] Done');
+  console.log(`[refresh-markets] Done. Upserted ${upserted} markets`);
   return { statusCode: 200 };
 });
