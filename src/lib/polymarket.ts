@@ -44,6 +44,11 @@ const CITY_KEYWORDS: Record<string, string[]> = {
   'Tel Aviv': ['tel aviv'],
   'Tokyo': ['tokyo'],
   'Paris': ['paris'],
+  'Oklahoma City': ['oklahoma city', 'okc'],
+  'Omaha': ['omaha'],
+  'Minneapolis': ['minneapolis', 'twin cities'],
+  'Phoenix': ['phoenix'],
+  'Atlanta': ['atlanta'],
 };
 
 export function matchCityToMarket(

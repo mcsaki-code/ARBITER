@@ -62,7 +62,7 @@ export async function GET(request: Request) {
               const params = new URLSearchParams({
                 latitude: city.lat.toString(),
                 longitude: city.lon.toString(),
-                daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+                daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,rain_sum,snowfall_sum',
                 models: model.key,
                 forecast_days: '3',
                 temperature_unit: 'fahrenheit',

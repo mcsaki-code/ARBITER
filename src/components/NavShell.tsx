@@ -49,7 +49,7 @@ const NAV_ITEMS = [
   { href: '/', label: 'Home', Icon: IconHome },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
   { href: '/news', label: 'News', Icon: IconNews, disabled: true },
-  { href: '/markets', label: 'Markets', Icon: IconMarkets, disabled: true },
+  { href: '/markets', label: 'Markets', Icon: IconMarkets },
   { href: '/tracker', label: 'Tracker', Icon: IconTracker },
 ];
 
