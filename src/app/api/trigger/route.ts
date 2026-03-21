@@ -148,14 +148,15 @@ export async function GET() {
     const supabase = getSupabaseAdmin();
     const startTime = Date.now();
 
-    // ======== STEP 1: Ingest Weather (parallel, 3 cities max) ========
-    log.push('STEP 1: Weather ingestion');
+    // ======== STEP 1: Get cities from DB ========
+    // Weather ingestion is handled by ingest-weather.ts (every 15 min).
+    // This trigger focuses on market discovery + upsert to stay within 10s.
+    log.push('STEP 1: Loading cities');
 
     const { data: cities, error: citiesErr } = await supabase
       .from('weather_cities')
       .select('*')
-      .eq('is_active', true)
-      .limit(10);
+      .eq('is_active', true);
 
     if (citiesErr || !cities) {
       log.push(`ERROR fetching cities: ${citiesErr?.message || 'no data'}`);
@@ -163,172 +164,10 @@ export async function GET() {
     }
 
     log.push(`Found ${cities.length} active cities`);
-
-    // Process first 3 cities in parallel
-    const weatherBatch = cities.slice(0, 3);
-    let totalForecasts = 0;
-
-    const weatherResults = await Promise.all(
-      weatherBatch.map(async (city) => {
-        const forecasts: {
-          city_id: string;
-          valid_date: string;
-          source: string;
-          temp_high_f: number;
-          temp_low_f: number;
-          precip_prob: number;
-          conditions: string;
-        }[] = [];
-
-        // Fetch all 3 Open-Meteo models in parallel
-        const models = [
-          { key: 'gfs_seamless', name: 'gfs' },
-          { key: 'ecmwf_ifs025', name: 'ecmwf' },
-          { key: 'icon_global', name: 'icon' },
-        ];
-
-        const modelResults = await Promise.all(
-          models.map(async (model) => {
-            try {
-              const params = new URLSearchParams({
-                latitude: city.lat.toString(),
-                longitude: city.lon.toString(),
-                daily: 'temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,rain_sum,snowfall_sum',
-                models: model.key,
-                forecast_days: '3',
-                temperature_unit: 'fahrenheit',
-                timezone: 'auto',
-              });
-
-              const res = await fetch(
-                `https://api.open-meteo.com/v1/forecast?${params}`,
-                { signal: AbortSignal.timeout(5000) }
-              );
-
-              if (!res.ok) return [];
-              const data = await res.json();
-              const daily = data.daily;
-              if (!daily?.time) return [];
-
-              const results = [];
-              for (let i = 0; i < daily.time.length; i++) {
-                results.push({
-                  city_id: city.id,
-                  valid_date: daily.time[i],
-                  source: model.name,
-                  temp_high_f: Math.round(daily.temperature_2m_max[i]),
-                  temp_low_f: Math.round(daily.temperature_2m_min[i]),
-                  precip_prob: daily.precipitation_probability_max?.[i] ?? 0,
-                  conditions: `${model.key} forecast`,
-                });
-              }
-              return results;
-            } catch {
-              return [];
-            }
-          })
-        );
-
-        for (const r of modelResults) forecasts.push(...r);
-
-        // NWS (US only, non-blocking)
-        if (city.nws_office && city.nws_grid_x && city.nws_grid_y) {
-          try {
-            const url = `https://api.weather.gov/gridpoints/${city.nws_office}/${city.nws_grid_x},${city.nws_grid_y}/forecast/hourly`;
-            const res = await fetch(url, {
-              headers: {
-                'User-Agent': 'ARBITER-Weather-Edge (contact@arbiter.app)',
-                Accept: 'application/geo+json',
-              },
-              signal: AbortSignal.timeout(4000),
-            });
-
-            if (res.ok) {
-              const data = await res.json();
-              const periods = data.properties?.periods || [];
-              const byDate = new Map<string, number[]>();
-
-              for (const p of periods) {
-                const date = p.startTime.split('T')[0];
-                if (!byDate.has(date)) byDate.set(date, []);
-                const temp =
-                  p.temperatureUnit === 'F'
-                    ? p.temperature
-                    : (p.temperature * 9) / 5 + 32;
-                byDate.get(date)!.push(temp);
-              }
-
-              let count = 0;
-              for (const [date, temps] of byDate) {
-                if (count >= 3) break;
-                forecasts.push({
-                  city_id: city.id,
-                  valid_date: date,
-                  source: 'nws',
-                  temp_high_f: Math.round(Math.max(...temps)),
-                  temp_low_f: Math.round(Math.min(...temps)),
-                  precip_prob: 0,
-                  conditions: 'NWS forecast',
-                });
-                count++;
-              }
-            }
-          } catch {
-            // NWS timeout — not critical
-          }
-        }
-
-        return { city: city.name, forecasts };
-      })
-    );
-
-    // Insert all forecasts + compute consensus
-    for (const result of weatherResults) {
-      if (result.forecasts.length > 0) {
-        const { error: insertErr } = await supabase
-          .from('weather_forecasts')
-          .insert(result.forecasts);
-
-        if (insertErr) {
-          log.push(`  ${result.city}: insert error — ${insertErr.message}`);
-        } else {
-          totalForecasts += result.forecasts.length;
-          log.push(`  ${result.city}: ${result.forecasts.length} forecasts`);
-        }
-
-        // Consensus per date
-        const dates = [...new Set(result.forecasts.map((f) => f.valid_date))];
-        for (const date of dates) {
-          const dayF = result.forecasts.filter((f) => f.valid_date === date);
-          if (dayF.length < 2) continue;
-
-          const highs = dayF.map((f) => f.temp_high_f);
-          const sources = dayF.map((f) => f.source);
-          const spread = Math.max(...highs) - Math.min(...highs);
-          const avg = highs.reduce((a, b) => a + b, 0) / highs.length;
-          const agreement =
-            spread <= 2 ? 'HIGH' : spread <= 5 ? 'MEDIUM' : 'LOW';
-
-          await supabase.from('weather_consensus').insert({
-            city_id: result.forecasts[0].city_id,
-            valid_date: date,
-            consensus_high_f: Math.round(avg),
-            model_spread_f: Math.round(spread * 10) / 10,
-            agreement,
-            models_used: sources,
-          });
-        }
-      } else {
-        log.push(`  ${result.city}: no forecasts returned`);
-      }
-    }
-
-    log.push(`Total: ${totalForecasts} forecasts ingested`);
-
-    // ======== STEP 2: Market Search via tag_id (lightweight for 10s limit) ========
-    // Heavy pagination is done by refresh-markets.ts (25s limit, runs every 30 min).
-    // This trigger just does a quick single-page fetch for immediate feedback.
-    log.push('STEP 2: Market search (lightweight)');
+    // ======== STEP 2: Market Search via tag_id ========
+    // Weather ingestion is handled by scheduled functions (ingest-weather.ts every 15 min).
+    // This trigger ONLY refreshes markets to stay within Netlify's 10s limit.
+    log.push('STEP 2: Market search');
 
     const cityLookup = new Map<string, string>();
     for (const city of cities) {
@@ -444,11 +283,12 @@ export async function GET() {
     return NextResponse.json({
       success: true,
       summary: {
-        cities: weatherBatch.length,
         totalCities: cities.length,
-        forecasts: totalForecasts,
-        marketsFound: weatherOnly.length,
+        tagId: tagId ?? null,
+        marketsFound: allMarkets.length,
+        weatherMarketsFiltered: weatherOnly.length,
         marketsUpserted: upserted,
+        cityMatched,
         durationMs: elapsed,
       },
       log,
