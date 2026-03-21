@@ -53,6 +53,7 @@ const CITY_TERMS = [
   'new york', 'nyc', 'manhattan', 'chicago', 'miami', 'seattle', 'denver',
   'los angeles', 'l.a.', 'oklahoma city', 'okc', 'omaha',
   'minneapolis', 'twin cities', 'phoenix', 'atlanta',
+  'london', 'tel aviv', 'tokyo', 'paris', 'toronto', 'seoul',
 ];
 
 function isWeatherMarket(m: Market): boolean {
@@ -191,8 +192,8 @@ export default function MarketsPage() {
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4 mb-4">
             <p className="text-sm text-arbiter-text-2">
               {data?.markets?.length} total Polymarket contracts found, but none match weather/temperature criteria.
-              Temperature markets on Polymarket are typically daily high-temperature bracket bets for major US cities.
-              These appear most frequently on weekdays and resolve using NWS data.
+              Temperature markets on Polymarket are daily high-temperature bracket bets for major cities worldwide.
+              These appear most frequently on weekdays and resolve using official weather data.
             </p>
           </div>
         )}

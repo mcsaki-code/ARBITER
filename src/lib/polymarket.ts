@@ -33,10 +33,12 @@ export interface ParsedMarket {
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
 
 // ============================================================
-// Active US cities ONLY — must match Supabase weather_cities
-// Removed: London, Tel Aviv, Tokyo, Paris (no NWS, no Polymarket markets)
+// All tracked cities — must match Supabase weather_cities
+// Includes international cities that have active Polymarket markets
+// (they use Open-Meteo GFS/ECMWF/ICON even without NWS)
 // ============================================================
 const CITY_KEYWORDS: Record<string, string[]> = {
+  // US cities (NWS + Open-Meteo)
   'New York City': ['new york', 'nyc', 'manhattan'],
   'Chicago': ['chicago'],
   'Miami': ['miami'],
@@ -48,6 +50,13 @@ const CITY_KEYWORDS: Record<string, string[]> = {
   'Minneapolis': ['minneapolis', 'twin cities'],
   'Phoenix': ['phoenix'],
   'Atlanta': ['atlanta'],
+  // International cities (Open-Meteo only, but have Polymarket markets)
+  'London': ['london'],
+  'Tel Aviv': ['tel aviv'],
+  'Tokyo': ['tokyo'],
+  'Paris': ['paris'],
+  'Toronto': ['toronto'],
+  'Seoul': ['seoul'],
 };
 
 // ============================================================

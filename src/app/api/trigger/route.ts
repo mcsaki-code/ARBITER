@@ -22,7 +22,7 @@ interface GammaMarket {
 }
 
 // ============================================================
-// Active US cities ONLY
+// All tracked cities (US + international with Polymarket markets)
 // ============================================================
 const CITY_KEYWORDS: Record<string, string[]> = {
   'New York City': ['new york', 'nyc', 'manhattan'],
@@ -36,6 +36,12 @@ const CITY_KEYWORDS: Record<string, string[]> = {
   Minneapolis: ['minneapolis', 'twin cities'],
   Phoenix: ['phoenix'],
   Atlanta: ['atlanta'],
+  London: ['london'],
+  'Tel Aviv': ['tel aviv'],
+  Tokyo: ['tokyo'],
+  Paris: ['paris'],
+  Toronto: ['toronto'],
+  Seoul: ['seoul'],
 };
 
 // ============================================================
