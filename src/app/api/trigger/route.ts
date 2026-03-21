@@ -325,8 +325,10 @@ export async function GET() {
 
     log.push(`Total: ${totalForecasts} forecasts ingested`);
 
-    // ======== STEP 2: Market Search via tag_id (correct Gamma API approach) ========
-    log.push('STEP 2: Market search');
+    // ======== STEP 2: Market Search via tag_id (lightweight for 10s limit) ========
+    // Heavy pagination is done by refresh-markets.ts (25s limit, runs every 30 min).
+    // This trigger just does a quick single-page fetch for immediate feedback.
+    log.push('STEP 2: Market search (lightweight)');
 
     const cityLookup = new Map<string, string>();
     for (const city of cities) {
@@ -352,102 +354,47 @@ export async function GET() {
       }
     }
 
-    // Helper: extract markets from events array
-    function extractMarketsFromEvents(data: unknown) {
-      if (!Array.isArray(data)) return 0;
-      let count = 0;
-      for (const event of data as { markets?: GammaMarket[] }[]) {
+    // Single parallel batch: tag lookup + first page of events + first page of markets
+    const [tempTag, eventsPage, marketsPage] = await Promise.all([
+      safeFetchJson('https://gamma-api.polymarket.com/tags/slug/temperature'),
+      safeFetchJson('https://gamma-api.polymarket.com/events?tag_slug=temperature&active=true&closed=false&limit=100&offset=0'),
+      safeFetchJson('https://gamma-api.polymarket.com/markets?tag_slug=temperature&active=true&closed=false&limit=100&offset=0'),
+    ]);
+
+    const tagId = (tempTag as { id?: number } | null)?.id;
+    log.push(`  Tag "temperature" → id ${tagId ?? 'not found'}`);
+
+    // Extract from events (events have nested markets arrays)
+    if (Array.isArray(eventsPage)) {
+      for (const event of eventsPage as { markets?: GammaMarket[] }[]) {
         if (event.markets && Array.isArray(event.markets)) {
-          for (const m of event.markets) { addMarket(m); count++; }
+          for (const m of event.markets) addMarket(m);
         }
       }
-      return count;
+      log.push(`  Events page: ${eventsPage.length} events`);
     }
 
-    // Helper: extract markets from markets array
-    function extractMarkets(data: unknown) {
-      if (!Array.isArray(data)) return 0;
-      let count = 0;
-      for (const m of data as GammaMarket[]) { addMarket(m); count++; }
-      return count;
+    // Extract from markets directly
+    if (Array.isArray(marketsPage)) {
+      for (const m of marketsPage as GammaMarket[]) addMarket(m);
     }
 
-    // ---- Strategy 1 (PRIMARY): Look up tag_id, then paginate events ----
-    // Per Polymarket docs, tag_slug is a PATH param for /tags/slug/{slug},
-    // while tag_id is the QUERY param for /events and /markets endpoints.
-    const tagSlugs = ['temperature', 'weather', 'climate'];
-    const tagIds: number[] = [];
-
-    // Resolve all tag slugs to IDs in parallel
-    const tagLookups = await Promise.all(
-      tagSlugs.map((slug) =>
-        safeFetchJson(`https://gamma-api.polymarket.com/tags/slug/${slug}`)
-      )
-    );
-
-    for (let i = 0; i < tagSlugs.length; i++) {
-      const tag = tagLookups[i] as { id?: number } | null;
-      if (tag?.id) {
-        tagIds.push(tag.id);
-        log.push(`  Tag "${tagSlugs[i]}" → id ${tag.id}`);
-      } else {
-        log.push(`  Tag "${tagSlugs[i]}" → not found`);
+    // If we got the tag_id, also fetch one page via tag_id (most reliable)
+    if (tagId) {
+      const tagEventsPage = await safeFetchJson(
+        `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=0`
+      );
+      if (Array.isArray(tagEventsPage)) {
+        for (const event of tagEventsPage as { markets?: GammaMarket[] }[]) {
+          if (event.markets && Array.isArray(event.markets)) {
+            for (const m of event.markets) addMarket(m);
+          }
+        }
+        log.push(`  tag_id=${tagId} events: ${tagEventsPage.length}`);
       }
     }
 
-    // For each tag_id, paginate through events (3 pages of 100 in parallel)
-    for (const tagId of tagIds) {
-      const [page1, page2, page3] = await Promise.all([
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=0`
-        ),
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=100`
-        ),
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=200`
-        ),
-      ]);
-
-      const c1 = extractMarketsFromEvents(page1);
-      const c2 = extractMarketsFromEvents(page2);
-      const c3 = extractMarketsFromEvents(page3);
-      log.push(`  tag_id=${tagId} events: ${c1 + c2 + c3} markets from ${[page1, page2, page3].filter(Array.isArray).reduce((s, p) => s + p.length, 0)} events`);
-    }
-
-    // Also fetch markets directly by tag_id (some markets may not be nested in events)
-    for (const tagId of tagIds) {
-      const [mp1, mp2, mp3] = await Promise.all([
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/markets?tag_id=${tagId}&active=true&closed=false&limit=100&offset=0`
-        ),
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/markets?tag_id=${tagId}&active=true&closed=false&limit=100&offset=100`
-        ),
-        safeFetchJson(
-          `https://gamma-api.polymarket.com/markets?tag_id=${tagId}&active=true&closed=false&limit=100&offset=200`
-        ),
-      ]);
-
-      extractMarkets(mp1);
-      extractMarkets(mp2);
-      extractMarkets(mp3);
-    }
-
-    // ---- Strategy 2 (FALLBACK): Dedicated /search endpoint with keyword ----
-    // The Gamma API has a separate GET /search?keyword=xxx endpoint
-    const searchData = await safeFetchJson(
-      'https://gamma-api.polymarket.com/search?keyword=temperature&limit=100'
-    ) as { markets?: GammaMarket[]; events?: { markets?: GammaMarket[] }[] } | null;
-
-    if (searchData?.markets) {
-      for (const m of searchData.markets) addMarket(m);
-    }
-    if (searchData?.events) {
-      extractMarketsFromEvents(searchData.events);
-    }
-
-    log.push(`  ${allMarkets.length} unique markets after dedup (${seenIds.size} IDs)`);
+    log.push(`  ${allMarkets.length} unique markets after dedup`);
 
     // Weather filter
     const weatherOnly = allMarkets.filter((m) => isWeatherMarket(m.question));
