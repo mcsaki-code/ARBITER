@@ -104,15 +104,12 @@ export function NavShell({ children }: { children: React.ReactNode }) {
             return (
               <Link
                 key={item.href}
-                href={item.disabled ? '#' : item.href}
+                href={item.href}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all duration-150 ${
-                  item.disabled
-                    ? 'text-arbiter-text-3 cursor-not-allowed opacity-40'
-                    : isActive
+                  isActive
                     ? 'bg-arbiter-elevated text-arbiter-text border border-arbiter-border'
                     : 'text-arbiter-text-2 hover:text-arbiter-text hover:bg-arbiter-card'
                 }`}
-                onClick={(e) => item.disabled && e.preventDefault()}
               >
                 <item.Icon className={isActive ? 'text-arbiter-amber' : ''} />
                 {item.label}
@@ -145,15 +142,12 @@ export function NavShell({ children }: { children: React.ReactNode }) {
           return (
             <Link
               key={item.href}
-              href={item.disabled ? '#' : item.href}
+              href={item.href}
               className={`flex flex-col items-center py-2 px-3 min-h-[44px] min-w-[44px] transition-all duration-150 ${
-                item.disabled
-                  ? 'text-arbiter-text-3 opacity-30'
-                  : isActive
+                isActive
                   ? 'text-arbiter-amber'
                   : 'text-arbiter-text-3 hover:text-arbiter-text-2'
               }`}
-              onClick={(e) => item.disabled && e.preventDefault()}
             >
               <item.Icon />
               <span className={`text-[10px] mt-1 tracking-wide ${isActive ? 'font-medium' : ''}`}>
