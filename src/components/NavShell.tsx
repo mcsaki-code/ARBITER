@@ -45,11 +45,37 @@ function IconTracker({ className = '' }: { className?: string }) {
   );
 }
 
+function IconArb({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function IconSports({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function IconCrypto({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm1 4.5V5a1 1 0 10-2 0v1.5A2.5 2.5 0 007.5 9a2.5 2.5 0 002.5 2.5V14a1 1 0 01-1 1H8a1 1 0 100 2h1a1 1 0 001-1v-.5A2.5 2.5 0 0012.5 13a2.5 2.5 0 00-2.5-2.5V8a1 1 0 011-1h1a1 1 0 100-2h-1z" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS = [
   { href: '/', label: 'Home', Icon: IconHome },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
-  { href: '/news', label: 'News', Icon: IconNews, disabled: true },
   { href: '/markets', label: 'Markets', Icon: IconMarkets },
+  { href: '/arb', label: 'Arb', Icon: IconArb },
+  { href: '/sports', label: 'Sports', Icon: IconSports },
+  { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/tracker', label: 'Tracker', Icon: IconTracker },
 ];
 
@@ -105,7 +131,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
           </span>
         </Link>
         <span className="text-[10px] text-arbiter-text-3 tracking-widest uppercase">
-          Phase 1
+          Phase 2
         </span>
       </header>
 
