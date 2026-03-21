@@ -354,44 +354,31 @@ export async function GET() {
       }
     }
 
-    // Single parallel batch: tag lookup + first page of events + first page of markets
-    const [tempTag, eventsPage, marketsPage] = await Promise.all([
-      safeFetchJson('https://gamma-api.polymarket.com/tags/slug/temperature'),
-      safeFetchJson('https://gamma-api.polymarket.com/events?tag_slug=temperature&active=true&closed=false&limit=100&offset=0'),
-      safeFetchJson('https://gamma-api.polymarket.com/markets?tag_slug=temperature&active=true&closed=false&limit=100&offset=0'),
-    ]);
+    // Step A: Get the tag_id for "temperature" (fast single call)
+    const tempTag = await safeFetchJson(
+      'https://gamma-api.polymarket.com/tags/slug/temperature'
+    ) as { id?: number } | null;
 
-    const tagId = (tempTag as { id?: number } | null)?.id;
-    log.push(`  Tag "temperature" → id ${tagId ?? 'not found'}`);
+    const tagId = tempTag?.id;
+    log.push(`  Tag "temperature" → id ${tagId ?? 'NOT FOUND'}`);
 
-    // Extract from events (events have nested markets arrays)
-    if (Array.isArray(eventsPage)) {
-      for (const event of eventsPage as { markets?: GammaMarket[] }[]) {
-        if (event.markets && Array.isArray(event.markets)) {
-          for (const m of event.markets) addMarket(m);
-        }
-      }
-      log.push(`  Events page: ${eventsPage.length} events`);
-    }
-
-    // Extract from markets directly
-    if (Array.isArray(marketsPage)) {
-      for (const m of marketsPage as GammaMarket[]) addMarket(m);
-    }
-
-    // If we got the tag_id, also fetch one page via tag_id (most reliable)
     if (tagId) {
-      const tagEventsPage = await safeFetchJson(
+      // Step B: Fetch first page of events by tag_id (the ONLY reliable filter)
+      const eventsPage = await safeFetchJson(
         `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=0`
       );
-      if (Array.isArray(tagEventsPage)) {
-        for (const event of tagEventsPage as { markets?: GammaMarket[] }[]) {
+      if (Array.isArray(eventsPage)) {
+        for (const event of eventsPage as { markets?: GammaMarket[] }[]) {
           if (event.markets && Array.isArray(event.markets)) {
             for (const m of event.markets) addMarket(m);
           }
         }
-        log.push(`  tag_id=${tagId} events: ${tagEventsPage.length}`);
+        log.push(`  Events: ${eventsPage.length} → ${allMarkets.length} markets`);
+      } else {
+        log.push(`  Events endpoint returned non-array`);
       }
+    } else {
+      log.push('  SKIPPING market fetch — no tag_id found');
     }
 
     log.push(`  ${allMarkets.length} unique markets after dedup`);
@@ -404,72 +391,52 @@ export async function GET() {
     }
     log.push(`  ${weatherOnly.length} weather markets to upsert`);
 
-    // Upsert
+    // Batch upsert (single DB call instead of 165+ sequential calls)
+    const upsertRows = weatherOnly.map((m) => {
+      let outcomes: string[];
+      let outcomePrices: number[];
+
+      try { outcomes = JSON.parse(m.outcomes); }
+      catch { outcomes = m.outcomes?.split(',').map((s) => s.trim()) || ['Yes', 'No']; }
+
+      try { outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p)); }
+      catch { outcomePrices = m.outcomePrices?.split(',').map((s) => parseFloat(s.trim())) || [0.5, 0.5]; }
+
+      const cityId = matchCity(m.question);
+      const q = m.question.toLowerCase();
+      const category = (q.includes('temperature') || q.includes('°f') || q.includes('°c') || q.includes('degrees'))
+        ? 'temperature' : 'weather';
+
+      return {
+        condition_id: m.conditionId,
+        question: m.question,
+        category,
+        city_id: cityId,
+        outcomes,
+        outcome_prices: outcomePrices,
+        volume_usd: parseFloat(m.volume) || 0,
+        liquidity_usd: parseFloat(m.liquidity) || 0,
+        resolution_date: m.endDate,
+        is_active: m.active && !m.closed,
+        updated_at: new Date().toISOString(),
+      };
+    });
+
     let upserted = 0;
-    for (const m of weatherOnly) {
-      try {
-        let outcomes: string[];
-        let outcomePrices: number[];
+    if (upsertRows.length > 0) {
+      const { error, count } = await supabase
+        .from('markets')
+        .upsert(upsertRows, { onConflict: 'condition_id', count: 'exact' });
 
-        try {
-          outcomes = JSON.parse(m.outcomes);
-        } catch {
-          outcomes = m.outcomes?.split(',').map((s) => s.trim()) || [
-            'Yes',
-            'No',
-          ];
-        }
-
-        try {
-          outcomePrices = JSON.parse(m.outcomePrices).map((p: string) =>
-            parseFloat(p)
-          );
-        } catch {
-          outcomePrices = m.outcomePrices
-            ?.split(',')
-            .map((s) => parseFloat(s.trim())) || [0.5, 0.5];
-        }
-
-        const cityId = matchCity(m.question);
-        const q = m.question.toLowerCase();
-        const category =
-          q.includes('temperature') ||
-          q.includes('°f') ||
-          q.includes('°c') ||
-          q.includes('degrees')
-            ? 'temperature'
-            : 'weather';
-
-        const { error } = await supabase.from('markets').upsert(
-          {
-            condition_id: m.conditionId,
-            question: m.question,
-            category,
-            city_id: cityId,
-            outcomes,
-            outcome_prices: outcomePrices,
-            volume_usd: parseFloat(m.volume) || 0,
-            liquidity_usd: parseFloat(m.liquidity) || 0,
-            resolution_date: m.endDate,
-            is_active: m.active && !m.closed,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'condition_id' }
-        );
-
-        if (!error) {
-          upserted++;
-          if (cityId)
-            log.push(
-              `  Matched: "${m.question.substring(0, 50)}..." → city`
-            );
-        }
-      } catch {
-        // skip
+      if (error) {
+        log.push(`  Upsert error: ${error.message}`);
+      } else {
+        upserted = count ?? upsertRows.length;
       }
     }
 
-    log.push(`  Upserted ${upserted} weather markets`);
+    const cityMatched = upsertRows.filter((r) => r.city_id).length;
+    log.push(`  Upserted ${upserted} weather markets (${cityMatched} matched to cities)`);
 
     const elapsed = Date.now() - startTime;
     log.push(`Done in ${elapsed}ms`);
