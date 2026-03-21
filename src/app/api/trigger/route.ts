@@ -49,7 +49,8 @@ const CITY_KEYWORDS: Record<string, string[]> = {
 // ============================================================
 const WEATHER_POSITIVE = [
   'temperature', 'weather', '°f', '°c', 'degrees fahrenheit', 'degrees celsius',
-  'high temp', 'low temp', 'precipitation', 'rainfall', 'snowfall',
+  'high temp', 'low temp', 'highest temperature', 'lowest temperature',
+  'precipitation', 'rainfall', 'snowfall',
   'hurricane', 'tropical storm', 'heat wave', 'cold snap', 'frost',
   'wind chill', 'heat index', 'daily high', 'daily low',
   'warmest', 'coldest', 'record high', 'record low',
@@ -298,37 +299,38 @@ export async function GET() {
       return null;
     }
 
-    // Run market searches in parallel
-    const [tagTemp, tagWeather, searchTemp, searchWeatherHigh, searchDegrees] =
+    // Run market searches in parallel — "highest temperature" matches Polymarket's
+    // actual question format: "Highest temperature in [city] on [date]?"
+    const [searchHighest, searchHighestIn, searchDailyTemp, searchTempCity1, searchTempCity2] =
       await Promise.all([
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?tag=temperature&active=true&closed=false&limit=100'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature'
         ),
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?tag=weather&active=true&closed=false&limit=100'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature+in'
         ),
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=daily+temperature'
         ),
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=weather+high'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+NYC'
         ),
         safeFetchJson(
-          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees+fahrenheit'
+          'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+London'
         ),
       ]);
 
     log.push(
-      `  tag=temperature: ${tagTemp.length}, tag=weather: ${tagWeather.length}, search=temperature: ${searchTemp.length}, search=weather+high: ${searchWeatherHigh.length}, search=degrees+fahrenheit: ${searchDegrees.length}`
+      `  highest+temp: ${searchHighest.length}, highest+temp+in: ${searchHighestIn.length}, daily+temp: ${searchDailyTemp.length}, temp+NYC: ${searchTempCity1.length}, temp+London: ${searchTempCity2.length}`
     );
 
     // Deduplicate
     const allRaw = [
-      ...tagTemp,
-      ...tagWeather,
-      ...searchTemp,
-      ...searchWeatherHigh,
-      ...searchDegrees,
+      ...searchHighest,
+      ...searchHighestIn,
+      ...searchDailyTemp,
+      ...searchTempCity1,
+      ...searchTempCity2,
     ] as GammaMarket[];
     const seenIds = new Set<string>();
     const allMarkets: GammaMarket[] = [];

@@ -149,13 +149,16 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Market searches — tag + text
+  // Market searches — "highest temperature" matches Polymarket's actual question
+  // format: "Highest temperature in [city] on [date]?"
   const marketSearches = [
-    'https://gamma-api.polymarket.com/markets?tag=temperature&active=true&closed=false&limit=100',
-    'https://gamma-api.polymarket.com/markets?tag=weather&active=true&closed=false&limit=100',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=weather+high',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=degrees+fahrenheit',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature+in',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=daily+temperature',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+NYC',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+London',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+Miami',
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+Chicago',
   ];
 
   for (const url of marketSearches) {
@@ -165,12 +168,12 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Event searches
+  // Event searches — events group multiple bracket markets together
   const eventSearches = [
-    'https://gamma-api.polymarket.com/events?tag=temperature&active=true&closed=false&limit=50',
-    'https://gamma-api.polymarket.com/events?tag=weather&active=true&closed=false&limit=50',
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature',
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=weather+high',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=highest+temperature',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=daily+temperature',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature+predictions',
+    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature+weather',
   ];
 
   for (const url of eventSearches) {
