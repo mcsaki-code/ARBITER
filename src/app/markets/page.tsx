@@ -53,7 +53,18 @@ const CITY_TERMS = [
   'new york', 'nyc', 'manhattan', 'chicago', 'miami', 'seattle', 'denver',
   'los angeles', 'l.a.', 'oklahoma city', 'okc', 'omaha',
   'minneapolis', 'twin cities', 'phoenix', 'atlanta',
+  'houston', 'dallas', 'san francisco', 'sf', 'boston', 'philadelphia', 'philly',
+  'washington', 'washington dc', 'd.c.', 'las vegas', 'vegas',
+  'austin', 'san antonio', 'portland', 'nashville', 'charlotte',
+  'indianapolis', 'columbus', 'jacksonville', 'memphis', 'detroit',
+  'milwaukee', 'kansas city', 'st. louis', 'st louis', 'saint louis',
+  'tampa', 'orlando', 'baltimore', 'pittsburgh', 'cincinnati',
+  'cleveland', 'sacramento', 'san diego', 'raleigh', 'salt lake city',
+  'salt lake', 'new orleans',
   'london', 'tel aviv', 'tokyo', 'paris', 'toronto', 'seoul',
+  'sydney', 'dubai', 'berlin', 'madrid', 'rome', 'mumbai', 'singapore',
+  'mexico city', 'cairo', 'bangkok', 'istanbul', 'são paulo', 'sao paulo',
+  'buenos aires',
 ];
 
 function isWeatherMarket(m: Market): boolean {
