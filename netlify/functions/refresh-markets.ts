@@ -96,18 +96,17 @@ function isWeatherMarket(question: string): boolean {
   return false;
 }
 
-async function fetchGamma(url: string): Promise<unknown[]> {
+async function fetchGamma(url: string): Promise<unknown> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
     if (!res.ok) {
       console.log(`[refresh-markets] ${url} returned ${res.status}`);
-      return [];
+      return null;
     }
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    return await res.json();
   } catch (err) {
     console.error(`[refresh-markets] Fetch error: ${url}`, err);
-    return [];
+    return null;
   }
 }
 
@@ -138,56 +137,82 @@ export const handler = schedule('*/30 * * * *', async () => {
     return null;
   }
 
-  // ======== MULTI-STRATEGY SEARCH ========
+  // ======== TAG-BASED MARKET DISCOVERY (via tag_id) ========
+  // Per Polymarket docs: tag_id is the QUERY param for /events and /markets,
+  // while tag_slug is a PATH param only for /tags/slug/{slug} lookup.
   const allMarkets: GammaMarket[] = [];
   const seenIds = new Set<string>();
 
   function addMarket(m: GammaMarket) {
-    if (!seenIds.has(m.conditionId)) {
+    if (m.conditionId && !seenIds.has(m.conditionId)) {
       seenIds.add(m.conditionId);
       allMarkets.push(m);
     }
   }
 
-  // Market searches — "highest temperature" matches Polymarket's actual question
-  // format: "Highest temperature in [city] on [date]?"
-  const marketSearches = [
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=highest+temperature+in',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=daily+temperature',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+NYC',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+London',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+Miami',
-    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=100&search=temperature+Chicago',
-  ];
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 5;
 
-  for (const url of marketSearches) {
-    const results = (await fetchGamma(url)) as GammaMarket[];
-    for (const m of results) {
-      if (m.conditionId && m.question) addMarket(m);
+  // Step 1: Resolve tag slugs → tag IDs
+  const tagSlugs = ['temperature', 'weather', 'climate'];
+  const tagIds: number[] = [];
+
+  for (const slug of tagSlugs) {
+    const tag = await fetchGamma(
+      `https://gamma-api.polymarket.com/tags/slug/${slug}`
+    ) as { id?: number } | null;
+    if (tag?.id) {
+      tagIds.push(tag.id);
+      console.log(`[refresh-markets] Tag "${slug}" → id ${tag.id}`);
+    } else {
+      console.log(`[refresh-markets] Tag "${slug}" → not found`);
     }
   }
 
-  // Event searches — events group multiple bracket markets together
-  const eventSearches = [
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=highest+temperature',
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=daily+temperature',
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature+predictions',
-    'https://gamma-api.polymarket.com/events?active=true&closed=false&limit=50&search=temperature+weather',
-  ];
-
-  for (const url of eventSearches) {
-    const events = (await fetchGamma(url)) as GammaEvent[];
-    for (const event of events) {
-      if (event.markets && Array.isArray(event.markets)) {
-        for (const m of event.markets) {
-          if (m.conditionId && m.question) addMarket(m);
+  // Step 2: For each tag_id, paginate through events and markets
+  for (const tagId of tagIds) {
+    // Events (contain nested bracket markets)
+    for (let offset = 0; offset < MAX_PAGES * PAGE_SIZE; offset += PAGE_SIZE) {
+      const page = await fetchGamma(
+        `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=${PAGE_SIZE}&offset=${offset}`
+      );
+      if (!Array.isArray(page) || page.length === 0) break;
+      for (const event of page as GammaEvent[]) {
+        if (event.markets && Array.isArray(event.markets)) {
+          for (const m of event.markets) addMarket(m);
         }
+      }
+      if (page.length < PAGE_SIZE) break;
+    }
+
+    // Markets directly (some may not be nested in events)
+    for (let offset = 0; offset < MAX_PAGES * PAGE_SIZE; offset += PAGE_SIZE) {
+      const page = await fetchGamma(
+        `https://gamma-api.polymarket.com/markets?tag_id=${tagId}&active=true&closed=false&limit=${PAGE_SIZE}&offset=${offset}`
+      );
+      if (!Array.isArray(page) || page.length === 0) break;
+      for (const m of page as GammaMarket[]) addMarket(m);
+      if (page.length < PAGE_SIZE) break;
+    }
+  }
+
+  // Step 3: Fallback — dedicated /search endpoint with keyword
+  const searchData = await fetchGamma(
+    'https://gamma-api.polymarket.com/search?keyword=temperature&limit=100'
+  ) as { markets?: GammaMarket[]; events?: GammaEvent[] } | null;
+
+  if (searchData?.markets) {
+    for (const m of searchData.markets) addMarket(m);
+  }
+  if (searchData?.events) {
+    for (const event of searchData.events) {
+      if (event.markets && Array.isArray(event.markets)) {
+        for (const m of event.markets) addMarket(m);
       }
     }
   }
 
-  console.log(`[refresh-markets] Found ${allMarkets.length} raw markets across all strategies`);
+  console.log(`[refresh-markets] Found ${allMarkets.length} unique markets across all strategies`);
 
   // ======== WEATHER FILTER — reject non-weather markets ========
   const weatherOnly = allMarkets.filter((m) => isWeatherMarket(m.question));
