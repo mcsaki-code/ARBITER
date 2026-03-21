@@ -24,6 +24,23 @@ interface LeagueInfo {
   volume: number;
 }
 
+interface SportsAnalysis {
+  id: string;
+  market_id: string;
+  event_description: string;
+  sport: string;
+  sportsbook_consensus: number;
+  polymarket_price: number;
+  edge: number;
+  direction: string;
+  confidence: string;
+  kelly_fraction: number;
+  rec_bet_usd: number;
+  reasoning: string;
+  auto_eligible: boolean;
+  analyzed_at: string;
+}
+
 interface SportsResponse {
   summary: {
     total_markets: number;
@@ -33,7 +50,7 @@ interface SportsResponse {
     league_breakdown: Record<string, LeagueInfo>;
   };
   markets: SportsMarket[];
-  analyses: unknown[];
+  analyses: SportsAnalysis[];
 }
 
 export default function SportsPage() {
@@ -167,14 +184,61 @@ export default function SportsPage() {
           </div>
         )}
 
-        {/* Setup guide */}
-        {!data?.summary?.total_odds_datapoints && (
+        {/* Setup guide — only show if truly no sports data at all */}
+        {!data?.summary?.total_markets && !data?.summary?.total_odds_datapoints && (
           <div className="bg-arbiter-card border border-arbiter-amber/30 rounded-lg p-4 mb-4">
-            <div className="text-sm font-medium text-arbiter-amber mb-1">Sportsbook Odds Not Connected</div>
+            <div className="text-sm font-medium text-arbiter-amber mb-1">Sports Engine Initializing</div>
             <p className="text-xs text-arbiter-text-2">
-              To enable cross-platform edge detection, add your <span className="font-mono">ODDS_API_KEY</span> to Netlify environment variables.
-              Get a free key (500 req/month) at the-odds-api.com. The sports ingestion function will automatically pull live odds from DraftKings, FanDuel, BetMGM, and more.
+              The sports ingestion function runs every 10 minutes. It pulls Polymarket sports markets automatically and cross-references with sportsbook odds when <span className="font-mono">ODDS_API_KEY</span> is configured.
+              {' '}Odds data is refreshed in 2-hour windows, so this panel may appear empty between cycles.
             </p>
+          </div>
+        )}
+
+        {/* Edge Analyses */}
+        {(data?.analyses || []).length > 0 && (
+          <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden mb-4">
+            <div className="border-b border-arbiter-border px-4 py-3">
+              <h2 className="text-xs text-arbiter-text-3 uppercase tracking-widest">Edge Analyses</h2>
+            </div>
+            <div className="divide-y divide-arbiter-border/50">
+              {(data?.analyses || []).filter((a: SportsAnalysis) => a.direction !== 'PASS').slice(0, 8).map((a: SportsAnalysis) => (
+                <div key={a.id} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium leading-snug">{a.event_description}</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <Badge variant={a.confidence === 'HIGH' ? 'green' : a.confidence === 'MEDIUM' ? 'amber' : 'red'}>
+                          {a.confidence}
+                        </Badge>
+                        <span className="text-[10px] font-mono text-arbiter-text-3">
+                          {a.direction === 'BUY_YES' ? 'BUY YES' : a.direction === 'BUY_NO' ? 'BUY NO' : 'PASS'}
+                        </span>
+                        {a.auto_eligible && (
+                          <Badge variant="green">AUTO</Badge>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-mono text-sm font-semibold text-arbiter-amber">
+                        +{(a.edge * 100).toFixed(1)}%
+                      </div>
+                      <div className="text-[10px] text-arbiter-text-3 font-mono">
+                        SB {(a.sportsbook_consensus * 100).toFixed(0)}% vs PM {(a.polymarket_price * 100).toFixed(0)}%
+                      </div>
+                      {a.rec_bet_usd > 0 && (
+                        <div className="text-[10px] font-mono text-arbiter-green mt-0.5">
+                          Kelly: ${a.rec_bet_usd.toFixed(0)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {a.reasoning && (
+                    <p className="text-[10px] text-arbiter-text-3 mt-2 leading-relaxed line-clamp-2">{a.reasoning}</p>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 

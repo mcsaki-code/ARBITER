@@ -32,6 +32,24 @@ interface CryptoSignal {
   signal_summary: string;
 }
 
+interface CryptoAnalysis {
+  id: string;
+  market_id: string;
+  asset: string;
+  spot_at_analysis: number;
+  target_bracket: string;
+  bracket_prob: number;
+  market_price: number;
+  edge: number;
+  direction: string;
+  confidence: string;
+  kelly_fraction: number;
+  rec_bet_usd: number;
+  reasoning: string;
+  auto_eligible: boolean;
+  analyzed_at: string;
+}
+
 interface AssetInfo {
   markets: number;
   volume: number;
@@ -47,7 +65,7 @@ interface CryptoResponse {
   };
   latest_signals: Record<string, CryptoSignal>;
   markets: CryptoMarket[];
-  analyses: unknown[];
+  analyses: CryptoAnalysis[];
 }
 
 export default function CryptoPage() {
@@ -270,6 +288,56 @@ export default function CryptoPage() {
           </div>
         </div>
 
+        {/* Edge Analyses */}
+        {(data?.analyses || []).length > 0 && (
+          <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden mb-4">
+            <div className="border-b border-arbiter-border px-4 py-3">
+              <h2 className="text-xs text-arbiter-text-3 uppercase tracking-widest">Edge Analyses</h2>
+            </div>
+            <div className="divide-y divide-arbiter-border/50">
+              {(data?.analyses || []).filter((a: CryptoAnalysis) => a.direction !== 'PASS').slice(0, 8).map((a: CryptoAnalysis) => (
+                <div key={a.id} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant="purple">{a.asset}</Badge>
+                        <span className="text-sm font-medium">{a.target_bracket}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={a.confidence === 'HIGH' ? 'green' : a.confidence === 'MEDIUM' ? 'amber' : 'red'}>
+                          {a.confidence}
+                        </Badge>
+                        <span className="text-[10px] font-mono text-arbiter-text-3">
+                          {a.direction === 'BUY_YES' ? 'BUY YES' : a.direction === 'BUY_NO' ? 'BUY NO' : 'PASS'}
+                        </span>
+                        <span className="text-[10px] font-mono text-arbiter-text-3">
+                          Spot ${a.spot_at_analysis?.toLocaleString(undefined, { maximumFractionDigits: 0 }) || '?'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-mono text-sm font-semibold text-arbiter-amber">
+                        +{(a.edge * 100).toFixed(1)}%
+                      </div>
+                      <div className="text-[10px] text-arbiter-text-3 font-mono">
+                        est {(a.bracket_prob * 100).toFixed(0)}% vs mkt {(a.market_price * 100).toFixed(0)}%
+                      </div>
+                      {a.rec_bet_usd > 0 && (
+                        <div className="text-[10px] font-mono text-arbiter-green mt-0.5">
+                          Kelly: ${a.rec_bet_usd.toFixed(0)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {a.reasoning && (
+                    <p className="text-[10px] text-arbiter-text-3 mt-2 leading-relaxed line-clamp-2">{a.reasoning}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Market list */}
         <div className="space-y-2">
           {filtered.map((market) => (
@@ -291,6 +359,13 @@ export default function CryptoPage() {
                 </div>
                 <div className="text-right shrink-0">
                   <div className="font-mono text-xs text-arbiter-text-3">{formatDate(market.resolution_date)}</div>
+                  {market.outcome_prices.length >= 2 && (
+                    <div className="font-mono text-sm mt-0.5">
+                      <span className="text-arbiter-green">{(market.outcome_prices[0] * 100).toFixed(0)}%</span>
+                      <span className="text-arbiter-text-3 mx-1">/</span>
+                      <span className="text-arbiter-red">{(market.outcome_prices[1] * 100).toFixed(0)}%</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
