@@ -68,10 +68,23 @@ interface CryptoResponse {
   analyses: CryptoAnalysis[];
 }
 
+function classifyAsset(question: string): string {
+  const q = question.toLowerCase();
+  if (/\bbtc\b|bitcoin/.test(q)) return 'BTC';
+  if (/\beth\b|ethereum/.test(q)) return 'ETH';
+  if (/\bsol\b|solana/.test(q)) return 'SOL';
+  if (/\bxrp\b|ripple/.test(q)) return 'XRP';
+  if (/\bdoge\b|dogecoin/.test(q)) return 'DOGE';
+  return 'Other';
+}
+
 export default function CryptoPage() {
   const [data, setData] = useState<CryptoResponse | null>(null);
   const [state, setState] = useState<DataState>('loading');
   const [asset, setAsset] = useState<string>('all');
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [betting, setBetting] = useState(false);
+  const [betResult, setBetResult] = useState<{ id: string; msg: string } | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -95,9 +108,12 @@ export default function CryptoPage() {
 
   const filtered = (data?.markets || []).filter((m) => {
     if (asset === 'all') return true;
-    const q = m.question.toLowerCase();
-    return q.includes(asset.toLowerCase());
+    return classifyAsset(m.question) === asset;
   });
+
+  const getAnalysis = (marketId: string): CryptoAnalysis | undefined => {
+    return (data?.analyses || []).find((a) => a.market_id === marketId);
+  };
 
   const formatUsd = (n: number) => {
     if (n >= 1000000000) return `$${(n / 1000000000).toFixed(1)}B`;
@@ -118,7 +134,6 @@ export default function CryptoPage() {
   const btcSignal = data?.latest_signals?.['BTC'] as CryptoSignal | undefined;
   const ethSignal = data?.latest_signals?.['ETH'] as CryptoSignal | undefined;
 
-  // Parse signal summary JSON
   const parseSignals = (sig: CryptoSignal | undefined): Record<string, string> => {
     if (!sig?.signal_summary) return {};
     try { return JSON.parse(sig.signal_summary); } catch { return {}; }
@@ -126,6 +141,40 @@ export default function CryptoPage() {
 
   const btcIndicators = parseSignals(btcSignal);
   const ethIndicators = parseSignals(ethSignal);
+
+  const placeBet = async (market: CryptoMarket, direction: 'BUY_YES' | 'BUY_NO') => {
+    setBetting(true);
+    setBetResult(null);
+    try {
+      const priceIndex = direction === 'BUY_YES' ? 0 : 1;
+      const entryPrice = market.outcome_prices[priceIndex] || 0.5;
+      const analysis = getAnalysis(market.id);
+      const amount = analysis?.rec_bet_usd || 10;
+
+      const res = await fetch('/api/bets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          market_id: market.id,
+          analysis_id: analysis?.id || null,
+          category: 'crypto',
+          direction,
+          outcome_label: direction === 'BUY_YES' ? (market.outcomes?.[0] || 'Yes') : (market.outcomes?.[1] || 'No'),
+          entry_price: entryPrice,
+          amount_usd: amount,
+        }),
+      });
+      const json = await res.json();
+      if (res.ok) {
+        setBetResult({ id: market.id, msg: `Paper bet placed: ${direction} @ ${(entryPrice * 100).toFixed(0)}% for $${amount.toFixed(0)}` });
+      } else {
+        setBetResult({ id: market.id, msg: `Error: ${json.error}` });
+      }
+    } catch (err) {
+      setBetResult({ id: market.id, msg: 'Failed to place bet' });
+    }
+    setBetting(false);
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
@@ -338,38 +387,147 @@ export default function CryptoPage() {
           </div>
         )}
 
+        {/* Filtered count */}
+        {asset !== 'all' && (
+          <div className="text-xs text-arbiter-text-3 mb-2">
+            Showing {filtered.length} {asset} market{filtered.length !== 1 ? 's' : ''}
+          </div>
+        )}
+
         {/* Market list */}
         <div className="space-y-2">
-          {filtered.map((market) => (
-            <div key={market.id} className="bg-arbiter-card border border-arbiter-border rounded-lg px-4 py-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium leading-snug pr-2">
-                    {market.question}
-                  </p>
-                  <div className="flex items-center gap-2 mt-1.5">
-                    <Badge variant="purple">crypto</Badge>
-                    <span className="text-[10px] text-arbiter-text-3 font-mono">
-                      Vol {formatUsd(market.volume_usd)}
-                    </span>
-                    <span className="text-[10px] text-arbiter-text-3 font-mono">
-                      Liq {formatUsd(market.liquidity_usd)}
-                    </span>
-                  </div>
-                </div>
-                <div className="text-right shrink-0">
-                  <div className="font-mono text-xs text-arbiter-text-3">{formatDate(market.resolution_date)}</div>
-                  {market.outcome_prices.length >= 2 && (
-                    <div className="font-mono text-sm mt-0.5">
-                      <span className="text-arbiter-green">{(market.outcome_prices[0] * 100).toFixed(0)}%</span>
-                      <span className="text-arbiter-text-3 mx-1">/</span>
-                      <span className="text-arbiter-red">{(market.outcome_prices[1] * 100).toFixed(0)}%</span>
+          {filtered.map((market) => {
+            const isExpanded = expanded === market.id;
+            const analysis = getAnalysis(market.id);
+            const hasResult = betResult?.id === market.id;
+
+            return (
+              <div key={market.id} className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
+                {/* Clickable header */}
+                <button
+                  onClick={() => setExpanded(isExpanded ? null : market.id)}
+                  className="w-full px-4 py-3 text-left hover:bg-arbiter-elevated/50 transition-colors"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium leading-snug pr-2">
+                        {market.question}
+                      </p>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <Badge variant="purple">crypto</Badge>
+                        <Badge variant="gray">{classifyAsset(market.question)}</Badge>
+                        <span className="text-[10px] text-arbiter-text-3 font-mono">
+                          Vol {formatUsd(market.volume_usd)}
+                        </span>
+                        <span className="text-[10px] text-arbiter-text-3 font-mono">
+                          Liq {formatUsd(market.liquidity_usd)}
+                        </span>
+                      </div>
                     </div>
-                  )}
-                </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-mono text-xs text-arbiter-text-3">{formatDate(market.resolution_date)}</div>
+                      {market.outcome_prices.length >= 2 && (
+                        <div className="font-mono text-sm mt-0.5">
+                          <span className="text-arbiter-green">{(market.outcome_prices[0] * 100).toFixed(0)}%</span>
+                          <span className="text-arbiter-text-3 mx-1">/</span>
+                          <span className="text-arbiter-red">{(market.outcome_prices[1] * 100).toFixed(0)}%</span>
+                        </div>
+                      )}
+                      <div className="text-[10px] text-arbiter-text-3 mt-0.5">
+                        {isExpanded ? 'collapse' : 'expand'}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+
+                {/* Expanded detail panel */}
+                {isExpanded && (
+                  <div className="border-t border-arbiter-border bg-arbiter-bg/50 px-4 py-3 space-y-3">
+                    {/* Outcomes */}
+                    <div>
+                      <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1.5">Outcomes</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {market.outcomes?.map((outcome, i) => (
+                          <div key={i} className="bg-arbiter-card border border-arbiter-border rounded px-3 py-2 flex items-center justify-between">
+                            <span className="text-xs font-medium">{outcome}</span>
+                            <span className={`font-mono text-sm font-semibold ${i === 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
+                              {market.outcome_prices[i] ? `${(market.outcome_prices[i] * 100).toFixed(1)}%` : '--'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Analysis if available */}
+                    {analysis && (
+                      <div className="bg-arbiter-card border border-arbiter-amber/20 rounded-lg p-3">
+                        <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1.5">AI Edge Analysis</div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Badge variant={analysis.confidence === 'HIGH' ? 'green' : analysis.confidence === 'MEDIUM' ? 'amber' : 'red'}>
+                            {analysis.confidence}
+                          </Badge>
+                          <span className="text-xs font-mono">
+                            {analysis.direction === 'BUY_YES' ? 'BUY YES' : analysis.direction === 'BUY_NO' ? 'BUY NO' : 'PASS'}
+                          </span>
+                          <span className="font-mono text-sm font-semibold text-arbiter-amber">
+                            +{(analysis.edge * 100).toFixed(1)}% edge
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-arbiter-text-3 font-mono mb-1">
+                          Bracket: {analysis.target_bracket} | Est: {(analysis.bracket_prob * 100).toFixed(0)}% vs Mkt: {(analysis.market_price * 100).toFixed(0)}% | Kelly: ${analysis.rec_bet_usd?.toFixed(0) || '0'}
+                        </div>
+                        {analysis.reasoning && (
+                          <p className="text-xs text-arbiter-text-2 mt-1.5 leading-relaxed">{analysis.reasoning}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Market details */}
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="bg-arbiter-card border border-arbiter-border rounded px-2 py-1.5">
+                        <div className="text-[10px] text-arbiter-text-3">Volume</div>
+                        <div className="font-mono">{formatUsd(market.volume_usd)}</div>
+                      </div>
+                      <div className="bg-arbiter-card border border-arbiter-border rounded px-2 py-1.5">
+                        <div className="text-[10px] text-arbiter-text-3">Liquidity</div>
+                        <div className="font-mono">{formatUsd(market.liquidity_usd)}</div>
+                      </div>
+                      <div className="bg-arbiter-card border border-arbiter-border rounded px-2 py-1.5">
+                        <div className="text-[10px] text-arbiter-text-3">Resolves</div>
+                        <div className="font-mono">{formatDate(market.resolution_date)}</div>
+                      </div>
+                    </div>
+
+                    {/* Bet placement buttons */}
+                    <div>
+                      <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1.5">Place Paper Bet</div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => placeBet(market, 'BUY_YES')}
+                          disabled={betting}
+                          className="flex-1 bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/30 text-arbiter-green rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                        >
+                          {betting ? 'Placing...' : `BUY YES @ ${market.outcome_prices[0] ? (market.outcome_prices[0] * 100).toFixed(0) + '%' : '--'}`}
+                        </button>
+                        <button
+                          onClick={() => placeBet(market, 'BUY_NO')}
+                          disabled={betting}
+                          className="flex-1 bg-arbiter-red/10 hover:bg-arbiter-red/20 border border-arbiter-red/30 text-arbiter-red rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50"
+                        >
+                          {betting ? 'Placing...' : `BUY NO @ ${market.outcome_prices[1] ? (market.outcome_prices[1] * 100).toFixed(0) + '%' : '--'}`}
+                        </button>
+                      </div>
+                      {hasResult && (
+                        <div className={`text-xs mt-1.5 font-mono ${betResult.msg.startsWith('Error') ? 'text-arbiter-red' : 'text-arbiter-green'}`}>
+                          {betResult.msg}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </DataStateWrapper>
     </div>
