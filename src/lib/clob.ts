@@ -5,7 +5,7 @@
 // checks, rate limiting, and error handling.
 //
 // FLOW:
-//   1. Initialize ClobClient with wallet + API creds
+//   1. Initialize ClobClient with viem WalletClient + API creds
 //   2. Look up market token IDs (YES/NO) from condition_id
 //   3. Place limit orders (GTC) or market orders (FOK)
 //   4. Track order status and fills
@@ -15,10 +15,12 @@
 //   - Rate limiter: max 30 orders/minute (Polymarket allows 60)
 //   - Every order is logged to console before submission
 //   - No order executes without passing guardrails check first
+//
+// NOTE: @polymarket/clob-client v5+ requires a viem WalletClient
+// (ClobSigner), NOT an ethers Wallet.
 // ============================================================
 
 import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
-import { ethers } from 'ethers';
 import { getSigner, isLiveTradingConfigured, POLYGON_CHAIN_ID } from './wallet';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
@@ -91,6 +93,7 @@ export async function getClobClient(): Promise<ClobClient | null> {
 
   try {
     // Step 1: Create a temporary client to derive API credentials
+    // The viem WalletClient satisfies the ClobSigner interface
     const tempClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer);
 
     // Step 2: Derive L2 API credentials (HMAC-SHA256 based)
@@ -107,7 +110,8 @@ export async function getClobClient(): Promise<ClobClient | null> {
       SIGNATURE_TYPE
     );
 
-    console.log('[clob] Trading client initialized for', signer.address);
+    const address = signer.account?.address || 'unknown';
+    console.log('[clob] Trading client initialized for', address);
     return cachedClient;
   } catch (err) {
     console.error('[clob] Failed to initialize trading client:', err);

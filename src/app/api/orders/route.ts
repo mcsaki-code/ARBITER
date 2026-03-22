@@ -5,7 +5,7 @@ import { isLiveTradingAuthorized, checkRealMoneyEligibility } from '@/lib/guardr
 export const dynamic = 'force-dynamic';
 
 // Lazy imports for wallet/clob to avoid breaking builds when
-// @polymarket/clob-client and ethers aren't installed yet.
+// @polymarket/clob-client and viem aren't installed yet.
 function isLiveTradingConfigured(): boolean {
   return !!(
     process.env.POLYMARKET_PRIVATE_KEY &&

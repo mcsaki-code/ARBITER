@@ -14,7 +14,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { isLiveTradingAuthorized, validateLiveOrder } from './guardrails';
 
 // Lazy imports for live trading modules — these depend on @polymarket/clob-client
-// and ethers, which may not be installed during paper-only deployments.
+// and viem, which may not be installed during paper-only deployments.
 // We only load them when live trading is actually attempted.
 function isLiveTradingConfigured(): boolean {
   return !!(

@@ -1,16 +1,30 @@
 // ============================================================
 // ARBITER — Polygon Wallet & Signer Management
 // ============================================================
-// Handles private key → Signer initialization for Polymarket
-// CLOB order signing. The private key is the one exported from
-// your Polymarket account (Settings → Advanced → Export).
+// Handles private key → viem WalletClient initialization for
+// Polymarket CLOB order signing. The private key is the one
+// exported from your Polymarket account (Settings → Advanced → Export).
 //
 // SECURITY: Private key is read from env vars only. Never
 // logged, never stored in DB, never sent to any API except
 // for local EIP-712 signing.
+//
+// NOTE: @polymarket/clob-client v5+ requires a viem WalletClient,
+// NOT an ethers Wallet.
 // ============================================================
 
-import { ethers } from 'ethers';
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  type WalletClient,
+  type PublicClient,
+  type Chain,
+  formatUnits,
+  formatEther,
+} from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { polygon } from 'viem/chains';
 
 // Polygon Mainnet chain ID
 export const POLYGON_CHAIN_ID = 137;
@@ -19,13 +33,38 @@ export const POLYGON_CHAIN_ID = 137;
 const DEFAULT_POLYGON_RPC = 'https://polygon-rpc.com';
 
 // USDC contract on Polygon
-export const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+export const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174' as const;
 
 // Polymarket CTF Exchange contract (Conditional Token Framework)
-export const CTF_EXCHANGE_ADDRESS = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E';
+export const CTF_EXCHANGE_ADDRESS = '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E' as const;
 
 // Polymarket Neg Risk CTF Exchange (for neg risk markets)
-export const NEG_RISK_CTF_EXCHANGE_ADDRESS = '0xC5d563A36AE78145C45a50134d48A1215220f80a';
+export const NEG_RISK_CTF_EXCHANGE_ADDRESS = '0xC5d563A36AE78145C45a50134d48A1215220f80a' as const;
+
+// ERC-20 balanceOf ABI fragment
+const erc20BalanceOfAbi = [
+  {
+    inputs: [{ name: 'account', type: 'address' }],
+    name: 'balanceOf',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+] as const;
+
+/**
+ * Get the Polygon chain config with custom RPC if configured.
+ */
+function getPolygonChain(): Chain {
+  const rpcUrl = process.env.POLYGON_RPC_URL || DEFAULT_POLYGON_RPC;
+  return {
+    ...polygon,
+    rpcUrls: {
+      ...polygon.rpcUrls,
+      default: { http: [rpcUrl] },
+    },
+  };
+}
 
 /**
  * Check if live trading environment variables are configured.
@@ -39,17 +78,38 @@ export function isLiveTradingConfigured(): boolean {
 }
 
 /**
- * Get a configured ethers Signer for Polygon.
+ * Get a configured viem WalletClient for Polygon.
  * Returns null if private key is not configured.
+ * This is the signer that ClobClient expects.
  */
-export function getSigner(): ethers.Wallet | null {
+export function getSigner(): WalletClient | null {
   const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
   if (!privateKey) return null;
 
-  const rpcUrl = process.env.POLYGON_RPC_URL || DEFAULT_POLYGON_RPC;
-  const provider = new ethers.JsonRpcProvider(rpcUrl, POLYGON_CHAIN_ID);
+  try {
+    const chain = getPolygonChain();
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
 
-  return new ethers.Wallet(privateKey, provider);
+    return createWalletClient({
+      account,
+      chain,
+      transport: http(),
+    });
+  } catch (err) {
+    console.error('[wallet] Failed to create signer:', err);
+    return null;
+  }
+}
+
+/**
+ * Get a public client for read-only operations (balance checks, etc).
+ */
+function getPublicClient(): PublicClient {
+  const chain = getPolygonChain();
+  return createPublicClient({
+    chain,
+    transport: http(),
+  });
 }
 
 /**
@@ -61,8 +121,8 @@ export function getWalletAddress(): string | null {
   if (!privateKey) return null;
 
   try {
-    const wallet = new ethers.Wallet(privateKey);
-    return wallet.address;
+    const account = privateKeyToAccount(privateKey as `0x${string}`);
+    return account.address;
   } catch {
     return null;
   }
@@ -73,15 +133,19 @@ export function getWalletAddress(): string | null {
  * Returns balance in human-readable format (6 decimals for USDC).
  */
 export async function getUSDCBalance(): Promise<number | null> {
-  const signer = getSigner();
-  if (!signer) return null;
+  const address = getWalletAddress();
+  if (!address) return null;
 
   try {
-    const usdcAbi = ['function balanceOf(address) view returns (uint256)'];
-    const usdc = new ethers.Contract(USDC_ADDRESS, usdcAbi, signer.provider);
-    const balance = await usdc.balanceOf(signer.address);
+    const publicClient = getPublicClient();
+    const balance = await publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: erc20BalanceOfAbi,
+      functionName: 'balanceOf',
+      args: [address as `0x${string}`],
+    });
     // USDC has 6 decimals on Polygon
-    return parseFloat(ethers.formatUnits(balance, 6));
+    return parseFloat(formatUnits(balance, 6));
   } catch (err) {
     console.error('[wallet] Failed to fetch USDC balance:', err);
     return null;
@@ -89,15 +153,18 @@ export async function getUSDCBalance(): Promise<number | null> {
 }
 
 /**
- * Get MATIC balance for gas fees.
+ * Get MATIC (POL) balance for gas fees.
  */
 export async function getMATICBalance(): Promise<number | null> {
-  const signer = getSigner();
-  if (!signer || !signer.provider) return null;
+  const address = getWalletAddress();
+  if (!address) return null;
 
   try {
-    const balance = await signer.provider.getBalance(signer.address);
-    return parseFloat(ethers.formatEther(balance));
+    const publicClient = getPublicClient();
+    const balance = await publicClient.getBalance({
+      address: address as `0x${string}`,
+    });
+    return parseFloat(formatEther(balance));
   } catch (err) {
     console.error('[wallet] Failed to fetch MATIC balance:', err);
     return null;
