@@ -14,12 +14,16 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Risk limits (mirrors guardrails.ts)
-const MAX_SINGLE_BET_PCT = 0.05;       // 5% of bankroll
-const MAX_DAILY_EXPOSURE_PCT = 0.25;   // 25% of bankroll deployed per day
-const MAX_DAILY_BETS_AUTO = 20;
+// Risk limits — calibrated to professional prediction market standards
+const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
+const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
+const MAX_DAILY_BETS_AUTO = 15;
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
-const MIN_EDGE = 0.02;                 // 2% minimum edge
+const MIN_EDGE = 0.05;                 // 5% minimum edge (up from 2%)
+const MIN_EDGE_WEATHER = 0.08;         // 8% for weather (matching top bots)
+const MIN_LIQUIDITY = 5000;            // Skip thin markets
+const KELLY_FRACTION = 0.125;          // 1/8th Kelly (professional standard)
+const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2h max staleness
 
 interface AnalysisRow {
   id: string;
@@ -102,16 +106,16 @@ export const handler = schedule('*/30 * * * *', async () => {
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
 
   // Collect eligible analyses from the last 2 hours across all verticals
-  const cutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+  const cutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_MS).toISOString();
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [];
 
-  // 1. Weather analyses
+  // 1. Weather analyses — higher edge threshold (8%)
   const { data: weatherAnalyses } = await supabase
     .from('weather_analyses')
     .select('*')
     .gte('analyzed_at', cutoff)
     .neq('direction', 'PASS')
-    .gt('edge', MIN_EDGE)
+    .gt('edge', MIN_EDGE_WEATHER)
     .order('edge', { ascending: false });
 
   if (weatherAnalyses) {
@@ -182,20 +186,52 @@ export const handler = schedule('*/30 * * * *', async () => {
 
     if (!isAutoEligible && !isMediumEligible) continue;
 
-    // Calculate bet size
-    let betAmount = analysis.rec_bet_usd || 0;
-    if (betAmount <= 0 && analysis.kelly_fraction && analysis.kelly_fraction > 0) {
-      betAmount = Math.max(1, Math.round(bankroll * analysis.kelly_fraction * 100) / 100);
+    // Fetch current market data for pre-bet validation
+    const { data: currentMarket } = await supabase
+      .from('markets')
+      .select('question, liquidity_usd, is_active, resolution_date')
+      .eq('id', analysis.market_id)
+      .single();
+
+    if (!currentMarket || !currentMarket.is_active) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — market inactive`);
+      continue;
     }
 
-    // Fallback: $5 minimum for paper trading (enough to be meaningful)
-    if (betAmount <= 0) betAmount = 5;
+    if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd}`);
+      continue;
+    }
 
-    // Cap at max single bet
-    betAmount = Math.min(betAmount, maxSingleBet);
+    // Check time remaining
+    if (currentMarket.resolution_date) {
+      const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
+      if (hoursLeft < 1) continue;
+    }
 
-    // Cap at remaining daily exposure
-    betAmount = Math.min(betAmount, maxDailyExposure - totalDeployed);
+    // Spread-aware edge filter: edge must be 2x estimated spread
+    const estimatedSpread = currentMarket.liquidity_usd > 50000 ? 0.005 :
+      currentMarket.liquidity_usd > 20000 ? 0.01 :
+      currentMarket.liquidity_usd > 10000 ? 0.015 : 0.025;
+
+    if ((analysis.edge || 0) < estimatedSpread * 2) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — edge < 2x spread`);
+      continue;
+    }
+
+    // Calculate bet size using 1/8th Kelly (professional standard)
+    let betAmount = 0;
+    if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
+      const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
+      const adjustedKelly = Math.min(analysis.kelly_fraction * KELLY_FRACTION / 0.25 * confMult, 0.03);
+      betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
+    }
+
+    // Fallback: ~$3 for paper trading (0.6% of bankroll)
+    if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006);
+
+    // Cap at max single bet and remaining daily exposure
+    betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
     if (betAmount < 1) break;
 
     // Determine outcome label and entry price

@@ -151,11 +151,11 @@ export const handler = schedule('*/20 * * * *', async () => {
         const p = analysis.best_bet.true_prob;
         const c = analysis.best_bet.market_price;
         const edge = p - c;
-        if (edge >= 0.02) {
+        if (edge >= 0.05) { // 5% minimum edge (up from 2%)
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
           if (fullKelly > 0) {
-            const confMult = { HIGH: 1.0, MEDIUM: 0.6, LOW: 0.2 }[
+            const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[
               analysis.best_bet.confidence as string
             ] || 0.2;
 
@@ -164,9 +164,10 @@ export const handler = schedule('*/20 * * * *', async () => {
               : marketType === 'snowfall' ? 0.5
               : 1.0;
 
-            const adjusted = fullKelly * 0.25 * (confMult as number) * typeMult;
+            // 1/8th Kelly (professional standard) instead of 1/4
+            const adjusted = fullKelly * 0.125 * (confMult as number) * typeMult;
             const liquidityCap = (market.liquidity_usd * 0.02) / bankroll;
-            kellyFraction = Math.min(adjusted, 0.05, liquidityCap);
+            kellyFraction = Math.min(adjusted, 0.03, liquidityCap);
             recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
           }
         }

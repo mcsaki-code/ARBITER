@@ -18,10 +18,14 @@ export const maxDuration = 60; // Allow up to 60s for analysis + placement
 // ============================================================
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_SINGLE_BET_PCT = 0.05;
-const MAX_DAILY_EXPOSURE_PCT = 0.25;
-const MAX_DAILY_BETS = 20;
-const MIN_EDGE = 0.02; // Lower threshold to capture more opportunities
+const MAX_SINGLE_BET_PCT = 0.03;     // 3% max per bet (down from 5%)
+const MAX_DAILY_EXPOSURE_PCT = 0.20;  // 20% max daily (down from 25%)
+const MAX_DAILY_BETS = 15;
+const MIN_EDGE = 0.05;               // 5% minimum edge (up from 2% — the #1 fix)
+const MIN_EDGE_WEATHER = 0.08;       // 8% for weather (matching successful bots)
+const MIN_LIQUIDITY = 5000;          // Skip thin markets
+const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2 hours max staleness (down from 6)
+const KELLY_FRACTION = 0.125;        // 1/8th Kelly (half Kelly is aggressive, 1/8 is professional)
 
 interface AnalysisCandidate {
   id: string;
@@ -91,10 +95,10 @@ export async function GET() {
     // ============================================================
     // STEP 1: Check for existing analyses (last 6 hours)
     // ============================================================
-    const cutoff = new Date(Date.now() - 6 * 3600000).toISOString();
+    const cutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_MS).toISOString();
 
     const [weatherRes, sportsRes, cryptoRes] = await Promise.all([
-      supabase.from('weather_analyses').select('*').gte('analyzed_at', cutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE).order('edge', { ascending: false }),
+      supabase.from('weather_analyses').select('*').gte('analyzed_at', cutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER).order('edge', { ascending: false }),
       supabase.from('sports_analyses').select('*').gte('analyzed_at', cutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE).order('edge', { ascending: false }),
       supabase.from('crypto_analyses').select('*').gte('analyzed_at', cutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE).order('edge', { ascending: false }),
     ]);
@@ -232,14 +236,56 @@ export async function GET() {
 
       if (!analysis.auto_eligible && !isMediumEligible) continue;
 
-      // Calculate bet size
-      let betAmount = analysis.rec_bet_usd || 0;
-      if (betAmount <= 0 && analysis.kelly_fraction && analysis.kelly_fraction > 0) {
-        betAmount = Math.max(1, Math.round(bankroll * analysis.kelly_fraction * 100) / 100);
+      // Calculate bet size using fractional Kelly
+      // Professional bettors use 1/8th Kelly or less when probability estimates are uncertain
+      let betAmount = 0;
+      if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
+        // Re-calculate with our conservative KELLY_FRACTION (1/8th)
+        const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
+        const adjustedKelly = Math.min(analysis.kelly_fraction * KELLY_FRACTION / 0.25 * confMult, 0.03);
+        betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
       }
-      if (betAmount <= 0) betAmount = 5; // Default $5 for paper trading
+      if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006); // Default ~$3 for paper (0.6% of bankroll)
       betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
       if (betAmount < 1) break;
+
+      // Fetch current market data for validation and question text
+      const { data: currentMarket } = await supabase
+        .from('markets')
+        .select('question, liquidity_usd, is_active, outcome_prices, resolution_date')
+        .eq('id', analysis.market_id)
+        .single();
+
+      // Pre-bet validation: market must still be active with enough liquidity
+      if (!currentMarket || !currentMarket.is_active) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — market no longer active`);
+        continue;
+      }
+
+      if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — liquidity $${currentMarket.liquidity_usd} < $${MIN_LIQUIDITY}`);
+        continue;
+      }
+
+      // Check time remaining — don't bet on markets resolving within 1 hour
+      if (currentMarket.resolution_date) {
+        const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
+        if (hoursLeft < 1) {
+          log.push(`Skip ${analysis.market_id.substring(0, 8)} — resolves in ${hoursLeft.toFixed(1)}h`);
+          continue;
+        }
+      }
+
+      // Estimate spread based on liquidity (thinner markets = wider spread = need more edge)
+      const estimatedSpread = currentMarket.liquidity_usd > 50000 ? 0.005 :
+        currentMarket.liquidity_usd > 20000 ? 0.01 :
+        currentMarket.liquidity_usd > 10000 ? 0.015 : 0.025;
+
+      // Edge must be at least 2x the estimated spread to be profitable after friction
+      if ((analysis.edge || 0) < estimatedSpread * 2) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — edge ${((analysis.edge || 0) * 100).toFixed(1)}% < 2x spread ${(estimatedSpread * 200).toFixed(1)}%`);
+        continue;
+      }
 
       // Determine outcome label and entry price
       let outcomeLabel: string | null = null;
@@ -416,7 +462,7 @@ Respond ONLY in JSON:
 
       if (analysis.direction === 'PASS' || !analysis.edge || analysis.edge < MIN_EDGE) continue;
 
-      // Calculate Kelly
+      // Calculate Kelly — use 1/8th Kelly (professional standard for uncertain estimates)
       const p = analysis.estimated_prob || 0.5;
       const c = analysis.polymarket_price || 0.5;
       const edge = Math.abs(p - c);
@@ -427,8 +473,8 @@ Respond ONLY in JSON:
         const b = (1 - c) / c;
         const fullKelly = (p * b - (1 - p)) / b;
         if (fullKelly > 0) {
-          const confMult = { HIGH: 1.0, MEDIUM: 0.6, LOW: 0.2 }[analysis.confidence as string] || 0.2;
-          kellyFraction = Math.min(fullKelly * 0.25 * confMult, 0.05);
+          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[analysis.confidence as string] || 0.2;
+          kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
           recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
         }
       }
@@ -565,8 +611,8 @@ Respond ONLY in JSON:
         const b = (1 - c) / c;
         const fullKelly = (p * b - (1 - p)) / b;
         if (fullKelly > 0) {
-          const confMult = { HIGH: 1.0, MEDIUM: 0.6, LOW: 0.2 }[analysis.confidence as string] || 0.2;
-          kellyFraction = Math.min(fullKelly * 0.25 * confMult, 0.05);
+          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[analysis.confidence as string] || 0.2;
+          kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
           recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
         }
       }
@@ -687,8 +733,8 @@ Respond ONLY in JSON:
       const b = (1 - c) / c;
       const fullKelly = (p * b - (1 - p)) / b;
       if (fullKelly > 0) {
-        const confMult = { HIGH: 1.0, MEDIUM: 0.6, LOW: 0.2 }[bet.confidence as string] || 0.2;
-        kellyFraction = Math.min(fullKelly * 0.25 * confMult, 0.05);
+        const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[bet.confidence as string] || 0.2;
+        kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
         recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
       }
     }
