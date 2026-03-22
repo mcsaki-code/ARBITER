@@ -425,16 +425,16 @@ function CityDetail({
       </div>
 
       {/* Precipitation Data (if available) */}
-      {consensus && (consensus.precip_consensus_mm > 0 || consensus.snowfall_consensus_cm > 0) && (
+      {consensus && ((consensus.precip_consensus_mm ?? 0) > 0 || (consensus.snowfall_consensus_cm ?? 0) > 0) && (
         <div>
           <h3 className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-2">
             Precipitation & Snow
           </h3>
           <div className="bg-arbiter-bg rounded-lg p-3 space-y-1">
-            {consensus.precip_consensus_mm > 0 && (
+            {(consensus.precip_consensus_mm ?? 0) > 0 && (
               <StatRow label="Precip Consensus" value={`${consensus.precip_consensus_mm}mm`} />
             )}
-            {consensus.snowfall_consensus_cm > 0 && (
+            {(consensus.snowfall_consensus_cm ?? 0) > 0 && (
               <StatRow label="Snowfall Consensus" value={`${consensus.snowfall_consensus_cm}cm`} />
             )}
             {consensus.precip_agreement && (
