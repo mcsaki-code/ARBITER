@@ -77,7 +77,7 @@ export interface MarketTokens {
 // ============================================================
 
 let cachedClient: ClobClient | null = null;
-let cachedApiCreds: { apiKey: string; secret: string; passphrase: string } | null = null;
+let cachedApiCreds: { key: string; secret: string; passphrase: string } | null = null;
 
 /**
  * Get or create a ClobClient instance.
@@ -99,6 +99,7 @@ export async function getClobClient(): Promise<ClobClient | null> {
     // Step 2: Derive L2 API credentials (HMAC-SHA256 based)
     // This signs an EIP-712 message with your private key to get API creds.
     // Creds are deterministic — same key always produces same creds.
+    // Note: ApiKeyCreds uses `key` not `apiKey`
     cachedApiCreds = await tempClient.createOrDeriveApiKey();
 
     // Step 3: Create the full trading client with API creds
