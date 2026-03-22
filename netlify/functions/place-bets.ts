@@ -65,7 +65,7 @@ interface AnalysisRow {
   asset?: string | null;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = schedule('*/15 * * * *', async () => {
   console.log('[place-bets] Starting automated bet placement');
   const startTime = Date.now();
 

@@ -509,7 +509,7 @@ function CityDetail({
             AI Auto-Bet — ${analysis.rec_bet_usd.toFixed(0)} recommended
           </div>
           <div className="text-xs text-arbiter-text-3 leading-relaxed">
-            Bets are placed automatically every 30 min when edge meets thresholds
+            Bets are placed automatically every 15 min when edge meets thresholds
           </div>
         </div>
       )}

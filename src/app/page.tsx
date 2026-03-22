@@ -538,7 +538,7 @@ export default function HomePage() {
 
                           return (
                             <div className="w-full text-center text-xs py-2 px-3 rounded bg-arbiter-bg text-arbiter-text-3 border border-arbiter-border/50">
-                              Auto-bet queued — next scan in ≤30 min
+                              Auto-bet queued — next scan in ≤15 min
                             </div>
                           );
                         })()}
