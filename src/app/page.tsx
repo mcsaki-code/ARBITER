@@ -32,6 +32,8 @@ interface Bet {
 interface CitySignal {
   city_name: string;
   city_id: string;
+  market_id: string | null;
+  market_active: boolean;
   consensus_high_f: number | null;
   model_spread_f: number | null;
   agreement: string | null;
@@ -525,13 +527,23 @@ export default function HomePage() {
                       {/* Bet status — show if AI already placed a bet on this market */}
                       <div className="mt-3">
                         {(() => {
-                          const oppMarketId = isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id;
+                          const signal = isSignal ? (opp as CitySignal) : null;
+                          const oppMarketId = signal ? (signal.market_id || signal.city_id) : (opp as ArbOpportunity).id;
                           const existingBet = bets.find((b) => b.market_id === oppMarketId && b.status === 'OPEN');
+                          const marketDead = signal && !signal.market_active;
 
                           if (existingBet) {
                             return (
                               <div className="w-full text-center text-xs font-semibold py-2 px-3 rounded bg-arbiter-amber/10 text-arbiter-amber border border-arbiter-amber/30">
                                 ACTIVE — ${formatNumber(existingBet.amount_usd)} at {formatCents(existingBet.entry_price)}
+                              </div>
+                            );
+                          }
+
+                          if (marketDead) {
+                            return (
+                              <div className="w-full text-center text-xs py-2 px-3 rounded bg-red-500/10 text-red-400 border border-red-500/20">
+                                Market closed — awaiting resolution
                               </div>
                             );
                           }

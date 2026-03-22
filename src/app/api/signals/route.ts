@@ -11,6 +11,8 @@ export const dynamic = 'force-dynamic';
 interface CitySignal {
   city_name: string;
   city_id: string;
+  market_id: string | null;
+  market_active: boolean;
   consensus_high_f: number | null;
   model_spread_f: number | null;
   agreement: string | null;
@@ -68,11 +70,17 @@ export async function GET() {
     .order('fetched_at', { ascending: false })
     .limit(200);
 
-  // Get active markets
+  // Get active markets (used to determine if a market is still tradeable)
   const { data: marketsAll } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true);
+
+  // Also get ALL markets with city_id so we can resolve market_id from stale analyses
+  const { data: allMarketsWithCity } = await supabase
+    .from('markets')
+    .select('id, city_id, is_active')
+    .not('city_id', 'is', null);
 
   // Get recent analyses (last 24h)
   const { data: analysesAll } = await supabase
@@ -95,10 +103,13 @@ export async function GET() {
     const ecmwf = cityForecasts.find((f) => f.source === 'ecmwf');
     const icon = cityForecasts.find((f) => f.source === 'icon');
 
+    // If the analysis references a market that is no longer active, treat it as stale
+    const marketIsLive = !!market;
+
     let signalType: CitySignal['signal_type'] = 'no_market';
-    if (analysis && analysis.edge !== null && analysis.edge > 0.05) {
+    if (analysis && marketIsLive && analysis.edge !== null && analysis.edge > 0.05) {
       signalType = 'edge';
-    } else if (analysis && analysis.edge !== null && analysis.edge > 0) {
+    } else if (analysis && marketIsLive && analysis.edge !== null && analysis.edge > 0) {
       signalType = 'near_miss';
     } else if (analysis) {
       signalType = 'pass';
@@ -109,6 +120,8 @@ export async function GET() {
     citySnapshots.push({
       city_name: city.name,
       city_id: city.id,
+      market_id: market?.id ?? analysis?.market_id ?? null,
+      market_active: marketIsLive,
       consensus_high_f: consensus?.consensus_high_f ?? null,
       model_spread_f: consensus?.model_spread_f ?? null,
       agreement: consensus?.agreement ?? null,

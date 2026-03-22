@@ -84,11 +84,18 @@ export const handler = schedule('*/20 * * * *', async () => {
     const hrrr = forecasts?.find((f: { source: string }) => f.source === 'hrrr');
 
     const hoursRemaining = market.resolution_date
-      ? Math.max(0, (new Date(market.resolution_date).getTime() - Date.now()) / 3600000)
+      ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000
       : 0;
 
-    if (hoursRemaining < 2) continue;
-    if (market.liquidity_usd < 5000) continue;
+    // Skip markets that are already resolved or resolving within 2h
+    if (hoursRemaining < 2) {
+      console.log(`[analyze-weather-v2] Skip ${city.name} — ${hoursRemaining < 0 ? 'already resolved' : `only ${hoursRemaining.toFixed(1)}h left`}`);
+      continue;
+    }
+    if (market.liquidity_usd < 5000) {
+      console.log(`[analyze-weather-v2] Skip ${city.name} — low liquidity $${market.liquidity_usd}`);
+      continue;
+    }
 
     const outcomesList = market.outcomes
       .map((o: string, i: number) => `${o} → $${market.outcome_prices[i]?.toFixed(2) || '?'}`)
