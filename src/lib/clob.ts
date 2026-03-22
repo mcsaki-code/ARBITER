@@ -20,7 +20,7 @@
 // (ClobSigner), NOT an ethers Wallet.
 // ============================================================
 
-import { ClobClient, Side, OrderType } from '@polymarket/clob-client';
+import { ClobClient, Side } from '@polymarket/clob-client';
 import { getSigner, isLiveTradingConfigured, POLYGON_CHAIN_ID } from './wallet';
 
 const CLOB_HOST = 'https://clob.polymarket.com';
@@ -252,22 +252,19 @@ export async function placeOrder(req: OrderRequest): Promise<OrderResult> {
   // Select the correct token based on which side we're buying
   const tokenId = req.side === 'YES' ? tokens.yesTokenId : tokens.noTokenId;
 
-  // Map order type
-  const orderType = req.orderType === 'FOK' ? OrderType.FOK : OrderType.GTC;
-
   console.log(
-    `[clob] Placing order: ${req.side} ${req.size} shares @ $${req.price} on ${req.conditionId.substring(0, 12)}... (${req.orderType || 'GTC'})`
+    `[clob] Placing order: ${req.side} ${req.size} shares @ $${req.price} on ${req.conditionId.substring(0, 12)}...`
   );
 
   try {
     recordOrder();
 
+    // We always BUY — the token ID determines whether it's YES or NO
     const response = await client.createAndPostOrder({
       tokenID: tokenId,
       price: req.price,
       size: req.size,
-      side: req.side === 'YES' ? Side.BUY : Side.BUY,
-      orderType,
+      side: Side.BUY,
       negRisk: tokens.negRisk,
     });
 
