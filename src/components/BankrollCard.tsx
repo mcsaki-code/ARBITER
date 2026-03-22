@@ -1,5 +1,9 @@
 'use client';
 
+function fmt(n: number, decimals = 2): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
 interface BankrollCardProps {
   bankroll: number;
   pnl: number;
@@ -29,7 +33,7 @@ export function BankrollCard({
         Paper Bankroll
       </div>
       <div className="font-mono text-2xl font-medium text-arbiter-text">
-        ${bankroll.toFixed(2)}
+        ${fmt(bankroll)}
       </div>
       <div className="flex items-center gap-3 mt-2">
         <span
@@ -37,7 +41,7 @@ export function BankrollCard({
             pnlPositive ? 'text-arbiter-green' : 'text-arbiter-red'
           }`}
         >
-          {pnlPositive ? '+' : ''}${pnl.toFixed(2)}
+          {pnlPositive ? '+' : ''}${fmt(pnl)}
         </span>
         <span className="text-arbiter-text-3 text-xs">|</span>
         <span className="font-mono text-sm text-arbiter-text-2">

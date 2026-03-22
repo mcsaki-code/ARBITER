@@ -36,8 +36,7 @@ export default function WeatherPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [selectedCity, setSelectedCity] = useState<CityWeatherCard | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [betConfirm, setBetConfirm] = useState(false);
-  const [betPlacing, setBetPlacing] = useState(false);
+  // Manual betting removed — all bets placed by AI auto-placement pipeline
 
   const fetchData = useCallback(async () => {
     try {
@@ -66,44 +65,6 @@ export default function WeatherPage() {
   const openCity = (card: CityWeatherCard) => {
     setSelectedCity(card);
     setDrawerOpen(true);
-    setBetConfirm(false);
-  };
-
-  const placePaperBet = async () => {
-    if (!selectedCity?.analysis || !selectedCity.market) return;
-    if (!betConfirm) {
-      setBetConfirm(true);
-      return;
-    }
-
-    setBetPlacing(true);
-    try {
-      const a = selectedCity.analysis;
-      // Normalize entry price (handle cases where Claude returns 85 instead of 0.85)
-      const rawPrice = a.market_price || 0.5;
-      const entryPrice = rawPrice > 1 ? rawPrice / 100 : rawPrice;
-
-      await fetch('/api/bets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          market_id: a.market_id,
-          analysis_id: a.id,
-          category: 'weather',
-          direction: a.direction,
-          outcome_label: a.best_outcome_label,
-          entry_price: entryPrice,
-          amount_usd: a.rec_bet_usd,
-        }),
-      });
-      setDrawerOpen(false);
-      fetchData();
-    } catch (err) {
-      console.error('Failed to place bet:', err);
-    } finally {
-      setBetPlacing(false);
-      setBetConfirm(false);
-    }
   };
 
   const formatTimeAgo = (iso: string) => {
@@ -138,19 +99,13 @@ export default function WeatherPage() {
 
       <Drawer
         isOpen={drawerOpen}
-        onClose={() => {
-          setDrawerOpen(false);
-          setBetConfirm(false);
-        }}
+        onClose={() => setDrawerOpen(false)}
         title={selectedCity?.city.name}
         subtitle={selectedCity?.consensus?.valid_date || 'No forecast data'}
       >
         {selectedCity && (
           <CityDetail
             card={selectedCity}
-            onBet={placePaperBet}
-            betConfirm={betConfirm}
-            betPlacing={betPlacing}
           />
         )}
       </Drawer>
@@ -333,14 +288,8 @@ function getPassReason(card: CityWeatherCard): string {
 // ============================================================
 function CityDetail({
   card,
-  onBet,
-  betConfirm,
-  betPlacing,
 }: {
   card: CityWeatherCard;
-  onBet: () => void;
-  betConfirm: boolean;
-  betPlacing: boolean;
 }) {
   const { consensus, market, analysis, forecasts } = card;
 
@@ -553,30 +502,15 @@ function CityDetail({
         </div>
       )}
 
-      {/* Bet Button */}
+      {/* Auto-bet status */}
       {analysis && analysis.direction !== 'PASS' && analysis.rec_bet_usd && analysis.rec_bet_usd > 0 && (
-        <div className="flex gap-3">
-          <button
-            onClick={onBet}
-            disabled={betPlacing}
-            className={`flex-1 py-3 rounded-lg font-medium text-sm transition-all min-h-[44px] ${
-              betConfirm
-                ? 'bg-arbiter-amber text-arbiter-bg hover:bg-arbiter-amber/90'
-                : 'bg-arbiter-amber/20 text-arbiter-amber border border-arbiter-amber/40 hover:bg-arbiter-amber/30'
-            } ${betPlacing ? 'opacity-50 cursor-not-allowed' : ''}`}
-          >
-            {betPlacing
-              ? 'Placing...'
-              : betConfirm
-              ? `CONFIRM — Paper Bet $${analysis.rec_bet_usd.toFixed(0)}`
-              : `PAPER BET — $${analysis.rec_bet_usd.toFixed(0)}`}
-          </button>
-          <button
-            onClick={() => {}}
-            className="px-4 py-3 rounded-lg text-sm text-arbiter-text-2 border border-arbiter-border hover:bg-arbiter-card min-h-[44px]"
-          >
-            SKIP
-          </button>
+        <div className="bg-arbiter-bg rounded-lg p-4 text-center">
+          <div className="text-arbiter-amber text-xs uppercase tracking-wider font-semibold mb-1">
+            AI Auto-Bet — ${analysis.rec_bet_usd.toFixed(0)} recommended
+          </div>
+          <div className="text-xs text-arbiter-text-3 leading-relaxed">
+            Bets are placed automatically every 30 min when edge meets thresholds
+          </div>
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
@@ -124,84 +124,5 @@ export async function GET() {
   });
 }
 
-// POST — place a paper bet
-export async function POST(req: NextRequest) {
-  const supabase = getSupabaseAdmin();
-
-  try {
-    const body = await req.json();
-    const {
-      market_id,
-      analysis_id,
-      category,
-      direction,
-      outcome_label,
-      entry_price,
-      amount_usd,
-    } = body;
-
-    // Validate required fields
-    if (!market_id || !direction || !entry_price || !amount_usd) {
-      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
-    }
-
-    // Normalize entry price — handle percentages (e.g., 85 → 0.85)
-    let normalizedPrice = entry_price;
-    if (normalizedPrice > 1) normalizedPrice = normalizedPrice / 100;
-
-    // Insert bet
-    const { data: bet, error } = await supabase
-      .from('bets')
-      .insert({
-        market_id,
-        analysis_id: analysis_id || null,
-        category: category || 'weather',
-        direction,
-        outcome_label,
-        entry_price: normalizedPrice,
-        amount_usd,
-        is_paper: true,
-        status: 'OPEN',
-      })
-      .select()
-      .single();
-
-    if (error) {
-      return NextResponse.json({ error: 'Failed to place bet' }, { status: 500 });
-    }
-
-    // Update paper_trade_start_date if this is the first bet
-    const { data: startConfig } = await supabase
-      .from('system_config')
-      .select('value')
-      .eq('key', 'paper_trade_start_date')
-      .single();
-
-    if (startConfig && !startConfig.value) {
-      await supabase
-        .from('system_config')
-        .update({
-          value: new Date().toISOString().split('T')[0],
-          updated_at: new Date().toISOString(),
-        })
-        .eq('key', 'paper_trade_start_date');
-    }
-
-    // Update total bets count
-    const { count } = await supabase
-      .from('bets')
-      .select('*', { count: 'exact', head: true });
-
-    await supabase
-      .from('system_config')
-      .update({
-        value: (count || 0).toString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('key', 'total_paper_bets');
-
-    return NextResponse.json({ bet });
-  } catch {
-    return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
-  }
-}
+// POST endpoint removed — all bets are now placed exclusively
+// by the automated place-bets pipeline (Netlify scheduled function)

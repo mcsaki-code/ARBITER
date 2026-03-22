@@ -72,6 +72,12 @@ function formatCents(price: number): string {
   return `${Math.round(cents)}¢`;
 }
 
+/** Format a number with commas for thousands and optional decimal places */
+function formatNumber(n: number, decimals?: number): string {
+  const d = decimals !== undefined ? decimals : (Number.isInteger(n) ? 0 : 2);
+  return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
 function getBetDisplayName(bet: Bet): string {
   if (bet.market_question) return bet.market_question;
   if (bet.outcome_label && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label)) {
@@ -117,10 +123,6 @@ export default function HomePage() {
   const [sportsCount, setSportsCount] = useState(0);
   const [cryptoCount, setCryptoCount] = useState(0);
   const [cryptoSignals, setCryptoSignals] = useState<Record<string, { spot_price: number; rsi_14: number | null; signal_summary: string }>>({});
-
-  // Bet placement state
-  const [placingBet, setPlacingBet] = useState<string | null>(null); // track which opp is being bet on
-  const [betResult, setBetResult] = useState<{ id: string; success: boolean; message: string } | null>(null);
 
   // Pipeline state
   const [pipelineStatus, setPipelineStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -252,57 +254,6 @@ export default function HomePage() {
     }
   };
 
-  // ============================================================
-  // Place a bet from AI Picks
-  // ============================================================
-  const placeBet = async (opp: CitySignal | ArbOpportunity) => {
-    const isSignal = 'city_name' in opp;
-    if (!isSignal) return; // Only weather signals can be bet on directly for now
-
-    const signal = opp as CitySignal;
-    const oppId = signal.city_id;
-    setPlacingBet(oppId);
-    setBetResult(null);
-
-    try {
-      // Normalize edge for bet amount calculation
-      const rawEdge = signal.edge || 0;
-      const normalizedEdge = rawEdge > 1 ? rawEdge / 1000 : rawEdge;
-
-      const betAmount = signal.rec_bet_usd && signal.rec_bet_usd > 0
-        ? signal.rec_bet_usd
-        : Math.min(3, bankroll * 0.006);
-
-      const entryPrice = signal.market_price || 0.5;
-
-      const res = await fetch('/api/bets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          market_id: signal.city_id, // This maps through the signals API
-          category: 'weather',
-          direction: signal.direction || 'BUY_YES',
-          outcome_label: signal.best_outcome_label,
-          entry_price: entryPrice > 1 ? entryPrice / 100 : entryPrice,
-          amount_usd: betAmount,
-        }),
-      });
-
-      if (res.ok) {
-        setBetResult({ id: oppId, success: true, message: 'Bet placed' });
-        // Reload data after a moment
-        setTimeout(() => window.location.reload(), 1500);
-      } else {
-        const err = await res.json();
-        setBetResult({ id: oppId, success: false, message: err.error || 'Failed' });
-      }
-    } catch {
-      setBetResult({ id: oppId, success: false, message: 'Network error' });
-    } finally {
-      setPlacingBet(null);
-    }
-  };
-
   // Derived stats
   const openBets = bets.filter((b) => b.status === 'OPEN');
   const resolvedBets = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
@@ -411,11 +362,11 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
               <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Bankroll</div>
               <div className="text-2xl font-bold text-arbiter-text">
-                ${bankroll.toFixed(0)}
+                ${formatNumber(bankroll, 0)}
               </div>
               {totalPnl !== 0 && (
                 <div className={`text-xs font-semibold mt-1 ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                  {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)} from trading
+                  {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)} from trading
                 </div>
               )}
             </div>
@@ -428,7 +379,7 @@ export default function HomePage() {
               </div>
               {openBets.length > 0 && (
                 <div className="text-xs text-arbiter-text-3 mt-1">
-                  ${openExposure.toFixed(2)} at risk
+                  ${formatNumber(openExposure)} at risk
                 </div>
               )}
             </div>
@@ -450,7 +401,7 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
               <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Profit</div>
               <div className={`text-2xl font-bold ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
+                {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)}
               </div>
             </div>
 
@@ -458,7 +409,7 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
               <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Pipeline</div>
               <div className={`text-2xl font-bold ${potentialWinnings >= 0 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
-                {potentialWinnings >= 0 ? '+' : ''}{potentialWinnings.toFixed(0)}
+                {potentialWinnings >= 0 ? '+' : ''}{formatNumber(potentialWinnings, 0)}
               </div>
               {potentialWinnings > 0 && (
                 <div className="text-xs text-arbiter-text-3 mt-1">
@@ -566,12 +517,12 @@ export default function HomePage() {
                         </div>
                         {recBet && recBet > 0 && (
                           <div className="text-xs font-semibold text-arbiter-green">
-                            Recommended: ${recBet.toFixed(2)}
+                            Recommended: ${formatNumber(recBet)}
                           </div>
                         )}
                       </div>
 
-                      {/* Action button — check for existing open bet on this market */}
+                      {/* Bet status — show if AI already placed a bet on this market */}
                       <div className="mt-3">
                         {(() => {
                           const oppMarketId = isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id;
@@ -580,35 +531,15 @@ export default function HomePage() {
                           if (existingBet) {
                             return (
                               <div className="w-full text-center text-xs font-semibold py-2 px-3 rounded bg-arbiter-amber/10 text-arbiter-amber border border-arbiter-amber/30">
-                                ACTIVE — ${existingBet.amount_usd.toFixed(2)} at {formatCents(existingBet.entry_price)}
-                              </div>
-                            );
-                          }
-
-                          if (betResult && betResult.id === oppMarketId) {
-                            return (
-                              <div className={`w-full text-center text-xs font-semibold py-2 px-3 rounded ${
-                                betResult.success
-                                  ? 'bg-arbiter-green/20 text-arbiter-green border border-arbiter-green/40'
-                                  : 'bg-arbiter-red/20 text-arbiter-red border border-arbiter-red/40'
-                              }`}>
-                                {betResult.message}
+                                ACTIVE — ${formatNumber(existingBet.amount_usd)} at {formatCents(existingBet.entry_price)}
                               </div>
                             );
                           }
 
                           return (
-                            <button
-                              onClick={() => placeBet(opp)}
-                              disabled={placingBet !== null}
-                              className={`w-full text-xs font-semibold py-2 px-3 rounded transition-colors ${
-                                placingBet === oppMarketId
-                                  ? 'bg-arbiter-text-3/20 text-arbiter-text-3 cursor-wait'
-                                  : 'bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/40 text-arbiter-green'
-                              }`}
-                            >
-                              {placingBet === oppMarketId ? 'Placing...' : 'BET NOW'}
-                            </button>
+                            <div className="w-full text-center text-xs py-2 px-3 rounded bg-arbiter-bg text-arbiter-text-3 border border-arbiter-border/50">
+                              Auto-bet queued — next scan in ≤30 min
+                            </div>
                           );
                         })()}
                       </div>
@@ -690,10 +621,10 @@ export default function HomePage() {
                       </div>
                       <div className="text-right shrink-0 ml-3">
                         <div className="text-sm font-bold text-arbiter-text">
-                          ${bet.amount_usd.toFixed(2)}
+                          ${formatNumber(bet.amount_usd)}
                           {potentialProfit > 0 && (
                             <div className="text-xs text-arbiter-green font-semibold">
-                              → +${potentialProfit.toFixed(2)}
+                              → +${formatNumber(potentialProfit)}
                             </div>
                           )}
                         </div>
@@ -707,8 +638,8 @@ export default function HomePage() {
               {/* Total exposure and potential upside summary */}
               <div className="px-5 py-3 bg-arbiter-bg border-t border-arbiter-border/50">
                 <div className="text-xs text-arbiter-text-3">
-                  Total exposure: <span className="text-arbiter-text font-semibold">${openExposure.toFixed(2)}</span> |
-                  Potential upside: <span className="text-arbiter-green font-semibold">${potentialWinnings.toFixed(2)}</span>
+                  Total exposure: <span className="text-arbiter-text font-semibold">${formatNumber(openExposure)}</span> |
+                  Potential upside: <span className="text-arbiter-green font-semibold">${formatNumber(potentialWinnings)}</span>
                 </div>
               </div>
 
@@ -754,7 +685,7 @@ export default function HomePage() {
                     </div>
                     <div className="text-right shrink-0 ml-3">
                       <div className={`text-sm font-bold font-mono ${(bet.pnl || 0) >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                        {(bet.pnl || 0) >= 0 ? '+' : ''}{(bet.pnl || 0).toFixed(2)}
+                        {(bet.pnl || 0) >= 0 ? '+' : ''}{formatNumber(bet.pnl || 0)}
                       </div>
                     </div>
                   </div>

@@ -5,6 +5,12 @@ import { Bet, PerformanceSnapshot, DataState } from '@/lib/types';
 import { DataStateWrapper } from '@/components/DataState';
 import { Badge } from '@/components/Badge';
 
+/** Format a number with commas for thousands and optional decimal places */
+function fmt(n: number, decimals?: number): string {
+  const d = decimals !== undefined ? decimals : (Number.isInteger(n) ? 0 : 2);
+  return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
 interface AnalyticsApiResponse {
   bets: Bet[];
   config: Record<string, string>;
@@ -119,7 +125,7 @@ export default function AnalyticsPage() {
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
         <StatCard
           label="TOTAL P&L"
-          value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
+          value={`${totalPnl >= 0 ? '+' : ''}$${fmt(totalPnl)}`}
           color={totalPnl >= 0 ? 'arbiter-green' : 'arbiter-red'}
         />
         <StatCard
@@ -139,7 +145,7 @@ export default function AnalyticsPage() {
         />
         <StatCard
           label="SHARPE RATIO"
-          value={sharpe.toFixed(2)}
+          value={fmt(sharpe)}
           color={sharpe > 0 ? 'arbiter-green' : sharpe < 0 ? 'arbiter-red' : 'arbiter-text'}
         />
       </div>
@@ -196,19 +202,19 @@ export default function AnalyticsPage() {
             <div className="space-y-2 text-xs">
               <div className="flex justify-between">
                 <span className="text-arbiter-text-3">Average Bet Size</span>
-                <span className="font-data text-arbiter-text">${avgBetSize.toFixed(0)}</span>
+                <span className="font-data text-arbiter-text">${fmt(avgBetSize, 0)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-arbiter-text-3">Max Bet Size</span>
-                <span className="font-data text-arbiter-text">${maxBetSize.toFixed(0)}</span>
+                <span className="font-data text-arbiter-text">${fmt(maxBetSize, 0)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-arbiter-text-3">Largest Win</span>
-                <span className="font-data text-arbiter-green">{largestWin > 0 ? '+' : ''}${largestWin.toFixed(2)}</span>
+                <span className="font-data text-arbiter-green">{largestWin > 0 ? '+' : ''}${fmt(largestWin)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-arbiter-text-3">Largest Loss</span>
-                <span className="font-data text-arbiter-red">${largestLoss.toFixed(2)}</span>
+                <span className="font-data text-arbiter-red">${fmt(largestLoss)}</span>
               </div>
             </div>
           </div>
@@ -250,7 +256,7 @@ export default function AnalyticsPage() {
               OPEN BET PIPELINE
             </div>
             <div className="text-2xl font-data font-semibold text-arbiter-blue">
-              {openPotentialProfit >= 0 ? '+' : ''}${openPotentialProfit.toFixed(2)}
+              {openPotentialProfit >= 0 ? '+' : ''}${fmt(openPotentialProfit)}
             </div>
             <p className="text-[10px] text-arbiter-text-3 mt-2">
               Potential profit from {open.length} open bets if all win
@@ -262,9 +268,9 @@ export default function AnalyticsPage() {
             <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-2">
               Starting Bankroll
             </div>
-            <div className="text-lg font-data text-arbiter-text">${bankroll.toFixed(0)}</div>
+            <div className="text-lg font-data text-arbiter-text">${fmt(bankroll, 0)}</div>
             <div className="text-[10px] text-arbiter-text-3 mt-2">
-              Current Value: ${(bankroll + totalPnl).toFixed(0)}
+              Current Value: ${fmt(bankroll + totalPnl, 0)}
             </div>
           </div>
         </div>
@@ -322,17 +328,17 @@ export default function AnalyticsPage() {
                         {formatPrice(bet.entry_price)}
                       </td>
                       <td className="px-4 py-2 font-data text-right text-arbiter-text">
-                        ${bet.amount_usd.toFixed(0)}
+                        ${fmt(bet.amount_usd, 0)}
                       </td>
                       <td className="px-4 py-2 font-data text-right text-arbiter-text-2">
-                        {payout !== null ? `$${payout.toFixed(0)}` : '—'}
+                        {payout !== null ? `$${fmt(payout, 0)}` : '—'}
                       </td>
                       <td
                         className={`px-4 py-2 font-data text-right ${
                           (bet.pnl || 0) >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'
                         }`}
                       >
-                        {bet.pnl !== null ? `${bet.pnl >= 0 ? '+' : ''}$${bet.pnl.toFixed(0)}` : '—'}
+                        {bet.pnl !== null ? `${bet.pnl >= 0 ? '+' : ''}$${fmt(bet.pnl, 0)}` : '—'}
                       </td>
                       <td className="px-4 py-2 text-center">
                         <Badge
@@ -385,13 +391,13 @@ export default function AnalyticsPage() {
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-xs font-data">
-                    <span className="text-arbiter-text-2">${bet.amount_usd.toFixed(0)}</span>
+                    <span className="text-arbiter-text-2">${fmt(bet.amount_usd, 0)}</span>
                     {payout !== null && (
-                      <span className="text-arbiter-text-2">{payout.toFixed(0)}</span>
+                      <span className="text-arbiter-text-2">{fmt(payout, 0)}</span>
                     )}
                     {bet.pnl !== null && (
                       <span className={bet.pnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}>
-                        {bet.pnl >= 0 ? '+' : ''}${bet.pnl.toFixed(0)}
+                        {bet.pnl >= 0 ? '+' : ''}${fmt(bet.pnl, 0)}
                       </span>
                     )}
                   </div>

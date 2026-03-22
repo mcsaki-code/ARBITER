@@ -89,8 +89,7 @@ export default function CryptoPage() {
   const [state, setState] = useState<DataState>('loading');
   const [asset, setAsset] = useState<string>('all');
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [betting, setBetting] = useState(false);
-  const [betResult, setBetResult] = useState<{ id: string; msg: string } | null>(null);
+  // Manual betting removed — all bets placed by AI auto-placement pipeline
 
   const fetchData = useCallback(async () => {
     try {
@@ -147,41 +146,6 @@ export default function CryptoPage() {
 
   const btcIndicators = parseSignals(btcSignal);
   const ethIndicators = parseSignals(ethSignal);
-
-  const placeBet = async (market: CryptoMarket, direction: 'BUY_YES' | 'BUY_NO') => {
-    setBetting(true);
-    setBetResult(null);
-    try {
-      const priceIndex = direction === 'BUY_YES' ? 0 : 1;
-      const entryPrice = market.outcome_prices[priceIndex] || 0.5;
-      const analysis = getAnalysis(market.id);
-      const amount = analysis?.rec_bet_usd || 10;
-
-      const res = await fetch('/api/bets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          market_id: market.id,
-          analysis_id: analysis?.id || null,
-          category: 'crypto',
-          direction,
-          outcome_label: direction === 'BUY_YES' ? (market.outcomes?.[0] || 'Yes') : (market.outcomes?.[1] || 'No'),
-          entry_price: entryPrice,
-          amount_usd: amount,
-        }),
-      });
-      const json = await res.json();
-      if (res.ok) {
-        const directionLabel = direction === 'BUY_YES' ? 'YES' : 'NO';
-        setBetResult({ id: market.id, msg: `Practice bet placed! ${directionLabel} at ${(entryPrice * 100).toFixed(0)}¢ for $${amount.toFixed(0)}` });
-      } else {
-        setBetResult({ id: market.id, msg: `Error: ${json.error}` });
-      }
-    } catch (err) {
-      setBetResult({ id: market.id, msg: 'Failed to place bet' });
-    }
-    setBetting(false);
-  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
@@ -412,8 +376,6 @@ export default function CryptoPage() {
           {filtered.map((market) => {
             const isExpanded = expanded === market.id;
             const analysis = getAnalysis(market.id);
-            const hasResult = betResult?.id === market.id;
-
             return (
               <div key={market.id} className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
                 {/* Clickable header */}
@@ -509,30 +471,11 @@ export default function CryptoPage() {
                       </div>
                     </div>
 
-                    {/* Bet placement buttons */}
-                    <div>
-                      <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1.5">Place a Bet (Practice Mode)</div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => placeBet(market, 'BUY_YES')}
-                          disabled={betting}
-                          className="flex-1 bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/30 text-arbiter-green rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50"
-                        >
-                          {betting ? 'Placing...' : `Bet YES at ${market.outcome_prices[0] ? (market.outcome_prices[0] * 100).toFixed(0) + '¢' : '--'}`}
-                        </button>
-                        <button
-                          onClick={() => placeBet(market, 'BUY_NO')}
-                          disabled={betting}
-                          className="flex-1 bg-arbiter-red/10 hover:bg-arbiter-red/20 border border-arbiter-red/30 text-arbiter-red rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50"
-                        >
-                          {betting ? 'Placing...' : `Bet NO at ${market.outcome_prices[1] ? (market.outcome_prices[1] * 100).toFixed(0) + '¢' : '--'}`}
-                        </button>
+                    {/* Auto-bet status */}
+                    <div className="bg-arbiter-bg rounded-lg p-3 text-center">
+                      <div className="text-xs text-arbiter-text-3">
+                        Bets placed automatically by AI when edge meets thresholds
                       </div>
-                      {hasResult && (
-                        <div className={`text-xs mt-1.5 font-mono ${betResult.msg.startsWith('Error') ? 'text-arbiter-red' : 'text-arbiter-green'}`}>
-                          {betResult.msg}
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}

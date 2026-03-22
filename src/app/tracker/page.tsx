@@ -7,6 +7,12 @@ import { Badge } from '@/components/Badge';
 import { DataStateWrapper } from '@/components/DataState';
 import { Bet, PerformanceSnapshot, DataState } from '@/lib/types';
 
+/** Format a number with commas for thousands and optional decimal places */
+function fmt(n: number, decimals?: number): string {
+  const d = decimals !== undefined ? decimals : (Number.isInteger(n) ? 0 : 2);
+  return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
 interface TrackerApiResponse {
   bets: Bet[];
   config: Record<string, string>;
@@ -102,7 +108,7 @@ export default function TrackerPage() {
         />
         <StatBox
           label="PROFIT"
-          value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
+          value={`${totalPnl >= 0 ? '+' : ''}$${fmt(totalPnl)}`}
           valueColor={totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}
         />
         <StatBox
@@ -202,13 +208,13 @@ export default function TrackerPage() {
                           })()}
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
-                          ${bet.amount_usd.toFixed(0)}
+                          ${fmt(bet.amount_usd, 0)}
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
                           {bet.status === 'OPEN'
-                            ? `$${(bet.amount_usd / bet.entry_price).toFixed(2)}`
+                            ? `$${fmt(bet.amount_usd / bet.entry_price)}`
                             : bet.status === 'WON'
-                            ? `$${(bet.amount_usd + (bet.pnl || 0)).toFixed(0)}`
+                            ? `$${fmt(bet.amount_usd + (bet.pnl || 0), 0)}`
                             : '$0'}
                         </td>
                         <td
@@ -219,7 +225,7 @@ export default function TrackerPage() {
                           }`}
                         >
                           {bet.pnl !== null
-                            ? `${bet.pnl >= 0 ? '+' : ''}$${bet.pnl.toFixed(0)}`
+                            ? `${bet.pnl >= 0 ? '+' : ''}$${fmt(bet.pnl, 0)}`
                             : '—'}
                         </td>
                         <td className="px-4 py-2 text-right">
@@ -293,7 +299,7 @@ export default function TrackerPage() {
                       </span>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-arbiter-text-2">
-                          ${bet.amount_usd.toFixed(0)}
+                          ${fmt(bet.amount_usd, 0)}
                         </span>
                         {bet.pnl !== null && (
                           <span
@@ -301,7 +307,7 @@ export default function TrackerPage() {
                               bet.pnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'
                             }`}
                           >
-                            {bet.pnl >= 0 ? '+' : ''}${bet.pnl.toFixed(0)}
+                            {bet.pnl >= 0 ? '+' : ''}${fmt(bet.pnl, 0)}
                           </span>
                         )}
                       </div>
@@ -337,12 +343,12 @@ export default function TrackerPage() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-arbiter-text-3">Total Exposure</span>
-                  <span className="text-xs font-mono font-medium">${pipelineSummary.total_exposure.toFixed(0)}</span>
+                  <span className="text-xs font-mono font-medium">${fmt(pipelineSummary.total_exposure, 0)}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-arbiter-text-3">Potential Profit</span>
                   <span className={`text-xs font-mono font-medium ${pipelineSummary.total_potential_profit >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                    {pipelineSummary.total_potential_profit >= 0 ? '+' : ''}${pipelineSummary.total_potential_profit.toFixed(0)}
+                    {pipelineSummary.total_potential_profit >= 0 ? '+' : ''}${fmt(pipelineSummary.total_potential_profit, 0)}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">
