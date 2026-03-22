@@ -14,7 +14,7 @@ const supabase = createClient(
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 3;
-const MIN_EDGE_PCT = 0.05;
+const MIN_EDGE_PCT = 0.02;
 
 interface SignalRow {
   id: string;

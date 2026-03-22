@@ -164,7 +164,7 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   // Process cities one at a time to stay under 25s
   for (const city of cities) {
-    if (Date.now() - startTime > 22000) {
+    if (Date.now() - startTime > 20000) {
       console.warn('[ingest-weather] Approaching time limit, stopping');
       break;
     }

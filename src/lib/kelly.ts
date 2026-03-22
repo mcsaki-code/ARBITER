@@ -15,7 +15,7 @@ export function calculateBetSize(params: KellyParams): KellyResult {
   const { trueProb: p, marketPrice: c, confidence, liquidity, bankroll } = params;
   const edge = p - c;
 
-  if (edge < 0.05) return { fraction: 0, amountUsd: 0, eligible: false };
+  if (edge < 0.02) return { fraction: 0, amountUsd: 0, eligible: false };
 
   // Payout ratio: win $(1-c) for every $c risked
   const b = (1 - c) / c;

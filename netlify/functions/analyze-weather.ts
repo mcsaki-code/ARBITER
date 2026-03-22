@@ -85,8 +85,8 @@ export const handler = schedule('*/20 * * * *', async () => {
       ? Math.max(0, (new Date(market.resolution_date).getTime() - Date.now()) / 3600000)
       : 0;
 
-    if (hoursRemaining < 4) continue;
-    if (market.liquidity_usd < 25000) continue;
+    if (hoursRemaining < 2) continue;
+    if (market.liquidity_usd < 10000) continue;
 
     const prompt = `You are ARBITER's weather analyst. Compare forecast models to Polymarket temperature brackets and identify mispricings.
 
@@ -116,9 +116,9 @@ TASK:
 3. Calculate edge = true_prob - market_price per bracket
 4. Select the single best bet (highest edge that meets criteria)
 5. Return edge + confidence accurately for Kelly calculation
-6. Set auto_eligible = true only if agreement=HIGH, confidence=HIGH, edge>=0.08
+6. Set auto_eligible = true only if (agreement=HIGH or MEDIUM), (confidence=HIGH or MEDIUM), edge>=0.04
 
-SKIP (return best_bet: null) if: agreement=LOW, liquidity<$25k, hours_remaining<4, edge<0.05
+SKIP (return best_bet: null) if: agreement=LOW, liquidity<$10k, hours_remaining<2, edge<0.02
 
 Respond ONLY in JSON:
 {
@@ -190,7 +190,7 @@ Respond ONLY in JSON:
         const p = analysis.best_bet.true_prob;
         const c = analysis.best_bet.market_price;
         const edge = p - c;
-        if (edge >= 0.05) {
+        if (edge >= 0.02) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
           if (fullKelly > 0) {

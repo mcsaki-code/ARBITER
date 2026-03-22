@@ -73,29 +73,30 @@ export default function TrackerPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
-      <h1 className="text-xl font-semibold mb-6">Performance Tracker</h1>
+      <h1 className="text-xl font-semibold mb-1">Results & Performance</h1>
+      <p className="text-sm text-arbiter-text-2 mb-6">Every bet the AI has placed, and how it turned out</p>
 
       {/* Top Stats Bar */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
-        <StatBox label="BETS" value={totalBets.toString()} />
+        <StatBox label="TOTAL BETS" value={totalBets.toString()} />
         <StatBox
-          label="W/L"
-          value={`${wins}/${losses}`}
+          label="WINS / LOSSES"
+          value={`${wins} / ${losses}`}
           valueColor={wins > losses ? 'text-arbiter-green' : wins < losses ? 'text-arbiter-red' : undefined}
         />
         <StatBox
-          label="P&L"
-          value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}`}
+          label="PROFIT"
+          value={`${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`}
           valueColor={totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}
         />
         <StatBox
-          label="ROI"
+          label="RETURN"
           value={`${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`}
           valueColor={roi >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}
         />
         <StatBox
-          label="UNLOCK"
-          value={daysRemaining > 0 ? `${daysRemaining}d` : '✓'}
+          label="REAL MONEY IN"
+          value={daysRemaining > 0 ? `${daysRemaining} days` : 'Ready!'}
           valueColor={daysRemaining > 0 ? 'text-arbiter-amber' : 'text-arbiter-green'}
         />
       </div>
@@ -126,7 +127,7 @@ export default function TrackerPage() {
             </div>
             <DataStateWrapper
               state={state}
-              emptyMessage="No bets placed yet — head to Weather to find edges"
+              emptyMessage="No bets yet! Hit 'Run AI Scanner' on the dashboard to start finding opportunities."
               skeletonCount={1}
             >
               {/* Desktop table */}
@@ -136,11 +137,11 @@ export default function TrackerPage() {
                     <tr className="text-arbiter-text-3 uppercase tracking-wider border-b border-arbiter-border">
                       <th className="text-left px-4 py-2">Date</th>
                       <th className="text-left px-4 py-2">Market</th>
-                      <th className="text-left px-4 py-2">Dir</th>
-                      <th className="text-right px-4 py-2">Entry</th>
-                      <th className="text-right px-4 py-2">Amount</th>
-                      <th className="text-right px-4 py-2">P&L</th>
-                      <th className="text-right px-4 py-2">Status</th>
+                      <th className="text-left px-4 py-2">Side</th>
+                      <th className="text-right px-4 py-2">Price</th>
+                      <th className="text-right px-4 py-2">Bet</th>
+                      <th className="text-right px-4 py-2">Profit</th>
+                      <th className="text-right px-4 py-2">Result</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -164,7 +165,7 @@ export default function TrackerPage() {
                           </Badge>
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
-                          ${bet.entry_price.toFixed(2)}
+                          {Math.round(bet.entry_price * 100)}¢
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
                           ${bet.amount_usd.toFixed(0)}
@@ -266,20 +267,15 @@ export default function TrackerPage() {
             winRateNeeded={winRateNeeded}
           />
 
-          {/* Calibration note */}
-          {daysRemaining > 0 && (
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
-              <p className="text-xs text-arbiter-text-2 leading-relaxed">
-                {betsNeeded > 0
-                  ? `Need ${betsNeeded} more bets`
-                  : 'Bet count met'}
-                {daysRemaining > 0 && betsNeeded > 0 ? ' and ' : daysRemaining > 0 ? 'Need ' : ''}
-                {daysRemaining > 0 ? `${daysRemaining} more days` : ''}
-                {winRateNeeded ? ` + win rate above 58%` : ''}
-                {' to unlock real trading.'}
-              </p>
-            </div>
-          )}
+          {/* Practice mode explanation */}
+          <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
+            <p className="text-xs font-medium text-arbiter-text-2 mb-1">Practice Mode</p>
+            <p className="text-xs text-arbiter-text-3 leading-relaxed">
+              {daysRemaining > 0 || betsNeeded > 0 || winRateNeeded
+                ? `The AI needs to prove itself before using real money. ${betsNeeded > 0 ? `${betsNeeded} more practice bets needed. ` : ''}${daysRemaining > 0 ? `${daysRemaining} days left in the trial period. ` : ''}${winRateNeeded ? 'Win rate needs to reach 58%. ' : ''}Once all three milestones are hit, real trading unlocks automatically.`
+                : 'All milestones complete! The AI has proven itself and is ready for real money trading.'}
+            </p>
+          </div>
         </div>
       </div>
     </div>

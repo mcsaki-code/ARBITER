@@ -21,7 +21,7 @@ const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_SINGLE_BET_PCT = 0.05;
 const MAX_DAILY_EXPOSURE_PCT = 0.25;
 const MAX_DAILY_BETS = 20;
-const MIN_EDGE = 0.03; // Lower threshold to capture more opportunities
+const MIN_EDGE = 0.02; // Lower threshold to capture more opportunities
 
 interface AnalysisCandidate {
   id: string;

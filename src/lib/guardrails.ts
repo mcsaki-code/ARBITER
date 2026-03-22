@@ -42,11 +42,11 @@ export function isAutoEligible(
   config: SystemConfigMap
 ): boolean {
   return (
-    (analysis.edge ?? 0) >= 0.08 &&
+    (analysis.edge ?? 0) >= 0.04 &&
     analysis.confidence === 'HIGH' &&
-    analysis.model_agreement === 'HIGH' &&
-    (analysis.market_liquidity ?? 0) >= 50000 &&
-    (analysis.hours_remaining ?? 0) >= 6 &&
+    (analysis.model_agreement === 'HIGH' || analysis.model_agreement === 'MEDIUM') &&
+    (analysis.market_liquidity ?? 0) >= 10000 &&
+    (analysis.hours_remaining ?? 0) >= 2 &&
     (analysis.rec_bet_usd ?? 0) <=
       parseFloat(config.paper_bankroll || '500') * 0.05 &&
     !(analysis.flags || []).includes('data_stale')

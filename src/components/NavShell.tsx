@@ -70,13 +70,13 @@ function IconCrypto({ className = '' }: { className?: string }) {
 }
 
 const NAV_ITEMS = [
-  { href: '/', label: 'Home', Icon: IconHome },
-  { href: '/weather', label: 'Weather', Icon: IconWeather },
-  { href: '/markets', label: 'Markets', Icon: IconMarkets },
-  { href: '/arb', label: 'Arb', Icon: IconArb },
+  { href: '/', label: 'Dashboard', Icon: IconHome },
   { href: '/sports', label: 'Sports', Icon: IconSports },
   { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
-  { href: '/tracker', label: 'Tracker', Icon: IconTracker },
+  { href: '/weather', label: 'Weather', Icon: IconWeather },
+  { href: '/arb', label: 'Arbitrage', Icon: IconArb },
+  { href: '/tracker', label: 'Results', Icon: IconTracker },
+  { href: '/markets', label: 'All Markets', Icon: IconMarkets },
 ];
 
 export function NavShell({ children }: { children: React.ReactNode }) {
@@ -95,7 +95,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
           </div>
           <div className="hidden lg:block h-4 w-px bg-arbiter-border" />
           <span className="text-arbiter-text-3 text-xs hidden lg:inline tracking-wide">
-            Read the world. Beat the market.
+            AI-powered prediction market scanner
           </span>
         </Link>
         <nav className="flex items-center gap-1">
@@ -128,7 +128,7 @@ export function NavShell({ children }: { children: React.ReactNode }) {
           </span>
         </Link>
         <span className="text-[10px] text-arbiter-text-3 tracking-widest uppercase">
-          Phase 2
+          AI Scanner
         </span>
       </header>
 

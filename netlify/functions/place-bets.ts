@@ -19,7 +19,7 @@ const MAX_SINGLE_BET_PCT = 0.05;       // 5% of bankroll
 const MAX_DAILY_EXPOSURE_PCT = 0.25;   // 25% of bankroll deployed per day
 const MAX_DAILY_BETS_AUTO = 20;
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
-const MIN_EDGE = 0.05;                 // 5% minimum edge
+const MIN_EDGE = 0.02;                 // 2% minimum edge
 
 interface AnalysisRow {
   id: string;
