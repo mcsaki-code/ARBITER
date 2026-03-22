@@ -120,14 +120,18 @@ export default function HomePage() {
     load();
   }, []);
 
+  // Pipeline detail log
+  const [pipelineDetails, setPipelineDetails] = useState<string[]>([]);
+
   // ============================================================
-  // Pipeline trigger — runs full ingest + market discovery + bet placement
+  // Pipeline trigger — runs full ingest + market discovery + analysis + bet placement
   // ============================================================
   const runPipeline = async () => {
     setPipelineStatus('running');
-    setPipelineLog('Ingesting weather forecasts...');
+    setPipelineLog('Step 1/4: Ingesting weather forecasts...');
+    setPipelineDetails([]);
     try {
-      // Step 1: Weather ingestion
+      // Step 1: Weather ingestion (two batches)
       const w1 = await fetch('/api/trigger/weather?offset=0');
       const w1Data = w1.ok ? await w1.json() : null;
       const f1 = w1Data?.summary?.forecasts || 0;
@@ -135,41 +139,43 @@ export default function HomePage() {
       const w2 = await fetch('/api/trigger/weather?offset=5');
       const w2Data = w2.ok ? await w2.json() : null;
       const f2 = w2Data?.summary?.forecasts || 0;
-      setPipelineLog(`${f1 + f2} forecasts. Discovering markets...`);
+      setPipelineLog(`Step 2/4: Discovering markets... (${f1 + f2} forecasts ingested)`);
 
       // Step 2: Market discovery
       const res = await fetch('/api/trigger');
       const trigData = res.ok ? await res.json() : null;
       const marketsFound = trigData?.summary?.marketsFound || 0;
-      setPipelineLog(`${f1 + f2} forecasts, ${marketsFound} markets. Placing bets...`);
+      setPipelineLog(`Step 3/4: Analyzing markets + placing bets... (${marketsFound} markets found)`);
 
-      // Step 3: Place bets from existing analyses
+      // Step 3: Analyze + Place Bets (this now runs inline Claude analysis if needed)
       const betRes = await fetch('/api/trigger/bets');
       const betData = betRes.ok ? await betRes.json() : null;
       const betsPlaced = betData?.placed || 0;
+      const betLog = betData?.log || [];
+      setPipelineDetails(betLog);
 
       // Step 4: Resolve any settled markets
+      setPipelineLog('Step 4/4: Resolving settled bets...');
+      let resolved = 0;
       try {
         const resolveRes = await fetch('/api/resolve');
         const resolveData = resolveRes.ok ? await resolveRes.json() : null;
-        if (resolveData?.resolved > 0) {
-          setPipelineLog(
-            `${f1 + f2} forecasts, ${marketsFound} markets, ${betsPlaced} bets placed, ${resolveData.resolved} resolved`
-          );
-        }
+        resolved = resolveData?.resolved || 0;
       } catch { /* non-critical */ }
 
       const summary = [
         f1 + f2 > 0 ? `${f1 + f2} forecasts` : null,
         marketsFound > 0 ? `${marketsFound} markets` : null,
-        betsPlaced > 0 ? `${betsPlaced} bets placed` : null,
-      ].filter(Boolean).join(', ');
+        betData?.candidates > 0 ? `${betData.candidates} analyzed` : null,
+        betsPlaced > 0 ? `${betsPlaced} bets placed` : 'no new bets',
+        resolved > 0 ? `${resolved} resolved` : null,
+      ].filter(Boolean).join(' · ');
 
       setPipelineLog(summary || 'Pipeline complete — no new data');
-      setPipelineStatus(f1 + f2 > 0 || marketsFound > 0 || betsPlaced > 0 ? 'done' : 'done');
+      setPipelineStatus('done');
 
       // Reload after brief delay
-      setTimeout(() => window.location.reload(), 2500);
+      setTimeout(() => window.location.reload(), 3000);
     } catch (err) {
       setPipelineStatus('error');
       setPipelineLog(`Error: ${err instanceof Error ? err.message : 'check console'}`);
@@ -220,8 +226,19 @@ export default function HomePage() {
         </button>
       </div>
       {pipelineLog && (
-        <div className={`text-[10px] font-mono mb-4 px-1 ${pipelineStatus === 'error' ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
-          {pipelineLog}
+        <div className="mb-4 px-1">
+          <div className={`text-[10px] font-mono ${pipelineStatus === 'error' ? 'text-arbiter-red' : pipelineStatus === 'done' ? 'text-arbiter-green' : 'text-arbiter-amber'}`}>
+            {pipelineLog}
+          </div>
+          {pipelineDetails.length > 0 && (
+            <div className="mt-1 space-y-0.5">
+              {pipelineDetails.slice(-8).map((line, i) => (
+                <div key={i} className={`text-[9px] font-mono ${line.startsWith('BET:') ? 'text-arbiter-green' : line.startsWith('Error') || line.startsWith('Skip') ? 'text-arbiter-text-3' : 'text-arbiter-text-3/70'}`}>
+                  {line}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

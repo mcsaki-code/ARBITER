@@ -188,8 +188,8 @@ export const handler = schedule('*/30 * * * *', async () => {
       betAmount = Math.max(1, Math.round(bankroll * analysis.kelly_fraction * 100) / 100);
     }
 
-    // Fallback: minimum $1 bet for paper trading
-    if (betAmount <= 0) betAmount = 1;
+    // Fallback: $5 minimum for paper trading (enough to be meaningful)
+    if (betAmount <= 0) betAmount = 5;
 
     // Cap at max single bet
     betAmount = Math.min(betAmount, maxSingleBet);
@@ -213,8 +213,13 @@ export const handler = schedule('*/30 * * * *', async () => {
       entryPrice = analysis.market_price || null;
     }
 
-    // Need an entry price to place a bet
-    if (!entryPrice || entryPrice <= 0 || entryPrice >= 1) {
+    // Normalize entry price — handle percentages (e.g., 90 → 0.90)
+    if (entryPrice && entryPrice > 1) {
+      entryPrice = entryPrice / 100;
+    }
+
+    // Need a valid entry price between 0.5% and 99.5%
+    if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
       console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
@@ -230,6 +235,7 @@ export const handler = schedule('*/30 * * * *', async () => {
       amount_usd: betAmount,
       is_paper: true,
       status: 'OPEN',
+      placed_at: new Date().toISOString(),
     });
 
     if (error) {
