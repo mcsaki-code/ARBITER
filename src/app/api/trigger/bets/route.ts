@@ -261,15 +261,23 @@ export async function GET() {
         entryPrice = entryPrice / 100;
       }
 
-      // Validate entry price (must be between 0.01 and 0.99 exclusive)
-      if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
+      // For BUY_NO bets, entry price is what we pay for the NO side = 1 - YES price
+      if (analysis.direction === 'BUY_NO' && entryPrice !== null && entryPrice < 0.5) {
+        entryPrice = 1 - entryPrice;
+      }
+
+      // Validate entry price (0.1% to 99.9% — allow extreme-priced markets)
+      if (!entryPrice || entryPrice <= 0.001 || entryPrice >= 0.999) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice} out of range`);
         continue;
       }
 
+      // analysis_id FK references weather_analyses — only set for weather bets
+      const analysisId = analysis.category === 'weather' ? analysis.id : null;
+
       const { error } = await supabase.from('bets').insert({
         market_id: analysis.market_id,
-        analysis_id: analysis.id,
+        analysis_id: analysisId,
         category: analysis.category,
         direction: analysis.direction,
         outcome_label: outcomeLabel,

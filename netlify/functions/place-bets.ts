@@ -218,16 +218,24 @@ export const handler = schedule('*/30 * * * *', async () => {
       entryPrice = entryPrice / 100;
     }
 
-    // Need a valid entry price between 0.5% and 99.5%
-    if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
+    // For BUY_NO bets, entry price is what we pay for the NO side = 1 - YES price
+    // If the YES price is near 0, the NO price is near 1 (cheap to bet against)
+    if (analysis.direction === 'BUY_NO' && entryPrice !== null && entryPrice < 0.5) {
+      entryPrice = 1 - entryPrice;
+    }
+
+    // Need a valid entry price between 0.1% and 99.9%
+    // Low-priced markets (like "will X happen" at 0.3%) are valid bets
+    if (!entryPrice || entryPrice <= 0.001 || entryPrice >= 0.999) {
       console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
 
-    // Insert the bet
+    // Insert the bet — use analysis_id only for weather (FK constraint)
+    // Sports and crypto analyses live in separate tables
     const { error } = await supabase.from('bets').insert({
       market_id: analysis.market_id,
-      analysis_id: analysis.id,
+      analysis_id: analysis.source_table === 'weather_analyses' ? analysis.id : null,
       category: analysis.category,
       direction: analysis.direction,
       outcome_label: outcomeLabel,
