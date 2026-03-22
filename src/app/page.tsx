@@ -357,7 +357,7 @@ export default function HomePage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
         {/* Key Metrics - 5 cards */}
         <div className="lg:col-span-2">
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
             {/* Bankroll */}
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
               <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Bankroll</div>

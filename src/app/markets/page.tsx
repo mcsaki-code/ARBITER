@@ -173,7 +173,7 @@ export default function MarketsPage() {
         skeletonCount={4}
       >
         {/* Stats bar */}
-        <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
             <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Weather Markets</div>
             <div className="font-mono text-lg">{weatherMarkets.length}</div>

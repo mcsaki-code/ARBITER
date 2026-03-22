@@ -278,7 +278,7 @@ export default function TrackerPage() {
                     onClick={() => setExpandedBet(expandedBet === bet.id ? null : bet.id)}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium truncate max-w-[200px]">
+                      <span className="text-sm font-medium truncate flex-1 min-w-0">
                         {getBetDisplayName(bet)}
                       </span>
                       <Badge

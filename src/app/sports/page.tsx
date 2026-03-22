@@ -126,14 +126,14 @@ export default function SportsPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
         <div>
           <h1 className="text-xl font-semibold mb-1">Sports - AI vs. Sportsbooks</h1>
           <p className="text-sm text-arbiter-text-2">
             Our AI compares odds from 5+ sportsbooks to find markets where Polymarket is wrong
           </p>
         </div>
-        <div className="flex gap-1 bg-arbiter-card border border-arbiter-border rounded-lg p-1 flex-wrap">
+        <div className="flex gap-1 bg-arbiter-card border border-arbiter-border rounded-lg p-1 flex-wrap shrink-0">
           <button
             onClick={() => setLeague('all')}
             className={`px-3 py-1.5 text-xs rounded-md transition-all ${
@@ -167,7 +167,7 @@ export default function SportsPage() {
         skeletonCount={4}
       >
         {/* Stats */}
-        <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
             <div className="text-[10px] text-arbiter-text-3 uppercase tracking-wider mb-1">Markets Tracked</div>
             <div className="font-mono text-lg">{data?.summary?.total_markets || 0}</div>

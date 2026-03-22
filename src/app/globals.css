@@ -88,6 +88,20 @@ body {
   background: var(--color-border-hi);
 }
 
+/* Prevent horizontal overflow on mobile */
+html, body {
+  overflow-x: hidden;
+}
+
+/* Hide scrollbar on mobile bottom nav */
+.mobile-nav-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.mobile-nav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 /* Mobile bottom sheet overlay */
 .bottom-sheet-overlay {
   backdrop-filter: blur(4px);

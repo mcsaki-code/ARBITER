@@ -144,30 +144,32 @@ export function NavShell({ children }: { children: React.ReactNode }) {
       {/* Page content */}
       <main className="flex-1 pb-20 md:pb-0">{children}</main>
 
-      {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 flex items-center justify-around border-t border-arbiter-border bg-arbiter-surface/95 backdrop-blur-sm z-50 py-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive = pathname === item.href;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`flex flex-col items-center py-2 px-3 min-h-[44px] min-w-[44px] transition-all duration-150 ${
-                isActive
-                  ? 'text-arbiter-amber'
-                  : 'text-arbiter-text-3 hover:text-arbiter-text-2'
-              }`}
-            >
-              <item.Icon />
-              <span className={`text-[10px] mt-1 tracking-wide ${isActive ? 'font-medium' : ''}`}>
-                {item.label}
-              </span>
-              {isActive && (
-                <div className="absolute bottom-1 w-4 h-0.5 bg-arbiter-amber rounded-full" />
-              )}
-            </Link>
-          );
-        })}
+      {/* Mobile bottom nav — horizontally scrollable for 8 items */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 border-t border-arbiter-border bg-arbiter-surface/95 backdrop-blur-sm z-50 overflow-x-auto mobile-nav-scroll">
+        <div className="flex items-center py-1 px-1 min-w-max">
+          {NAV_ITEMS.map((item) => {
+            const isActive = pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`relative flex flex-col items-center py-2 px-3 min-h-[44px] min-w-[48px] transition-all duration-150 ${
+                  isActive
+                    ? 'text-arbiter-amber'
+                    : 'text-arbiter-text-3 hover:text-arbiter-text-2'
+                }`}
+              >
+                <item.Icon />
+                <span className={`text-[9px] mt-1 tracking-wide whitespace-nowrap ${isActive ? 'font-medium' : ''}`}>
+                  {item.label}
+                </span>
+                {isActive && (
+                  <div className="absolute bottom-1 w-4 h-0.5 bg-arbiter-amber rounded-full" />
+                )}
+              </Link>
+            );
+          })}
+        </div>
       </nav>
     </div>
   );
