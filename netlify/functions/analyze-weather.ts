@@ -2,7 +2,7 @@
 // Netlify Scheduled Function: Analyze Weather V2
 // Runs every 20 minutes — Claude analysis with ensemble data
 // Supports: temperature (high/low), precipitation, snowfall
-// Max 3 markets per invocation to stay under time limit
+// Max 5 markets per invocation to stay under time limit
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -37,10 +37,13 @@ export const handler = schedule('*/20 * * * *', async () => {
     return { statusCode: 200 };
   }
 
+  // Sort markets: prioritize higher liquidity and those not recently analyzed
+  const sortedMarkets = [...markets].sort((a, b) => (b.liquidity_usd || 0) - (a.liquidity_usd || 0));
+
   let processed = 0;
-  for (const market of markets.slice(0, 3)) {
-    // STRICT time guard: 20s
-    if (Date.now() - startTime > 20000) break;
+  for (const market of sortedMarkets.slice(0, 5)) {
+    // STRICT time guard: 22s (slightly more room for 5 markets)
+    if (Date.now() - startTime > 22000) break;
 
     const city = market.weather_cities;
     if (!city) continue;
@@ -85,7 +88,7 @@ export const handler = schedule('*/20 * * * *', async () => {
       : 0;
 
     if (hoursRemaining < 2) continue;
-    if (market.liquidity_usd < 10000) continue;
+    if (market.liquidity_usd < 5000) continue;
 
     const outcomesList = market.outcomes
       .map((o: string, i: number) => `${o} → $${market.outcome_prices[i]?.toFixed(2) || '?'}`)

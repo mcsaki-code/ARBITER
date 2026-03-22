@@ -36,13 +36,13 @@ export async function notifyBetPlaced(bet: BetNotification): Promise<void> {
   const side = bet.direction === 'BUY_YES' ? 'YES' : 'NO';
   const mode = bet.isPaper ? 'PAPER' : 'LIVE';
   const price = (bet.entryPrice * 100).toFixed(0);
-  const emoji = bet.category === 'weather' ? '🌤' : bet.category === 'sports' ? '🏀' : bet.category === 'crypto' ? '₿' : '📊';
+  const tag = bet.category.toUpperCase();
 
-  const subject = `${emoji} Arbiter ${mode} Bet: ${side} $${bet.amountUsd.toFixed(2)} on ${bet.category}`;
+  const subject = `[${tag}] Arbiter ${mode} Bet: ${side} $${bet.amountUsd.toFixed(2)}`;
 
   const lines = [
     `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 500px; margin: 0 auto; background: #0d0d14; color: #e0e0e8; padding: 24px; border-radius: 12px;">`,
-    `<h2 style="color: #f0b429; margin: 0 0 16px 0; font-size: 18px;">${emoji} New ${mode} Bet Placed</h2>`,
+    `<h2 style="color: #f0b429; margin: 0 0 16px 0; font-size: 18px;">New ${mode} Bet Placed</h2>`,
     `<div style="background: #1a1a2e; padding: 16px; border-radius: 8px; margin-bottom: 12px;">`,
     bet.marketQuestion ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #e0e0e8;"><strong>Market:</strong> ${bet.marketQuestion}</p>` : '',
     bet.outcomeLabel ? `<p style="margin: 0 0 8px 0; font-size: 14px; color: #e0e0e8;"><strong>Outcome:</strong> ${bet.outcomeLabel}</p>` : '',
@@ -98,11 +98,11 @@ export async function notifyDailySummary(summary: {
 
   if (!apiKey || !toEmail) return;
 
-  const subject = `📊 Arbiter Daily: ${summary.betsPlaced} bets, $${summary.totalDeployed.toFixed(0)} deployed`;
+  const subject = `Arbiter Daily: ${summary.betsPlaced} bets, $${summary.totalDeployed.toFixed(0)} deployed`;
 
   const html = [
     `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 500px; margin: 0 auto; background: #0d0d14; color: #e0e0e8; padding: 24px; border-radius: 12px;">`,
-    `<h2 style="color: #f0b429; margin: 0 0 16px 0;">📊 Daily Summary</h2>`,
+    `<h2 style="color: #f0b429; margin: 0 0 16px 0;">Daily Summary</h2>`,
     `<div style="background: #1a1a2e; padding: 16px; border-radius: 8px;">`,
     `<p style="margin: 0 0 8px 0;"><strong>Bets Today:</strong> ${summary.betsPlaced}</p>`,
     `<p style="margin: 0 0 8px 0;"><strong>Deployed:</strong> $${summary.totalDeployed.toFixed(2)}</p>`,

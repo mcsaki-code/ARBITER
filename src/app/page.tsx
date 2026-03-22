@@ -92,12 +92,12 @@ function getConfidenceDots(level: string | null): string {
   return '●○○○';
 }
 
-function getCategoryEmoji(category: string | null): string {
-  if (!category) return '📊';
-  if (category === 'weather') return '🌤';
-  if (category === 'sports') return '🏀';
-  if (category === 'crypto') return '₿';
-  return '📊';
+function getCategoryBadge(category: string | null): React.ReactNode {
+  if (!category || category === 'general') return <div className="w-2 h-2 bg-slate-400 rounded-full" />;
+  if (category === 'weather') return <div className="w-2 h-2 bg-yellow-400 rounded-full" />;
+  if (category === 'sports') return <div className="w-2 h-2 bg-blue-400 rounded-full" />;
+  if (category === 'crypto') return <div className="w-2 h-2 bg-orange-400 rounded-full" />;
+  return <div className="w-2 h-2 bg-slate-400 rounded-full" />;
 }
 
 // ============================================================
@@ -256,6 +256,13 @@ export default function HomePage() {
   const edgeSignals = signals.filter((s) => s.signal_type === 'edge');
   const allOpportunities = [...edgeSignals, ...arbs];
 
+  // Calculate potential winnings from open bets
+  const potentialWinnings = openBets.reduce((sum, b) => {
+    const potentialPayout = b.amount_usd / b.entry_price;
+    const potentialProfit = potentialPayout - b.amount_usd;
+    return sum + potentialProfit;
+  }, 0);
+
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       {/* Header */}
@@ -276,7 +283,7 @@ export default function HomePage() {
                 : 'bg-arbiter-amber/15 text-arbiter-amber border border-arbiter-amber/40 hover:bg-arbiter-amber/25'
             }`}
           >
-            {pipelineStatus === 'running' ? 'Scanning...' : pipelineStatus === 'done' ? 'Done ✓' : 'Run AI Scanner'}
+            {pipelineStatus === 'running' ? 'Scanning...' : pipelineStatus === 'done' ? 'Done' : 'Run AI Scanner'}
           </button>
         </div>
 
@@ -338,9 +345,9 @@ export default function HomePage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-        {/* Key Metrics - 4 cards */}
+        {/* Key Metrics - 5 cards */}
         <div className="lg:col-span-2">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
             {/* Bankroll */}
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
               <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Bankroll</div>
@@ -387,6 +394,19 @@ export default function HomePage() {
                 {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
               </div>
             </div>
+
+            {/* Pipeline / Potential Winnings */}
+            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Pipeline</div>
+              <div className={`text-2xl font-bold ${potentialWinnings >= 0 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
+                {potentialWinnings >= 0 ? '+' : ''}{potentialWinnings.toFixed(0)}
+              </div>
+              {potentialWinnings > 0 && (
+                <div className="text-xs text-arbiter-text-3 mt-1">
+                  potential profit
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -411,7 +431,7 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
               <div className="border-b border-arbiter-border px-5 py-4">
                 <h2 className="text-sm font-semibold text-arbiter-text">
-                  ⚡ AI PICKS — Best opportunities right now
+                  AI PICKS — Best opportunities right now
                 </h2>
                 <p className="text-xs text-arbiter-text-3 mt-1">
                   {allOpportunities.length} high-confidence edges discovered
@@ -433,10 +453,10 @@ export default function HomePage() {
 
                   return (
                     <div key={isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id} className="p-5 hover:bg-arbiter-elevated/30 transition-colors">
-                      {/* Header with emoji and title */}
+                      {/* Header with category badge and title */}
                       <div className="flex items-start justify-between mb-3">
                         <div className="flex items-start gap-3 flex-1">
-                          <div className="text-lg">{getCategoryEmoji(category)}</div>
+                          <div className="mt-1.5">{getCategoryBadge(category)}</div>
                           <div className="flex-1 min-w-0">
                             <div className="text-sm font-semibold text-arbiter-text truncate">{title}</div>
                             {outcome && (
@@ -538,7 +558,7 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
               <div className="border-b border-arbiter-border px-5 py-4">
                 <h2 className="text-sm font-semibold text-arbiter-text">
-                  📊 LIVE POSITIONS — Your AI's open bets
+                  LIVE POSITIONS — Your AI's open bets
                 </h2>
               </div>
 
@@ -552,10 +572,14 @@ export default function HomePage() {
                     : null;
                   const priceMove = currentPrice ? currentPrice - bet.entry_price : null;
 
+                  // Calculate potential payout and profit
+                  const potentialPayout = bet.amount_usd / bet.entry_price;
+                  const potentialProfit = potentialPayout - bet.amount_usd;
+
                   return (
                     <div key={bet.id} className="px-5 py-3 flex items-center justify-between hover:bg-arbiter-elevated/30 transition-colors">
                       <div className="flex items-center gap-3 flex-1 min-w-0">
-                        <span className="text-lg">{getCategoryEmoji(bet.category)}</span>
+                        <div className="mt-0.5">{getCategoryBadge(bet.category)}</div>
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium text-arbiter-text truncate">
                             {getBetDisplayName(bet)}
@@ -571,12 +595,27 @@ export default function HomePage() {
                         </div>
                       </div>
                       <div className="text-right shrink-0 ml-3">
-                        <div className="text-sm font-bold text-arbiter-text">${bet.amount_usd.toFixed(2)}</div>
+                        <div className="text-sm font-bold text-arbiter-text">
+                          ${bet.amount_usd.toFixed(2)}
+                          {potentialProfit > 0 && (
+                            <div className="text-xs text-arbiter-green font-semibold">
+                              → +${potentialProfit.toFixed(2)}
+                            </div>
+                          )}
+                        </div>
                         <div className="text-xs text-arbiter-amber font-semibold">{new Date(bet.placed_at).toLocaleDateString()}</div>
                       </div>
                     </div>
                   );
                 })}
+              </div>
+
+              {/* Total exposure and potential upside summary */}
+              <div className="px-5 py-3 bg-arbiter-bg border-t border-arbiter-border/50">
+                <div className="text-xs text-arbiter-text-3">
+                  Total exposure: <span className="text-arbiter-text font-semibold">${openExposure.toFixed(2)}</span> |
+                  Potential upside: <span className="text-arbiter-green font-semibold">${potentialWinnings.toFixed(2)}</span>
+                </div>
               </div>
 
               {openBets.length > 6 && (
@@ -597,7 +636,7 @@ export default function HomePage() {
             <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
               <div className="border-b border-arbiter-border px-5 py-4">
                 <h2 className="text-sm font-semibold text-arbiter-text">
-                  🏆 RECENT RESULTS
+                  RECENT RESULTS
                 </h2>
               </div>
 
@@ -605,8 +644,10 @@ export default function HomePage() {
                 {resolvedBets.slice(0, 5).map((bet) => (
                   <div key={bet.id} className="px-5 py-3 flex items-center justify-between">
                     <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <div className="text-lg">
-                        {bet.status === 'WON' ? '✅' : '❌'}
+                      <div>
+                        <Badge variant={bet.status === 'WON' ? 'green' : 'red'}>
+                          {bet.status === 'WON' ? 'WON' : 'LOST'}
+                        </Badge>
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium text-arbiter-text truncate">
@@ -631,7 +672,7 @@ export default function HomePage() {
           {/* Practice Mode Progress */}
           <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-5">
             <h3 className="text-sm font-semibold text-arbiter-text mb-4">
-              🎯 PRACTICE MODE — Complete to unlock real trading
+              PRACTICE MODE — Complete to unlock real trading
             </h3>
 
             <div className="space-y-4">
@@ -686,7 +727,10 @@ export default function HomePage() {
               href="/weather"
               className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-arbiter-amber/40 transition-all"
             >
-              <div className="text-lg mb-2">🌤</div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 bg-yellow-400 rounded-full" />
+                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">WEA</span>
+              </div>
               <h4 className="text-sm font-semibold text-arbiter-text mb-1">Weather</h4>
               <p className="text-xs text-arbiter-text-3">{edgeSignals.length > 0 ? `${edgeSignals.length} edges` : 'Forecast analysis'}</p>
             </Link>
@@ -695,7 +739,10 @@ export default function HomePage() {
               href="/sports"
               className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-arbiter-green/40 transition-all"
             >
-              <div className="text-lg mb-2">🏀</div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 bg-blue-400 rounded-full" />
+                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">SPO</span>
+              </div>
               <h4 className="text-sm font-semibold text-arbiter-text mb-1">Sports</h4>
               <p className="text-xs text-arbiter-text-3">{sportsCount > 0 ? `${sportsCount} markets` : 'Market analysis'}</p>
             </Link>
@@ -704,7 +751,10 @@ export default function HomePage() {
               href="/crypto"
               className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-purple-400/40 transition-all"
             >
-              <div className="text-lg mb-2">₿</div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 bg-orange-400 rounded-full" />
+                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">CRY</span>
+              </div>
               <h4 className="text-sm font-semibold text-arbiter-text mb-1">Crypto</h4>
               <p className="text-xs text-arbiter-text-3">{cryptoCount > 0 ? `${cryptoCount} markets` : 'Bracket analysis'}</p>
             </Link>
@@ -713,7 +763,10 @@ export default function HomePage() {
               href="/arb"
               className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-cyan-400/40 transition-all"
             >
-              <div className="text-lg mb-2">⚙️</div>
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2.5 h-2.5 bg-cyan-400 rounded-full" />
+                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">ARB</span>
+              </div>
               <h4 className="text-sm font-semibold text-arbiter-text mb-1">Arbitrage</h4>
               <p className="text-xs text-arbiter-text-3">{arbs.length > 0 ? `${arbs.length} opps` : 'Scanner'}</p>
             </Link>

@@ -128,8 +128,19 @@ export const handler = schedule('0 * * * *', async () => {
       })
       .eq('id', market.id);
 
-    // Resolve the bet
-    const betWon = bet.outcome_label === winningOutcome;
+    // Resolve the bet — handle BUY_NO logic correctly
+    const betLabel = (bet.outcome_label || '').toLowerCase().trim();
+    const winner = (winningOutcome || '').toLowerCase().trim();
+    let betWon: boolean;
+    if (bet.direction === 'BUY_NO') {
+      // For BUY_NO: we win when our named outcome does NOT win
+      // Exception: if outcome_label is literally "No", we win when "No" wins
+      const isLiteralNo = betLabel === 'no';
+      betWon = isLiteralNo ? winner === 'no' : winner !== betLabel;
+    } else {
+      // For BUY_YES: we win if our outcome matches the winner
+      betWon = betLabel === winner;
+    }
     const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
     const pnl = betWon
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100

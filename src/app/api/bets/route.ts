@@ -20,6 +20,10 @@ export async function GET() {
 
   // Enrich bets with market question and reasoning from analysis tables
   const enrichedBets = [];
+  let totalExposure = 0;
+  let totalPotentialProfit = 0;
+  let openCount = 0;
+
   for (const bet of bets || []) {
     const market = bet.markets as { question: string; outcomes: string[]; outcome_prices: number[]; resolution_date: string | null; is_resolved: boolean } | null;
 
@@ -58,6 +62,18 @@ export async function GET() {
       reasoning = analysis?.reasoning || null;
     }
 
+    // Calculate potential payout and profit for OPEN bets
+    let potential_payout: number | null = null;
+    let potential_profit: number | null = null;
+
+    if (bet.status === 'OPEN') {
+      potential_payout = bet.amount_usd / bet.entry_price;
+      potential_profit = potential_payout - bet.amount_usd;
+      totalExposure += bet.amount_usd;
+      totalPotentialProfit += potential_profit;
+      openCount += 1;
+    }
+
     enrichedBets.push({
       ...bet,
       market_question: market?.question || null,
@@ -65,6 +81,8 @@ export async function GET() {
       current_prices: market?.outcome_prices || null,
       resolution_date: market?.resolution_date || null,
       is_resolved: market?.is_resolved || false,
+      potential_payout,
+      potential_profit,
       markets: undefined, // Don't send the raw join to the client
     });
   }
@@ -98,6 +116,11 @@ export async function GET() {
     config: configMap,
     snapshots: snapshots || [],
     lastUpdated: new Date().toISOString(),
+    pipeline_summary: {
+      total_exposure: totalExposure,
+      total_potential_profit: totalPotentialProfit,
+      open_count: openCount,
+    },
   });
 }
 

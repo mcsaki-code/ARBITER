@@ -12,6 +12,11 @@ interface TrackerApiResponse {
   config: Record<string, string>;
   snapshots: PerformanceSnapshot[];
   lastUpdated: string;
+  pipeline_summary: {
+    total_exposure: number;
+    total_potential_profit: number;
+    open_count: number;
+  };
 }
 
 function formatPrice(price: number): string {
@@ -59,6 +64,11 @@ export default function TrackerPage() {
   const bets = data?.bets || [];
   const config = data?.config || {};
   const snapshots = data?.snapshots || [];
+  const pipelineSummary = data?.pipeline_summary || {
+    total_exposure: 0,
+    total_potential_profit: 0,
+    open_count: 0,
+  };
 
   const bankroll = parseFloat(config.paper_bankroll || '500');
   const totalBets = bets.length;
@@ -146,6 +156,7 @@ export default function TrackerPage() {
                       <th className="text-left px-4 py-2">Side</th>
                       <th className="text-right px-4 py-2">Price</th>
                       <th className="text-right px-4 py-2">Bet</th>
+                      <th className="text-right px-4 py-2">Potential Payout</th>
                       <th className="text-right px-4 py-2">Profit</th>
                       <th className="text-right px-4 py-2">Result</th>
                     </tr>
@@ -192,6 +203,13 @@ export default function TrackerPage() {
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
                           ${bet.amount_usd.toFixed(0)}
+                        </td>
+                        <td className="px-4 py-2 font-mono text-right">
+                          {bet.status === 'OPEN'
+                            ? `$${(bet.amount_usd / bet.entry_price).toFixed(2)}`
+                            : bet.status === 'WON'
+                            ? `$${(bet.amount_usd + (bet.pnl || 0)).toFixed(0)}`
+                            : '$0'}
                         </td>
                         <td
                           className={`px-4 py-2 font-mono text-right ${
@@ -311,6 +329,30 @@ export default function TrackerPage() {
             wins={wins}
             losses={losses}
           />
+
+          {/* Pipeline Summary */}
+          {pipelineSummary.open_count > 0 && (
+            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-3">
+              <p className="text-xs font-medium text-arbiter-text-2 mb-3">Open Pipeline</p>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-arbiter-text-3">Total Exposure</span>
+                  <span className="text-xs font-mono font-medium">${pipelineSummary.total_exposure.toFixed(0)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-arbiter-text-3">Potential Profit</span>
+                  <span className={`text-xs font-mono font-medium ${pipelineSummary.total_potential_profit >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
+                    {pipelineSummary.total_potential_profit >= 0 ? '+' : ''}${pipelineSummary.total_potential_profit.toFixed(0)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-arbiter-text-3">Open Bets</span>
+                  <span className="text-xs font-mono font-medium">{pipelineSummary.open_count}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           <CountdownBadge
             daysRemaining={daysRemaining}
             betsNeeded={betsNeeded}
