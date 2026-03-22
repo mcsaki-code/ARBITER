@@ -81,7 +81,11 @@ function getBetDisplayName(bet: Bet): string {
 }
 
 function formatAdvantage(edge: number): string {
-  return `+${(edge * 100).toFixed(1)}%`;
+  // Normalize: Claude sometimes returns edge in non-standard formats
+  let normalizedEdge = edge;
+  if (normalizedEdge > 100) normalizedEdge = normalizedEdge / 1000;
+  else if (normalizedEdge > 1) normalizedEdge = normalizedEdge / 100;
+  return `+${(normalizedEdge * 100).toFixed(1)}%`;
 }
 
 function getConfidenceDots(level: string | null): string {
@@ -113,6 +117,10 @@ export default function HomePage() {
   const [sportsCount, setSportsCount] = useState(0);
   const [cryptoCount, setCryptoCount] = useState(0);
   const [cryptoSignals, setCryptoSignals] = useState<Record<string, { spot_price: number; rsi_14: number | null; signal_summary: string }>>({});
+
+  // Bet placement state
+  const [placingBet, setPlacingBet] = useState<string | null>(null); // track which opp is being bet on
+  const [betResult, setBetResult] = useState<{ id: string; success: boolean; message: string } | null>(null);
 
   // Pipeline state
   const [pipelineStatus, setPipelineStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -241,6 +249,57 @@ export default function HomePage() {
     } catch (err) {
       setPipelineStatus('error');
       setPipelineLog(`Error: ${err instanceof Error ? err.message : 'check console'}`);
+    }
+  };
+
+  // ============================================================
+  // Place a bet from AI Picks
+  // ============================================================
+  const placeBet = async (opp: CitySignal | ArbOpportunity) => {
+    const isSignal = 'city_name' in opp;
+    if (!isSignal) return; // Only weather signals can be bet on directly for now
+
+    const signal = opp as CitySignal;
+    const oppId = signal.city_id;
+    setPlacingBet(oppId);
+    setBetResult(null);
+
+    try {
+      // Normalize edge for bet amount calculation
+      const rawEdge = signal.edge || 0;
+      const normalizedEdge = rawEdge > 1 ? rawEdge / 1000 : rawEdge;
+
+      const betAmount = signal.rec_bet_usd && signal.rec_bet_usd > 0
+        ? signal.rec_bet_usd
+        : Math.min(3, bankroll * 0.006);
+
+      const entryPrice = signal.market_price || 0.5;
+
+      const res = await fetch('/api/bets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          market_id: signal.city_id, // This maps through the signals API
+          category: 'weather',
+          direction: signal.direction || 'BUY_YES',
+          outcome_label: signal.best_outcome_label,
+          entry_price: entryPrice > 1 ? entryPrice / 100 : entryPrice,
+          amount_usd: betAmount,
+        }),
+      });
+
+      if (res.ok) {
+        setBetResult({ id: oppId, success: true, message: 'Bet placed' });
+        // Reload data after a moment
+        setTimeout(() => window.location.reload(), 1500);
+      } else {
+        const err = await res.json();
+        setBetResult({ id: oppId, success: false, message: err.error || 'Failed' });
+      }
+    } catch {
+      setBetResult({ id: oppId, success: false, message: 'Network error' });
+    } finally {
+      setPlacingBet(null);
     }
   };
 
@@ -514,9 +573,27 @@ export default function HomePage() {
 
                       {/* Action button */}
                       <div className="mt-3">
-                        <button className="w-full bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/40 text-arbiter-green text-xs font-semibold py-2 px-3 rounded transition-colors">
-                          BET NOW
-                        </button>
+                        {betResult && betResult.id === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id) ? (
+                          <div className={`w-full text-center text-xs font-semibold py-2 px-3 rounded ${
+                            betResult.success
+                              ? 'bg-arbiter-green/20 text-arbiter-green border border-arbiter-green/40'
+                              : 'bg-arbiter-red/20 text-arbiter-red border border-arbiter-red/40'
+                          }`}>
+                            {betResult.message}
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => placeBet(opp)}
+                            disabled={placingBet !== null}
+                            className={`w-full text-xs font-semibold py-2 px-3 rounded transition-colors ${
+                              placingBet === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id)
+                                ? 'bg-arbiter-text-3/20 text-arbiter-text-3 cursor-wait'
+                                : 'bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/40 text-arbiter-green'
+                            }`}
+                          >
+                            {placingBet === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id) ? 'Placing...' : 'BET NOW'}
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

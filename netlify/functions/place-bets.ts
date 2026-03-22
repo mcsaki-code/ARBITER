@@ -27,6 +27,21 @@ const MIN_LIQUIDITY = 5000;            // Skip thin markets
 const KELLY_FRACTION = 0.125;          // 1/8th Kelly (professional standard)
 const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2h max staleness
 
+/** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
+function normalizeEdge(raw: number | null): number {
+  if (raw === null) return 0;
+  if (raw > 100) return raw / 1000;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
+
+/** Normalize probability/price values (0–1 range) */
+function normalizeProb(raw: number | null): number {
+  if (raw === null) return 0;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
+
 interface AnalysisRow {
   id: string;
   market_id: string;
@@ -183,12 +198,17 @@ export const handler = schedule('*/30 * * * *', async () => {
     // Skip if already bet on this market today
     if (existingMarketIds.has(analysis.market_id)) continue;
 
+    // Normalize edge and price values (handle Claude returning 849 instead of 0.849)
+    const edgeNorm = normalizeEdge(analysis.edge);
+    if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
+    if (analysis.polymarket_price) analysis.polymarket_price = normalizeProb(analysis.polymarket_price);
+
     // Must be auto-eligible (HIGH confidence, HIGH agreement, edge >= 0.08)
     // OR at minimum: confidence >= MEDIUM, edge >= 0.05
     const isAutoEligible = analysis.auto_eligible;
     const isMediumEligible =
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
-      (analysis.edge || 0) >= MIN_EDGE;
+      edgeNorm >= MIN_EDGE;
 
     if (!isAutoEligible && !isMediumEligible) continue;
 
@@ -220,7 +240,7 @@ export const handler = schedule('*/30 * * * *', async () => {
       currentMarket.liquidity_usd > 20000 ? 0.01 :
       currentMarket.liquidity_usd > 10000 ? 0.015 : 0.025;
 
-    if ((analysis.edge || 0) < estimatedSpread * 2) {
+    if (edgeNorm < estimatedSpread * 2) {
       console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — edge < 2x spread`);
       continue;
     }
@@ -255,20 +275,16 @@ export const handler = schedule('*/30 * * * *', async () => {
       entryPrice = analysis.market_price || null;
     }
 
-    // Normalize entry price — handle percentages (e.g., 90 → 0.90)
-    if (entryPrice && entryPrice > 1) {
-      entryPrice = entryPrice / 100;
-    }
-
+    // Entry price is already normalized above via normalizeProb
     // For BUY_NO bets, entry price is what we pay for the NO side = 1 - YES price
     // If the YES price is near 0, the NO price is near 1 (cheap to bet against)
     if (analysis.direction === 'BUY_NO' && entryPrice !== null && entryPrice < 0.5) {
       entryPrice = 1 - entryPrice;
     }
 
-    // Need a valid entry price between 0.1% and 99.9%
-    // Low-priced markets (like "will X happen" at 0.3%) are valid bets
-    if (!entryPrice || entryPrice <= 0.001 || entryPrice >= 0.999) {
+    // Need a valid entry price between 0.5% and 99.5%
+    // Weather brackets can legitimately be 1-5¢ — allow them through
+    if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
       console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
@@ -306,7 +322,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     existingMarketIds.add(analysis.market_id);
 
     console.log(
-      `[place-bets] Placed ${analysis.category} bet: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${(analysis.edge || 0).toFixed(3)} conf=${analysis.confidence}`
+      `[place-bets] Placed ${analysis.category} bet: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${edgeNorm.toFixed(3)} conf=${analysis.confidence}`
     );
 
     // Send email notification (non-blocking, fails silently)

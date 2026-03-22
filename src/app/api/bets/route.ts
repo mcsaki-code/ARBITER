@@ -145,6 +145,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
+    // Normalize entry price — handle percentages (e.g., 85 → 0.85)
+    let normalizedPrice = entry_price;
+    if (normalizedPrice > 1) normalizedPrice = normalizedPrice / 100;
+
     // Insert bet
     const { data: bet, error } = await supabase
       .from('bets')
@@ -154,7 +158,7 @@ export async function POST(req: NextRequest) {
         category: category || 'weather',
         direction,
         outcome_label,
-        entry_price,
+        entry_price: normalizedPrice,
         amount_usd,
         is_paper: true,
         status: 'OPEN',

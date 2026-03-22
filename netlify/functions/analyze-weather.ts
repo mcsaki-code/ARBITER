@@ -176,6 +176,21 @@ export const handler = schedule('*/20 * * * *', async () => {
         }
       }
 
+      // Normalize edge value — Claude sometimes returns edge as percentage (e.g. 84.9)
+      // or as raw large number instead of 0-1 decimal
+      let rawEdge = analysis.best_bet?.edge ?? null;
+      if (rawEdge !== null && rawEdge > 1) {
+        // Edge > 1 means Claude returned it in a non-standard format
+        // If > 100, likely edge * 1000; if 1-100, likely percentage
+        rawEdge = rawEdge > 100 ? rawEdge / 1000 : rawEdge / 100;
+      }
+
+      // Also normalize market_price and true_prob if they look like percentages
+      let mktPrice = analysis.best_bet?.market_price ?? null;
+      if (mktPrice !== null && mktPrice > 1) mktPrice = mktPrice / 100;
+      let trueProb = analysis.best_bet?.true_prob ?? null;
+      if (trueProb !== null && trueProb > 1) trueProb = trueProb / 100;
+
       // Store analysis
       await supabase.from('weather_analyses').insert({
         market_id: market.id,
@@ -187,9 +202,9 @@ export const handler = schedule('*/20 * * * *', async () => {
         market_type: marketType,
         best_outcome_idx: analysis.best_bet?.outcome_index ?? null,
         best_outcome_label: analysis.best_bet?.outcome_label ?? null,
-        market_price: analysis.best_bet?.market_price ?? null,
-        true_prob: analysis.best_bet?.true_prob ?? null,
-        edge: analysis.best_bet?.edge ?? null,
+        market_price: mktPrice,
+        true_prob: trueProb,
+        edge: rawEdge,
         direction: analysis.best_bet?.direction ?? 'PASS',
         confidence: analysis.best_bet?.confidence ?? 'LOW',
         kelly_fraction: kellyFraction,

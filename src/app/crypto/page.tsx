@@ -187,7 +187,7 @@ export default function CryptoPage() {
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-xl font-semibold mb-1">Crypto — AI Price Predictions</h1>
+          <h1 className="text-xl font-semibold mb-1">Crypto - AI Price Predictions</h1>
           <p className="text-sm text-arbiter-text-2">
             Using RSI, Bollinger Bands, and volume data to predict where BTC and ETH will land
           </p>

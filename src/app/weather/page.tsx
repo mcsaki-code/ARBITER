@@ -15,6 +15,21 @@ interface WeatherApiResponse {
   lastUpdated: string;
 }
 
+/** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
+function normalizeEdge(raw: number | null | undefined): number {
+  if (raw === null || raw === undefined) return 0;
+  if (raw > 100) return raw / 1000;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
+
+/** Normalize probability/price values (0–1 range) */
+function normalizeProb(raw: number | null | undefined): number {
+  if (raw === null || raw === undefined) return 0;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
+
 export default function WeatherPage() {
   const [data, setData] = useState<WeatherApiResponse | null>(null);
   const [state, setState] = useState<DataState>('loading');
@@ -64,6 +79,10 @@ export default function WeatherPage() {
     setBetPlacing(true);
     try {
       const a = selectedCity.analysis;
+      // Normalize entry price (handle cases where Claude returns 85 instead of 0.85)
+      const rawPrice = a.market_price || 0.5;
+      const entryPrice = rawPrice > 1 ? rawPrice / 100 : rawPrice;
+
       await fetch('/api/bets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -73,7 +92,7 @@ export default function WeatherPage() {
           category: 'weather',
           direction: a.direction,
           outcome_label: a.best_outcome_label,
-          entry_price: a.market_price,
+          entry_price: entryPrice,
           amount_usd: a.rec_bet_usd,
         }),
       });
@@ -98,9 +117,9 @@ export default function WeatherPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold mb-1">Weather — AI vs. the Market</h1>
+        <h1 className="text-xl font-semibold mb-1">Weather - AI vs. the Market</h1>
         <p className="text-sm text-arbiter-text-2">
-          5 forecast models + 31-member ensemble vs Polymarket brackets — temperature, precipitation & snowfall
+          5 forecast models + 31-member ensemble vs Polymarket brackets - temperature, precipitation & snowfall
         </p>
       </div>
 
@@ -144,14 +163,15 @@ export default function WeatherPage() {
 // ============================================================
 function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => void }) {
   const { city, consensus, analysis, market, forecasts } = card;
-  const hasEdge = analysis && analysis.edge !== null && analysis.edge > 0.05;
+  const edgeNorm = normalizeEdge(analysis?.edge);
+  const hasEdge = analysis && analysis.edge !== null && edgeNorm > 0.05;
 
   // Determine status and reason
   let statusLabel = '';
   let statusVariant: 'amber' | 'green' | 'red' | 'gray' = 'gray';
 
   if (hasEdge) {
-    statusLabel = `EDGE +${((analysis!.edge!) * 100).toFixed(0)}%`;
+    statusLabel = `EDGE +${(edgeNorm * 100).toFixed(0)}%`;
     statusVariant = 'amber';
   } else if (analysis && analysis.direction === 'PASS') {
     statusLabel = 'PASS';
@@ -199,8 +219,8 @@ function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => voi
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <h3 className="font-medium text-sm">{city.name}</h3>
-          {isPrecip && <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">🌧 PRECIP</span>}
-          {isSnow && <span className="text-[10px] px-1.5 py-0.5 bg-blue-200/10 text-blue-200 rounded">❄️ SNOW</span>}
+          {isPrecip && <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">PRECIP</span>}
+          {isSnow && <span className="text-[10px] px-1.5 py-0.5 bg-blue-200/10 text-blue-200 rounded">SNOW</span>}
         </div>
         <Badge variant={statusVariant}>{statusLabel}</Badge>
       </div>
@@ -260,7 +280,7 @@ function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => voi
             <span className="text-xs text-arbiter-text-3">
               {analysis!.best_outcome_label}
             </span>
-            <EdgeMeter edge={analysis!.edge!} className="w-24 mt-0.5" />
+            <EdgeMeter edge={edgeNorm} className="w-24 mt-0.5" />
           </div>
           <div className="text-right">
             <Badge variant="amber">
@@ -293,8 +313,9 @@ function getPassReason(card: CityWeatherCard): string {
   if (!analysis) return `Market found but analysis not yet run — next scan in ~20 min`;
 
   if (analysis.direction === 'PASS' && analysis.edge !== null) {
-    if (analysis.edge < 0.02)
-      return `Edge too small (${(analysis.edge * 100).toFixed(1)}%) — market is efficiently priced`;
+    const edgeN = normalizeEdge(analysis.edge);
+    if (edgeN < 0.02)
+      return `Edge too small (${(edgeN * 100).toFixed(1)}%) — market is efficiently priced`;
     return analysis.reasoning || 'Analysis found no actionable mispricing';
   }
 
@@ -329,7 +350,10 @@ function CityDetail({
   const icon = forecasts.find((f) => f.source === 'icon');
   const hrrr = forecasts.find((f) => f.source === 'hrrr');
 
-  const hasEdge = analysis && analysis.edge !== null && analysis.edge > 0.05;
+  const edgeNorm = normalizeEdge(analysis?.edge);
+  const trueProbNorm = normalizeProb(analysis?.true_prob);
+  const mktPriceNorm = normalizeProb(analysis?.market_price);
+  const hasEdge = analysis && analysis.edge !== null && edgeNorm > 0.05;
   const passReason = getPassReason(card);
   const hasEnsemble = consensus?.ensemble_members && consensus.ensemble_members > 0;
 
@@ -362,9 +386,9 @@ function CityDetail({
               </>
             )}
             Market prices <span className="text-arbiter-text font-mono">{analysis!.best_outcome_label}</span> at{' '}
-            <span className="text-arbiter-text font-mono">{Math.round((analysis!.market_price || 0) * 100)}¢</span> but
-            true probability is <span className="text-arbiter-text font-mono">{((analysis!.true_prob || 0) * 100).toFixed(0)}%</span>,
-            giving a <span className="text-arbiter-amber font-mono">+{((analysis!.edge || 0) * 100).toFixed(1)}%</span> advantage.
+            <span className="text-arbiter-text font-mono">{Math.round(mktPriceNorm * 100)}¢</span> but
+            true probability is <span className="text-arbiter-text font-mono">{(trueProbNorm * 100).toFixed(0)}%</span>,
+            giving a <span className="text-arbiter-amber font-mono">+{(edgeNorm * 100).toFixed(1)}%</span> advantage.
           </p>
         ) : (
           <p className="text-sm text-arbiter-text-2 leading-relaxed">{passReason}</p>
@@ -460,8 +484,8 @@ function CityDetail({
             {market.outcomes.map((outcome, i) => {
               const mktPrice = market.outcome_prices[i] || 0;
               const isBest = analysis?.best_outcome_idx === i;
-              const edge = isBest ? analysis?.edge || 0 : 0;
-              const trueProb = isBest ? analysis?.true_prob || 0 : 0;
+              const edgeVal = isBest ? edgeNorm : 0;
+              const trueProbVal = isBest ? trueProbNorm : 0;
 
               return (
                 <div
@@ -475,14 +499,14 @@ function CityDetail({
                   <span className="font-mono truncate">{outcome}</span>
                   <span className="font-mono text-right">${mktPrice.toFixed(2)}</span>
                   <span className="font-mono text-right">
-                    {isBest ? `${(trueProb * 100).toFixed(0)}%` : '—'}
+                    {isBest ? `${(trueProbVal * 100).toFixed(0)}%` : '—'}
                   </span>
                   <span
                     className={`font-mono text-right ${
-                      edge > 0.05 ? 'text-arbiter-amber font-medium' : edge > 0 ? 'text-arbiter-green' : 'text-arbiter-text-3'
+                      edgeVal > 0.05 ? 'text-arbiter-amber font-medium' : edgeVal > 0 ? 'text-arbiter-green' : 'text-arbiter-text-3'
                     }`}
                   >
-                    {isBest ? `${edge > 0 ? '+' : ''}${(edge * 100).toFixed(1)}%` : '—'}
+                    {isBest ? `${edgeVal > 0 ? '+' : ''}${(edgeVal * 100).toFixed(1)}%` : '—'}
                   </span>
                 </div>
               );
@@ -492,7 +516,7 @@ function CityDetail({
       )}
 
       {/* Kelly + Reasoning */}
-      {analysis && analysis.edge !== null && analysis.edge > 0 && (
+      {analysis && analysis.edge !== null && edgeNorm > 0 && (
         <div>
           <h3 className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-2">
             Analysis
