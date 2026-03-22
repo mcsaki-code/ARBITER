@@ -185,9 +185,18 @@ function parseGammaMarket(m: GammaMarket): ParsedMarket | null {
     }
 
     const tagLabels = m.tags?.map((t) => t.label.toLowerCase()) || [];
+    const q = m.question.toLowerCase();
+
+    // Classify market type
     let category = 'weather';
-    if (tagLabels.includes('temperature') || m.question.toLowerCase().includes('temperature')) {
+    if (q.includes('precipitation') || q.includes('rainfall') || q.includes('rain') || tagLabels.includes('precipitation')) {
+      category = 'precipitation';
+    } else if (q.includes('snowfall') || q.includes('snow')) {
+      category = 'snowfall';
+    } else if (tagLabels.includes('temperature') || q.includes('temperature') || q.includes('°f') || q.includes('°c')) {
       category = 'temperature';
+    } else if (tagLabels.includes('climate') || q.includes('climate') || q.includes('global temp')) {
+      category = 'climate';
     }
 
     return {
@@ -244,7 +253,8 @@ export async function fetchPolymarketWeatherMarkets(): Promise<ParsedMarket[]> {
 export async function fetchPolymarketAllWeather(): Promise<ParsedMarket[]> {
   const results: ParsedMarket[] = [];
 
-  for (const tag of ['temperature', 'weather']) {
+  // Search ALL weather-related tags
+  for (const tag of ['temperature', 'weather', 'precipitation', 'climate', 'climate-weather']) {
     try {
       const params = new URLSearchParams({
         tag,

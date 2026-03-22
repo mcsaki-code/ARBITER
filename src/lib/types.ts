@@ -19,10 +19,17 @@ export interface WeatherForecast {
   city_id: string;
   fetched_at: string;
   valid_date: string;
-  source: 'nws' | 'gfs' | 'ecmwf' | 'icon';
+  source: 'nws' | 'gfs' | 'ecmwf' | 'icon' | 'hrrr';
   temp_high_f: number | null;
   temp_low_f: number | null;
   precip_prob: number | null;
+  precip_mm: number | null;
+  rain_mm: number | null;
+  snowfall_cm: number | null;
+  wind_speed_max: number | null;
+  wind_gust_max: number | null;
+  cloud_cover_pct: number | null;
+  weather_code: number | null;
   conditions: string | null;
 }
 
@@ -34,10 +41,21 @@ export interface WeatherConsensus {
   calculated_at: string;
   valid_date: string;
   consensus_high_f: number;
+  consensus_low_f: number | null;
   model_spread_f: number;
   agreement: AgreementLevel;
   models_used: string[];
+  // Precipitation consensus
+  precip_consensus_mm: number | null;
+  precip_agreement: AgreementLevel | null;
+  snowfall_consensus_cm: number | null;
+  // Ensemble data
+  ensemble_members: number | null;
+  ensemble_prob_above: Record<number, number> | null;
+  ensemble_prob_below: Record<number, number> | null;
 }
+
+export type WeatherMarketType = 'temperature_high' | 'temperature_low' | 'precipitation' | 'snowfall' | 'climate' | 'other';
 
 export interface Market {
   id: string;
@@ -45,6 +63,7 @@ export interface Market {
   platform: string;
   question: string;
   category: string | null;
+  market_type: WeatherMarketType | null;
   city_id: string | null;
   outcomes: string[];
   outcome_prices: number[];
@@ -70,6 +89,7 @@ export interface WeatherAnalysis {
   model_high_f: number | null;
   model_spread_f: number | null;
   model_agreement: AgreementLevel | null;
+  market_type: WeatherMarketType | null;
   best_outcome_idx: number | null;
   best_outcome_label: string | null;
   market_price: number | null;
@@ -81,6 +101,9 @@ export interface WeatherAnalysis {
   rec_bet_usd: number | null;
   reasoning: string | null;
   auto_eligible: boolean;
+  ensemble_prob: number | null;
+  ensemble_edge: number | null;
+  precip_consensus: number | null;
   flags: string[];
 }
 

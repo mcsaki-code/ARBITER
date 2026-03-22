@@ -193,31 +193,47 @@ export async function GET() {
       }
     }
 
-    // Step A: Get the tag_id for "temperature" (fast single call)
-    const tempTag = await safeFetchJson(
-      'https://gamma-api.polymarket.com/tags/slug/temperature'
-    ) as { id?: number } | null;
+    // Step A: Get tag_ids for ALL weather-related categories
+    const tagSlugs = ['temperature', 'weather', 'precipitation', 'climate', 'climate-weather'];
+    const tagIds: { slug: string; id: number }[] = [];
 
-    const tagId = tempTag?.id;
-    log.push(`  Tag "temperature" → id ${tagId ?? 'NOT FOUND'}`);
+    for (const slug of tagSlugs) {
+      const tagData = await safeFetchJson(
+        `https://gamma-api.polymarket.com/tags/slug/${slug}`
+      ) as { id?: number } | null;
+      if (tagData?.id) {
+        tagIds.push({ slug, id: tagData.id });
+      }
+    }
 
-    if (tagId) {
-      // Step B: Fetch first page of events by tag_id (the ONLY reliable filter)
+    log.push(`  Tags found: ${tagIds.map((t) => `${t.slug}=${t.id}`).join(', ') || 'NONE'}`);
+
+    // Step B: Fetch events for EACH tag (catches precip, snowfall, climate markets)
+    for (const tag of tagIds) {
+      if (Date.now() - startTime > 7000) {
+        log.push('  Time limit approaching, stopping tag search');
+        break;
+      }
+
       const eventsPage = await safeFetchJson(
-        `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=100&offset=0`
+        `https://gamma-api.polymarket.com/events?tag_id=${tag.id}&active=true&closed=false&limit=100&offset=0`
       );
       if (Array.isArray(eventsPage)) {
+        let tagCount = 0;
         for (const event of eventsPage as { markets?: GammaMarket[] }[]) {
           if (event.markets && Array.isArray(event.markets)) {
-            for (const m of event.markets) addMarket(m);
+            for (const m of event.markets) {
+              if (!seenIds.has(m.conditionId)) tagCount++;
+              addMarket(m);
+            }
           }
         }
-        log.push(`  Events: ${eventsPage.length} → ${allMarkets.length} markets`);
-      } else {
-        log.push(`  Events endpoint returned non-array`);
+        log.push(`  Tag "${tag.slug}" (${tag.id}): ${eventsPage.length} events → ${tagCount} new markets`);
       }
-    } else {
-      log.push('  SKIPPING market fetch — no tag_id found');
+    }
+
+    if (tagIds.length === 0) {
+      log.push('  SKIPPING market fetch — no tag_ids found');
     }
 
     log.push(`  ${allMarkets.length} unique markets after dedup`);
@@ -243,13 +259,32 @@ export async function GET() {
 
       const cityId = matchCity(m.question);
       const q = m.question.toLowerCase();
-      const category = (q.includes('temperature') || q.includes('°f') || q.includes('°c') || q.includes('degrees'))
-        ? 'temperature' : 'weather';
+
+      // Classify market type
+      let category = 'weather';
+      let marketType = 'other';
+      if (q.includes('precipitation') || q.includes('rainfall') || q.includes('rain')) {
+        category = 'precipitation';
+        marketType = 'precipitation';
+      } else if (q.includes('snowfall') || q.includes('snow')) {
+        category = 'snowfall';
+        marketType = 'snowfall';
+      } else if (q.includes('low temp') || q.includes('lowest temp') || q.includes('daily low') || q.includes('overnight')) {
+        category = 'temperature';
+        marketType = 'temperature_low';
+      } else if (q.includes('temperature') || q.includes('°f') || q.includes('°c') || q.includes('degrees') || q.includes('high temp') || q.includes('highest temp')) {
+        category = 'temperature';
+        marketType = 'temperature_high';
+      } else if (q.includes('climate') || q.includes('global temp') || q.includes('hottest year')) {
+        category = 'climate';
+        marketType = 'climate';
+      }
 
       return {
         condition_id: m.conditionId,
         question: m.question,
         category,
+        market_type: marketType,
         city_id: cityId,
         outcomes,
         outcome_prices: outcomePrices,
@@ -284,7 +319,7 @@ export async function GET() {
       success: true,
       summary: {
         totalCities: cities.length,
-        tagId: tagId ?? null,
+        tagsFound: tagIds.map((t) => t.slug),
         marketsFound: allMarkets.length,
         weatherMarketsFiltered: weatherOnly.length,
         marketsUpserted: upserted,

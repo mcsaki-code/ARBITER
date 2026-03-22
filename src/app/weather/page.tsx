@@ -98,9 +98,9 @@ export default function WeatherPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       <div className="mb-6">
-        <h1 className="text-xl font-semibold mb-1">Weather Edge</h1>
+        <h1 className="text-xl font-semibold mb-1">Weather — AI vs. the Market</h1>
         <p className="text-sm text-arbiter-text-2">
-          Model consensus vs Polymarket brackets — per-city analysis with reasoning
+          5 forecast models + 31-member ensemble vs Polymarket brackets — temperature, precipitation & snowfall
         </p>
       </div>
 
@@ -181,6 +181,12 @@ function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => voi
   const ecmwf = forecasts?.find((f) => f.source === 'ecmwf');
   const icon = forecasts?.find((f) => f.source === 'icon');
   const nws = forecasts?.find((f) => f.source === 'nws');
+  const hrrr = forecasts?.find((f) => f.source === 'hrrr');
+
+  // Detect market type from market question or category
+  const marketType = market?.market_type || market?.category || 'temperature';
+  const isPrecip = marketType === 'precipitation';
+  const isSnow = marketType === 'snowfall';
 
   return (
     <button
@@ -189,32 +195,48 @@ function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => voi
         hasEdge ? 'border-arbiter-amber/40 hover:border-arbiter-amber/60' : 'border-arbiter-border hover:border-arbiter-border-hi'
       }`}
     >
-      {/* City name + status badge */}
+      {/* City name + status badge + market type */}
       <div className="flex items-center justify-between mb-2">
-        <h3 className="font-medium text-sm">{city.name}</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="font-medium text-sm">{city.name}</h3>
+          {isPrecip && <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/10 text-blue-400 rounded">🌧 PRECIP</span>}
+          {isSnow && <span className="text-[10px] px-1.5 py-0.5 bg-blue-200/10 text-blue-200 rounded">❄️ SNOW</span>}
+        </div>
         <Badge variant={statusVariant}>{statusLabel}</Badge>
       </div>
 
       {/* Consensus temp + model agreement */}
       <div className="flex items-end justify-between mb-2">
         <div className="font-mono text-3xl font-medium">
-          {consensus ? `${consensus.consensus_high_f}°F` : '—'}
+          {consensus ? (
+            isPrecip ? `${consensus.precip_consensus_mm ?? 0}mm` :
+            isSnow ? `${consensus.snowfall_consensus_cm ?? 0}cm` :
+            `${consensus.consensus_high_f}°F`
+          ) : '—'}
         </div>
         {consensus && (
           <div className="flex items-center gap-1.5 mb-1">
             <ModelDots
-              agreement={consensus.agreement}
+              agreement={isPrecip ? (consensus.precip_agreement || consensus.agreement) : consensus.agreement}
               modelsUsed={consensus.models_used}
             />
-            <span className="text-[10px] text-arbiter-text-3 font-mono">
-              ±{consensus.model_spread_f}°
-            </span>
+            {!isPrecip && !isSnow && (
+              <span className="text-[10px] text-arbiter-text-3 font-mono">
+                ±{consensus.model_spread_f}°
+              </span>
+            )}
+            {consensus.ensemble_members && (
+              <span className="text-[10px] text-green-400/70 font-mono">
+                {consensus.ensemble_members}E
+              </span>
+            )}
           </div>
         )}
       </div>
 
       {/* Per-model temperature breakdown */}
-      <div className="flex gap-2 text-[10px] text-arbiter-text-3 font-mono mb-3">
+      <div className="flex flex-wrap gap-1.5 text-[10px] text-arbiter-text-3 font-mono mb-3">
+        {hrrr && <span className="px-1.5 py-0.5 bg-green-500/10 text-green-400 rounded">HRRR {hrrr.temp_high_f}°</span>}
         {gfs && <span className="px-1.5 py-0.5 bg-arbiter-bg rounded">GFS {gfs.temp_high_f}°</span>}
         {ecmwf && <span className="px-1.5 py-0.5 bg-arbiter-bg rounded">ECM {ecmwf.temp_high_f}°</span>}
         {icon && <span className="px-1.5 py-0.5 bg-arbiter-bg rounded">ICN {icon.temp_high_f}°</span>}
@@ -261,26 +283,26 @@ function CityCard({ card, onClick }: { card: CityWeatherCard; onClick: () => voi
 function getPassReason(card: CityWeatherCard): string {
   const { consensus, analysis, market } = card;
 
-  if (!consensus) return 'Waiting for forecast data from weather models';
+  if (!consensus) return 'Waiting for forecast data from 5 weather models + ensemble';
 
   if (!market) return `Models show ${consensus.consensus_high_f}°F (±${consensus.model_spread_f}°) but no active Polymarket market found for this city`;
 
   if (consensus.agreement === 'LOW')
-    return `Model spread too wide (${consensus.model_spread_f}°F) — GFS/ECMWF/ICON disagree. Waiting for convergence`;
+    return `Model spread too wide (${consensus.model_spread_f}°F) — GFS/ECMWF/ICON/HRRR disagree. Waiting for convergence`;
 
   if (!analysis) return `Market found but analysis not yet run — next scan in ~20 min`;
 
   if (analysis.direction === 'PASS' && analysis.edge !== null) {
-    if (analysis.edge < 0.05)
-      return `Edge too small (${(analysis.edge * 100).toFixed(1)}%) — minimum 5% required. Market is efficiently priced`;
+    if (analysis.edge < 0.02)
+      return `Edge too small (${(analysis.edge * 100).toFixed(1)}%) — market is efficiently priced`;
     return analysis.reasoning || 'Analysis found no actionable mispricing';
   }
 
   if (analysis.edge === null || analysis.edge === 0)
     return 'Market price aligns with model consensus — no mispricing detected';
 
-  if (market.liquidity_usd < 25000)
-    return `Market liquidity too low ($${(market.liquidity_usd / 1000).toFixed(0)}K) — minimum $25K required for safe entry`;
+  if (market.liquidity_usd < 10000)
+    return `Market liquidity too low ($${(market.liquidity_usd / 1000).toFixed(0)}K) — minimum $10K for safe entry`;
 
   return analysis.reasoning || 'No actionable edge — models and market agree';
 }
@@ -305,9 +327,11 @@ function CityDetail({
   const gfs = forecasts.find((f) => f.source === 'gfs');
   const ecmwf = forecasts.find((f) => f.source === 'ecmwf');
   const icon = forecasts.find((f) => f.source === 'icon');
+  const hrrr = forecasts.find((f) => f.source === 'hrrr');
 
   const hasEdge = analysis && analysis.edge !== null && analysis.edge > 0.05;
   const passReason = getPassReason(card);
+  const hasEnsemble = consensus?.ensemble_members && consensus.ensemble_members > 0;
 
   return (
     <div className="space-y-6">
@@ -318,15 +342,29 @@ function CityDetail({
           <span className="text-xs font-medium uppercase tracking-wider">
             {hasEdge ? 'Edge Detected' : 'No Bet'}
           </span>
+          {hasEnsemble && (
+            <span className="text-[10px] px-1.5 py-0.5 bg-green-500/10 text-green-400 rounded font-mono">
+              {consensus!.ensemble_members}-MEMBER ENSEMBLE
+            </span>
+          )}
         </div>
         {hasEdge ? (
           <p className="text-sm text-arbiter-text-2 leading-relaxed">
-            Models predict <span className="text-arbiter-text font-mono">{consensus?.consensus_high_f}°F</span> with{' '}
-            <span className="text-arbiter-text font-mono">{consensus?.agreement}</span> agreement.
+            {hasEnsemble ? (
+              <>
+                <span className="text-green-400 font-mono">{consensus!.ensemble_members}</span> ensemble members predict{' '}
+                <span className="text-arbiter-text font-mono">{consensus?.consensus_high_f}°F</span>.{' '}
+              </>
+            ) : (
+              <>
+                Models predict <span className="text-arbiter-text font-mono">{consensus?.consensus_high_f}°F</span> with{' '}
+                <span className="text-arbiter-text font-mono">{consensus?.agreement}</span> agreement.{' '}
+              </>
+            )}
             Market prices <span className="text-arbiter-text font-mono">{analysis!.best_outcome_label}</span> at{' '}
-            <span className="text-arbiter-text font-mono">${analysis!.market_price?.toFixed(2)}</span> but
-            true probability is estimated at <span className="text-arbiter-text font-mono">{((analysis!.true_prob || 0) * 100).toFixed(0)}%</span>,
-            giving a <span className="text-arbiter-amber font-mono">+{((analysis!.edge || 0) * 100).toFixed(1)}%</span> edge.
+            <span className="text-arbiter-text font-mono">{Math.round((analysis!.market_price || 0) * 100)}¢</span> but
+            true probability is <span className="text-arbiter-text font-mono">{((analysis!.true_prob || 0) * 100).toFixed(0)}%</span>,
+            giving a <span className="text-arbiter-amber font-mono">+{((analysis!.edge || 0) * 100).toFixed(1)}%</span> advantage.
           </p>
         ) : (
           <p className="text-sm text-arbiter-text-2 leading-relaxed">{passReason}</p>
@@ -336,32 +374,35 @@ function CityDetail({
       {/* Forecast Models */}
       <div>
         <h3 className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-2">
-          Forecast Models
+          Forecast Models ({consensus?.models_used?.length || 0} sources)
         </h3>
         <div className="bg-arbiter-bg rounded-lg p-3 space-y-1">
+          {hrrr && (
+            <StatRow label="HRRR 3km" value={`${hrrr.temp_high_f}°F / ${hrrr.temp_low_f}°F`} valueColor="text-green-400" />
+          )}
           {nws && (
             <StatRow label="NWS Official" value={`${nws.temp_high_f}°F / ${nws.temp_low_f}°F`} />
           )}
           <StatRow
             label="GFS"
-            value={gfs ? `${gfs.temp_high_f}°F` : 'N/A'}
+            value={gfs ? `${gfs.temp_high_f}°F / ${gfs.temp_low_f}°F` : 'N/A'}
             valueColor={gfs ? undefined : 'text-arbiter-text-3'}
           />
           <StatRow
             label="ECMWF"
-            value={ecmwf ? `${ecmwf.temp_high_f}°F` : 'N/A'}
+            value={ecmwf ? `${ecmwf.temp_high_f}°F / ${ecmwf.temp_low_f}°F` : 'N/A'}
             valueColor={ecmwf ? undefined : 'text-arbiter-text-3'}
           />
           <StatRow
             label="ICON"
-            value={icon ? `${icon.temp_high_f}°F` : 'N/A'}
+            value={icon ? `${icon.temp_high_f}°F / ${icon.temp_low_f}°F` : 'N/A'}
             valueColor={icon ? undefined : 'text-arbiter-text-3'}
           />
           {consensus && (
             <>
               <div className="border-t border-arbiter-border my-2" />
               <StatRow
-                label="Consensus"
+                label="Weighted Consensus"
                 value={`${consensus.consensus_high_f}°F ± ${consensus.model_spread_f}°F`}
               />
               <div className="flex items-center gap-2 mt-1">
@@ -382,6 +423,26 @@ function CityDetail({
           )}
         </div>
       </div>
+
+      {/* Precipitation Data (if available) */}
+      {consensus && (consensus.precip_consensus_mm > 0 || consensus.snowfall_consensus_cm > 0) && (
+        <div>
+          <h3 className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-2">
+            Precipitation & Snow
+          </h3>
+          <div className="bg-arbiter-bg rounded-lg p-3 space-y-1">
+            {consensus.precip_consensus_mm > 0 && (
+              <StatRow label="Precip Consensus" value={`${consensus.precip_consensus_mm}mm`} />
+            )}
+            {consensus.snowfall_consensus_cm > 0 && (
+              <StatRow label="Snowfall Consensus" value={`${consensus.snowfall_consensus_cm}cm`} />
+            )}
+            {consensus.precip_agreement && (
+              <StatRow label="Precip Agreement" value={consensus.precip_agreement} />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Bracket Analysis */}
       {market && (
