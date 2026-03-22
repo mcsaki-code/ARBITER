@@ -260,12 +260,13 @@ export async function placeOrder(req: OrderRequest): Promise<OrderResult> {
     recordOrder();
 
     // We always BUY — the token ID determines whether it's YES or NO
+    // Only pass fields that exist on the UserOrder type (tokenID, price, size, side)
+    // negRisk is handled at the client level, not per-order
     const response = await client.createAndPostOrder({
       tokenID: tokenId,
       price: req.price,
       size: req.size,
       side: Side.BUY,
-      negRisk: tokens.negRisk,
     });
 
     // The response structure varies but typically has:
