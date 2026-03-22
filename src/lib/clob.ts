@@ -145,7 +145,8 @@ export async function getMarketTokens(conditionId: string): Promise<MarketTokens
 
   try {
     // The CLOB API has a market endpoint that returns token IDs
-    const market = await client.getMarket(conditionId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const market: any = await client.getMarket(conditionId);
 
     if (!market || !market.tokens || market.tokens.length < 2) {
       console.error(`[clob] Market ${conditionId} has no tokens`);
@@ -269,10 +270,10 @@ export async function placeOrder(req: OrderRequest): Promise<OrderResult> {
       side: Side.BUY,
     });
 
-    // The response structure varies but typically has:
-    // { orderID: string, status: string, ... }
-    const orderId = response?.orderID || response?.orderIds?.[0] || null;
-    const status = response?.status || 'SUBMITTED';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = response as any;
+    const orderId = res?.orderID || res?.orderIds?.[0] || null;
+    const status = res?.status || 'SUBMITTED';
 
     console.log(`[clob] Order placed: ${orderId} status=${status}`);
 
@@ -307,7 +308,8 @@ export async function cancelOrder(orderId: string): Promise<{ success: boolean; 
   }
 
   try {
-    await client.cancelOrder({ orderID: orderId });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).cancelOrder({ orderID: orderId });
     console.log(`[clob] Cancelled order ${orderId}`);
     return { success: true };
   } catch (err) {
@@ -349,7 +351,8 @@ export async function getOrderStatus(orderId: string): Promise<{
   if (!client) return null;
 
   try {
-    const order = await client.getOrder(orderId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const order: any = await client.getOrder(orderId);
     return {
       status: order?.status || 'UNKNOWN',
       filledSize: order?.size_matched ? parseFloat(order.size_matched) : undefined,
