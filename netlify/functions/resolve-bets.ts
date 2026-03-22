@@ -17,6 +17,8 @@ interface GammaMarket {
   outcomes: string;
   active: boolean;
   closed: boolean;
+  question?: string;
+  description?: string;
 }
 
 function parseOutcomePrices(raw: string): number[] {
@@ -56,8 +58,8 @@ export const handler = schedule('0 * * * *', async () => {
     ...new Set(openBets.map((b) => b.markets?.condition_id).filter(Boolean)),
   ] as string[];
 
-  // Fetch current state from Gamma API for each market
-  const gammaCache = new Map<string, GammaMarket | null>();
+  // Fetch current state from Gamma API — store ALL results per condition_id
+  const gammaCache = new Map<string, GammaMarket[]>();
 
   for (const cid of conditionIds) {
     try {
@@ -67,48 +69,94 @@ export const handler = schedule('0 * * * *', async () => {
       );
       if (res.ok) {
         const data = await res.json();
-        gammaCache.set(cid, Array.isArray(data) && data.length > 0 ? data[0] : null);
+        gammaCache.set(cid, Array.isArray(data) ? data : []);
       } else {
-        gammaCache.set(cid, null);
+        gammaCache.set(cid, []);
       }
     } catch {
-      gammaCache.set(cid, null);
+      gammaCache.set(cid, []);
     }
   }
 
   let resolved = 0;
   let totalPnl = 0;
 
+  // Minimum hours after resolution_date before we auto-resolve
+  // This gives Polymarket time to officially settle the market
+  const MIN_HOURS_PAST_RESOLUTION = 4;
+
   for (const bet of openBets) {
     const market = bet.markets;
     if (!market) continue;
 
-    const gamma = gammaCache.get(market.condition_id);
     const resolutionDate = market.resolution_date
       ? new Date(market.resolution_date)
       : null;
-    const isPast = resolutionDate && resolutionDate < new Date();
+    const hoursPast = resolutionDate
+      ? (Date.now() - resolutionDate.getTime()) / 3600000
+      : 0;
+    const isPast = resolutionDate && hoursPast > MIN_HOURS_PAST_RESOLUTION;
 
     let winningOutcome: string | null = null;
+
+    // Find the matching Gamma market for this specific bet
+    // Multi-bracket events return multiple sub-markets per condition_id
+    // We must match by question text to avoid cross-contamination
+    const gammaResults = gammaCache.get(market.condition_id) || [];
+    let gamma: GammaMarket | null = null;
+
+    if (gammaResults.length === 1) {
+      // Single result — safe to use directly
+      gamma = gammaResults[0];
+    } else if (gammaResults.length > 1) {
+      // Multiple results — match by question/description to our market
+      const marketQ = (market.question || '').toLowerCase().trim();
+      gamma = gammaResults.find((g) => {
+        const gq = (g.question || g.description || '').toLowerCase().trim();
+        return gq === marketQ || gq.includes(marketQ) || marketQ.includes(gq);
+      }) || null;
+
+      if (!gamma) {
+        console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — ${gammaResults.length} Gamma results, none match question "${marketQ.substring(0, 50)}"`);
+        continue;
+      }
+    }
 
     if (gamma) {
       const prices = parseOutcomePrices(gamma.outcomePrices);
       const outcomes = parseOutcomes(gamma.outcomes);
       const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-      if (gamma.closed && prices.length > 0 && maxPrice >= 0.95) {
+      // Require closed + very high confidence price (0.99+) for definitive resolution
+      if (gamma.closed && prices.length > 0 && maxPrice >= 0.99) {
         const winIdx = prices.indexOf(maxPrice);
         winningOutcome = outcomes[winIdx] || null;
-      } else if (gamma.closed && isPast) {
+      } else if (gamma.closed && isPast && maxPrice >= 0.95) {
+        // Lower threshold OK only if well past resolution date
         const winIdx = prices.indexOf(maxPrice);
         winningOutcome = outcomes[winIdx] || null;
       }
+
+      // Cross-validate: Gamma winner should agree with DB price direction
+      if (winningOutcome) {
+        const dbPrices = market.outcome_prices || [];
+        const dbOutcomes = market.outcomes || [];
+        const dbWinIdx = dbOutcomes.indexOf(winningOutcome);
+        if (dbWinIdx >= 0 && dbPrices[dbWinIdx] !== undefined) {
+          const dbPrice = dbPrices[dbWinIdx];
+          // If DB price contradicts Gamma (DB shows <10% but Gamma says winner), flag it
+          if (dbPrice < 0.10 && maxPrice > 0.90) {
+            console.log(`[resolve-bets] CONFLICT: Gamma says "${winningOutcome}" won (${maxPrice.toFixed(3)}) but DB price is ${dbPrice.toFixed(3)} for bet ${bet.id.substring(0, 8)} — skipping`);
+            winningOutcome = null;
+          }
+        }
+      }
     } else if (isPast) {
-      // Fallback to DB prices
+      // Fallback to DB prices — require very high confidence
       const dbPrices = market.outcome_prices || [];
       if (dbPrices.length > 0) {
         const maxP = Math.max(...dbPrices);
-        if (maxP >= 0.90) {
+        if (maxP >= 0.95) {
           const winIdx = dbPrices.indexOf(maxP);
           winningOutcome = market.outcomes?.[winIdx] || null;
         }
@@ -116,6 +164,14 @@ export const handler = schedule('0 * * * *', async () => {
     }
 
     if (!winningOutcome) continue;
+
+    // Safety check: if PnL would be > 50x bet amount, flag for manual review
+    const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
+    const projectedPnl = bet.amount_usd * ((1.0 / entryPrice) - 1);
+    if (projectedPnl > bet.amount_usd * 50) {
+      console.log(`[resolve-bets] SUSPICIOUSLY HIGH PnL: $${projectedPnl.toFixed(2)} on $${bet.amount_usd} bet (${(projectedPnl / bet.amount_usd).toFixed(0)}x) for ${bet.id.substring(0, 8)} — skipping for manual review`);
+      continue;
+    }
 
     // Mark market as resolved
     await supabase
@@ -141,7 +197,7 @@ export const handler = schedule('0 * * * *', async () => {
       // For BUY_YES: we win if our outcome matches the winner
       betWon = betLabel === winner;
     }
-    const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
+    // entryPrice already computed above for safety check
     const pnl = betWon
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;

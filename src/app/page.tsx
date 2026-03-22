@@ -571,29 +571,46 @@ export default function HomePage() {
                         )}
                       </div>
 
-                      {/* Action button */}
+                      {/* Action button — check for existing open bet on this market */}
                       <div className="mt-3">
-                        {betResult && betResult.id === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id) ? (
-                          <div className={`w-full text-center text-xs font-semibold py-2 px-3 rounded ${
-                            betResult.success
-                              ? 'bg-arbiter-green/20 text-arbiter-green border border-arbiter-green/40'
-                              : 'bg-arbiter-red/20 text-arbiter-red border border-arbiter-red/40'
-                          }`}>
-                            {betResult.message}
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => placeBet(opp)}
-                            disabled={placingBet !== null}
-                            className={`w-full text-xs font-semibold py-2 px-3 rounded transition-colors ${
-                              placingBet === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id)
-                                ? 'bg-arbiter-text-3/20 text-arbiter-text-3 cursor-wait'
-                                : 'bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/40 text-arbiter-green'
-                            }`}
-                          >
-                            {placingBet === (isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id) ? 'Placing...' : 'BET NOW'}
-                          </button>
-                        )}
+                        {(() => {
+                          const oppMarketId = isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id;
+                          const existingBet = bets.find((b) => b.market_id === oppMarketId && b.status === 'OPEN');
+
+                          if (existingBet) {
+                            return (
+                              <div className="w-full text-center text-xs font-semibold py-2 px-3 rounded bg-arbiter-amber/10 text-arbiter-amber border border-arbiter-amber/30">
+                                ACTIVE — ${existingBet.amount_usd.toFixed(2)} at {formatCents(existingBet.entry_price)}
+                              </div>
+                            );
+                          }
+
+                          if (betResult && betResult.id === oppMarketId) {
+                            return (
+                              <div className={`w-full text-center text-xs font-semibold py-2 px-3 rounded ${
+                                betResult.success
+                                  ? 'bg-arbiter-green/20 text-arbiter-green border border-arbiter-green/40'
+                                  : 'bg-arbiter-red/20 text-arbiter-red border border-arbiter-red/40'
+                              }`}>
+                                {betResult.message}
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <button
+                              onClick={() => placeBet(opp)}
+                              disabled={placingBet !== null}
+                              className={`w-full text-xs font-semibold py-2 px-3 rounded transition-colors ${
+                                placingBet === oppMarketId
+                                  ? 'bg-arbiter-text-3/20 text-arbiter-text-3 cursor-wait'
+                                  : 'bg-arbiter-green/10 hover:bg-arbiter-green/20 border border-arbiter-green/40 text-arbiter-green'
+                              }`}
+                            >
+                              {placingBet === oppMarketId ? 'Placing...' : 'BET NOW'}
+                            </button>
+                          );
+                        })()}
                       </div>
                     </div>
                   );
