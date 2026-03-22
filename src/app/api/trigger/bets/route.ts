@@ -149,7 +149,8 @@ export async function GET() {
             .order('fetched_at', { ascending: false })
             .limit(10);
 
-          const latestSignals: Record<string, typeof signals extends (infer T)[] | null ? T : never> = {};
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const latestSignals: Record<string, any> = {};
           if (signals) {
             for (const s of signals) {
               if (!latestSignals[s.asset]) latestSignals[s.asset] = s;
