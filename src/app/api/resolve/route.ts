@@ -174,8 +174,22 @@ export async function GET() {
         .eq('id', market.id);
 
       // Determine if this bet won or lost
-      // bet.outcome_label is what we bet on, winningOutcome is what actually won
-      const betWon = bet.outcome_label === winningOutcome;
+      // Case-insensitive comparison for safety
+      const betLabel = (bet.outcome_label || '').toLowerCase().trim();
+      const winner = (winningOutcome || '').toLowerCase().trim();
+
+      let betWon: boolean;
+      if (bet.direction === 'BUY_NO') {
+        // For BUY_NO bets:
+        // If outcome_label is "No"/"no" → we win when "No" wins (labelMatch = true → won)
+        // If outcome_label is a specific outcome (e.g., "Team A") → we bet AGAINST it,
+        //   so we win when that outcome does NOT win (labelMatch = false → won)
+        const isLiteralNo = betLabel === 'no';
+        betWon = isLiteralNo ? winner === 'no' : winner !== betLabel;
+      } else {
+        // For BUY_YES: we win if our outcome matches the winner
+        betWon = betLabel === winner;
+      }
 
       // Calculate PnL
       // If we bought YES at entry_price and won: payout = amount / entry_price, pnl = payout - amount

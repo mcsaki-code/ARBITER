@@ -22,6 +22,8 @@ interface Bet {
   pnl: number | null;
   placed_at: string;
   resolved_at: string | null;
+  market_question?: string | null;
+  reasoning?: string | null;
 }
 
 interface CitySignal {
@@ -61,7 +63,18 @@ interface ArbOpportunity {
 // ============================================================
 
 function formatCents(price: number): string {
-  return `${Math.round(price * 100)}¢`;
+  const cents = price * 100;
+  if (cents < 1) return '<1¢';
+  if (cents > 99) return '>99¢';
+  return `${Math.round(cents)}¢`;
+}
+
+function getBetDisplayName(bet: Bet): string {
+  if (bet.market_question) return bet.market_question;
+  if (bet.outcome_label && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label)) {
+    return bet.outcome_label;
+  }
+  return bet.category === 'weather' ? 'Weather Market' : bet.category === 'sports' ? 'Sports Market' : bet.category === 'crypto' ? 'Crypto Market' : 'Market';
 }
 
 function formatAdvantage(edge: number): string {
@@ -533,7 +546,7 @@ export default function HomePage() {
                       <span className="text-lg">{getCategoryEmoji(bet.category)}</span>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium text-arbiter-text truncate">
-                          {bet.outcome_label || bet.market_id.substring(0, 12)}
+                          {getBetDisplayName(bet)}
                         </div>
                         <div className="text-xs text-arbiter-text-3 font-mono mt-0.5">
                           Bet {bet.direction === 'BUY_YES' ? 'YES' : 'NO'} at {formatCents(bet.entry_price)}
@@ -579,7 +592,7 @@ export default function HomePage() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-medium text-arbiter-text truncate">
-                          {bet.outcome_label || bet.market_id.substring(0, 12)}
+                          {getBetDisplayName(bet)}
                         </div>
                         <div className="text-xs text-arbiter-text-3 font-mono">
                           {new Date(bet.resolved_at || bet.placed_at).toLocaleDateString()}

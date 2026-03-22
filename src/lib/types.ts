@@ -125,6 +125,10 @@ export interface Bet {
   status: BetStatus;
   resolved_at: string | null;
   notes: string | null;
+  // Joined from markets table
+  market_question?: string | null;
+  // Joined from analysis tables
+  reasoning?: string | null;
 }
 
 export interface PerformanceSnapshot {

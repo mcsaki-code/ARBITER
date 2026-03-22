@@ -3,18 +3,67 @@ import { getSupabaseAdmin } from '@/lib/supabase';
 
 export const dynamic = 'force-dynamic';
 
-// GET — list bets
+// GET — list bets with market context and reasoning
 export async function GET() {
   const supabase = getSupabaseAdmin();
 
+  // Fetch bets joined with markets for the question text
   const { data: bets, error } = await supabase
     .from('bets')
-    .select('*')
+    .select('*, markets(question, outcomes, outcome_prices, resolution_date, is_resolved)')
     .order('placed_at', { ascending: false })
     .limit(100);
 
   if (error) {
     return NextResponse.json({ error: 'Failed to fetch bets' }, { status: 500 });
+  }
+
+  // Enrich bets with market question and reasoning from analysis tables
+  const enrichedBets = [];
+  for (const bet of bets || []) {
+    const market = bet.markets as { question: string; outcomes: string[]; outcome_prices: number[]; resolution_date: string | null; is_resolved: boolean } | null;
+
+    let reasoning: string | null = null;
+
+    // Fetch reasoning from the appropriate analysis table
+    if (bet.analysis_id && bet.category === 'weather') {
+      const { data: analysis } = await supabase
+        .from('weather_analyses')
+        .select('reasoning')
+        .eq('id', bet.analysis_id)
+        .single();
+      reasoning = analysis?.reasoning || null;
+    }
+
+    // For sports/crypto, analysis_id is null (FK constraint), so search by market_id + time
+    if (!reasoning && bet.category === 'sports') {
+      const { data: analysis } = await supabase
+        .from('sports_analyses')
+        .select('reasoning')
+        .eq('market_id', bet.market_id)
+        .order('analyzed_at', { ascending: false })
+        .limit(1)
+        .single();
+      reasoning = analysis?.reasoning || null;
+    }
+
+    if (!reasoning && bet.category === 'crypto') {
+      const { data: analysis } = await supabase
+        .from('crypto_analyses')
+        .select('reasoning')
+        .eq('market_id', bet.market_id)
+        .order('analyzed_at', { ascending: false })
+        .limit(1)
+        .single();
+      reasoning = analysis?.reasoning || null;
+    }
+
+    enrichedBets.push({
+      ...bet,
+      market_question: market?.question || null,
+      reasoning,
+      markets: undefined, // Don't send the raw join to the client
+    });
   }
 
   // Get performance stats
@@ -42,7 +91,7 @@ export async function GET() {
     .limit(90);
 
   return NextResponse.json({
-    bets: bets || [],
+    bets: enrichedBets,
     config: configMap,
     snapshots: snapshots || [],
     lastUpdated: new Date().toISOString(),
@@ -122,7 +171,7 @@ export async function POST(req: NextRequest) {
       .eq('key', 'total_paper_bets');
 
     return NextResponse.json({ bet });
-  } catch (err) {
+  } catch {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 });
   }
 }

@@ -14,9 +14,28 @@ interface TrackerApiResponse {
   lastUpdated: string;
 }
 
+function formatPrice(price: number): string {
+  const cents = price * 100;
+  if (cents < 1) return `<1¢`;
+  if (cents > 99) return `>99¢`;
+  return `${Math.round(cents)}¢`;
+}
+
+function getBetDisplayName(bet: Bet): string {
+  // Prefer market question (joined from markets table)
+  if (bet.market_question) return bet.market_question;
+  // Fall back to outcome_label, but not if it's just "Yes"/"No"
+  if (bet.outcome_label && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label)) {
+    return bet.outcome_label;
+  }
+  // Fall back to category label
+  return bet.category === 'weather' ? 'Weather Market' : bet.category === 'sports' ? 'Sports Market' : bet.category === 'crypto' ? 'Crypto Market' : 'Market';
+}
+
 export default function TrackerPage() {
   const [data, setData] = useState<TrackerApiResponse | null>(null);
   const [state, setState] = useState<DataState>('loading');
+  const [expandedBet, setExpandedBet] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -57,19 +76,6 @@ export default function TrackerPage() {
   const daysRemaining = Math.max(0, 30 - daysElapsed);
   const betsNeeded = Math.max(0, 50 - totalBets);
   const winRateNeeded = winRate < 0.58;
-
-  // City breakdown
-  const cityStats = new Map<string, { wins: number; losses: number; pnl: number }>();
-  bets.forEach((bet) => {
-    const label = bet.outcome_label?.split(' ')[0] || bet.category;
-    if (!cityStats.has(label)) {
-      cityStats.set(label, { wins: 0, losses: 0, pnl: 0 });
-    }
-    const stats = cityStats.get(label)!;
-    if (bet.status === 'WON') stats.wins++;
-    if (bet.status === 'LOST') stats.losses++;
-    stats.pnl += bet.pnl || 0;
-  });
 
   return (
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
@@ -148,7 +154,8 @@ export default function TrackerPage() {
                     {bets.map((bet) => (
                       <tr
                         key={bet.id}
-                        className="border-b border-arbiter-border/50 hover:bg-arbiter-elevated/50"
+                        className="border-b border-arbiter-border/50 hover:bg-arbiter-elevated/50 cursor-pointer"
+                        onClick={() => setExpandedBet(expandedBet === bet.id ? null : bet.id)}
                       >
                         <td className="px-4 py-2 font-mono text-arbiter-text-2">
                           {new Date(bet.placed_at).toLocaleDateString('en-US', {
@@ -156,8 +163,15 @@ export default function TrackerPage() {
                             day: 'numeric',
                           })}
                         </td>
-                        <td className="px-4 py-2">
-                          {bet.outcome_label || bet.category}
+                        <td className="px-4 py-2 max-w-[280px]">
+                          <div className="truncate" title={getBetDisplayName(bet)}>
+                            {getBetDisplayName(bet)}
+                          </div>
+                          {bet.outcome_label && bet.market_question && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label) && (
+                            <div className="text-[10px] text-arbiter-text-3 truncate">
+                              {bet.outcome_label}
+                            </div>
+                          )}
                         </td>
                         <td className="px-4 py-2">
                           <Badge variant={bet.direction === 'BUY_YES' ? 'green' : 'red'}>
@@ -165,7 +179,7 @@ export default function TrackerPage() {
                           </Badge>
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
-                          {Math.round(bet.entry_price * 100)}¢
+                          {formatPrice(bet.entry_price)}
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
                           ${bet.amount_usd.toFixed(0)}
@@ -200,6 +214,26 @@ export default function TrackerPage() {
                     ))}
                   </tbody>
                 </table>
+
+                {/* Expanded reasoning panel */}
+                {expandedBet && (() => {
+                  const bet = bets.find(b => b.id === expandedBet);
+                  if (!bet) return null;
+                  return (
+                    <div className="bg-arbiter-bg border-t border-arbiter-border/50 px-4 py-3">
+                      <div className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-2">AI Reasoning</div>
+                      <div className="text-xs text-arbiter-text-2 leading-relaxed mb-2">
+                        {bet.reasoning || 'No reasoning recorded for this bet.'}
+                      </div>
+                      <div className="flex items-center gap-4 text-[10px] text-arbiter-text-3 font-mono">
+                        <span>Category: {bet.category}</span>
+                        <span>Direction: {bet.direction}</span>
+                        <span>Entry: {formatPrice(bet.entry_price)}</span>
+                        {bet.notes && <span>Notes: {bet.notes}</span>}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Mobile stacked cards */}
@@ -207,11 +241,12 @@ export default function TrackerPage() {
                 {bets.map((bet) => (
                   <div
                     key={bet.id}
-                    className="bg-arbiter-bg rounded-lg p-3 space-y-1"
+                    className="bg-arbiter-bg rounded-lg p-3 space-y-1 cursor-pointer"
+                    onClick={() => setExpandedBet(expandedBet === bet.id ? null : bet.id)}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">
-                        {bet.outcome_label || bet.category}
+                      <span className="text-sm font-medium truncate max-w-[200px]">
+                        {getBetDisplayName(bet)}
                       </span>
                       <Badge
                         variant={
@@ -227,7 +262,7 @@ export default function TrackerPage() {
                     </div>
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-arbiter-text-3 font-mono">
-                        {new Date(bet.placed_at).toLocaleDateString()}
+                        {new Date(bet.placed_at).toLocaleDateString()} · {bet.direction === 'BUY_YES' ? 'YES' : 'NO'} @ {formatPrice(bet.entry_price)}
                       </span>
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-arbiter-text-2">
@@ -244,6 +279,12 @@ export default function TrackerPage() {
                         )}
                       </div>
                     </div>
+                    {expandedBet === bet.id && (
+                      <div className="mt-2 pt-2 border-t border-arbiter-border/50 text-xs text-arbiter-text-2">
+                        <div className="font-medium text-arbiter-text-3 uppercase tracking-wider mb-1">AI Reasoning</div>
+                        <div className="leading-relaxed">{bet.reasoning || 'No reasoning recorded.'}</div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
