@@ -24,6 +24,9 @@ interface Bet {
   resolved_at: string | null;
   market_question?: string | null;
   reasoning?: string | null;
+  current_prices?: number[] | null;
+  resolution_date?: string | null;
+  is_resolved?: boolean;
 }
 
 interface CitySignal {
@@ -540,25 +543,40 @@ export default function HomePage() {
               </div>
 
               <div className="divide-y divide-arbiter-border/50">
-                {openBets.slice(0, 6).map((bet) => (
-                  <div key={bet.id} className="px-5 py-3 flex items-center justify-between hover:bg-arbiter-elevated/30 transition-colors">
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <span className="text-lg">{getCategoryEmoji(bet.category)}</span>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-arbiter-text truncate">
-                          {getBetDisplayName(bet)}
-                        </div>
-                        <div className="text-xs text-arbiter-text-3 font-mono mt-0.5">
-                          Bet {bet.direction === 'BUY_YES' ? 'YES' : 'NO'} at {formatCents(bet.entry_price)}
+                {openBets.slice(0, 6).map((bet) => {
+                  // Current market price for the side we bet on
+                  const currentPrice = bet.current_prices
+                    ? bet.direction === 'BUY_YES'
+                      ? bet.current_prices[0]
+                      : bet.current_prices[1]
+                    : null;
+                  const priceMove = currentPrice ? currentPrice - bet.entry_price : null;
+
+                  return (
+                    <div key={bet.id} className="px-5 py-3 flex items-center justify-between hover:bg-arbiter-elevated/30 transition-colors">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <span className="text-lg">{getCategoryEmoji(bet.category)}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium text-arbiter-text truncate">
+                            {getBetDisplayName(bet)}
+                          </div>
+                          <div className="text-xs text-arbiter-text-3 font-mono mt-0.5">
+                            Bet {bet.direction === 'BUY_YES' ? 'YES' : 'NO'} at {formatCents(bet.entry_price)}
+                            {currentPrice !== null && (
+                              <span className={priceMove && priceMove > 0 ? 'text-arbiter-green' : priceMove && priceMove < 0 ? 'text-arbiter-red' : ''}>
+                                {' → now '}{formatCents(currentPrice)}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      <div className="text-right shrink-0 ml-3">
+                        <div className="text-sm font-bold text-arbiter-text">${bet.amount_usd.toFixed(2)}</div>
+                        <div className="text-xs text-arbiter-amber font-semibold">{new Date(bet.placed_at).toLocaleDateString()}</div>
+                      </div>
                     </div>
-                    <div className="text-right shrink-0 ml-3">
-                      <div className="text-sm font-bold text-arbiter-text">${bet.amount_usd.toFixed(2)}</div>
-                      <div className="text-xs text-arbiter-amber font-semibold">{new Date(bet.placed_at).toLocaleDateString()}</div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {openBets.length > 6 && (

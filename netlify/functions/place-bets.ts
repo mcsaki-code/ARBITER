@@ -9,6 +9,7 @@
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
+import { notifyBetPlaced } from '../../src/lib/notify';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -307,6 +308,19 @@ export const handler = schedule('*/30 * * * *', async () => {
     console.log(
       `[place-bets] Placed ${analysis.category} bet: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${(analysis.edge || 0).toFixed(3)} conf=${analysis.confidence}`
     );
+
+    // Send email notification (non-blocking, fails silently)
+    notifyBetPlaced({
+      category: analysis.category,
+      direction: analysis.direction,
+      outcomeLabel,
+      entryPrice,
+      amountUsd: betAmount,
+      marketQuestion: currentMarket?.question || null,
+      isPaper: execResult.is_paper,
+      edge: analysis.edge,
+      confidence: analysis.confidence,
+    }).catch(() => {}); // fire-and-forget
   }
 
   // Update paper_trade_start_date if this is the first-ever bet

@@ -136,6 +136,7 @@ export interface Bet {
   order_status: OrderStatus;
   // Joined from markets table
   market_question?: string | null;
+  current_prices?: number[] | null;
   // Joined from analysis tables
   reasoning?: string | null;
 }

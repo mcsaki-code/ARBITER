@@ -62,6 +62,9 @@ export async function GET() {
       ...bet,
       market_question: market?.question || null,
       reasoning,
+      current_prices: market?.outcome_prices || null,
+      resolution_date: market?.resolution_date || null,
+      is_resolved: market?.is_resolved || false,
       markets: undefined, // Don't send the raw join to the client
     });
   }

@@ -179,7 +179,16 @@ export default function TrackerPage() {
                           </Badge>
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
-                          {formatPrice(bet.entry_price)}
+                          <span>{formatPrice(bet.entry_price)}</span>
+                          {bet.status === 'OPEN' && bet.current_prices && (() => {
+                            const cur = bet.direction === 'BUY_YES' ? bet.current_prices![0] : bet.current_prices![1];
+                            const moved = cur - bet.entry_price;
+                            return cur ? (
+                              <span className={`block text-[10px] ${moved > 0 ? 'text-arbiter-green' : moved < 0 ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
+                                now {formatPrice(cur)}
+                              </span>
+                            ) : null;
+                          })()}
                         </td>
                         <td className="px-4 py-2 font-mono text-right">
                           ${bet.amount_usd.toFixed(0)}

@@ -24,12 +24,20 @@ export async function GET() {
     .order('fetched_at', { ascending: false })
     .limit(20);
 
-  // Fetch recent crypto analyses
-  const { data: analyses, error: analysesErr } = await supabase
+  // Fetch recent crypto analyses (get more, then deduplicate by market_id)
+  const { data: rawAnalyses, error: analysesErr } = await supabase
     .from('crypto_analyses')
     .select('*')
     .order('analyzed_at', { ascending: false })
-    .limit(20);
+    .limit(100);
+
+  // Deduplicate: keep only the LATEST analysis per market_id
+  const seenMarkets = new Set<string>();
+  const analyses = (rawAnalyses || []).filter((a: { market_id: string }) => {
+    if (seenMarkets.has(a.market_id)) return false;
+    seenMarkets.add(a.market_id);
+    return true;
+  });
 
   if (marketsErr || signalsErr) {
     return NextResponse.json({
