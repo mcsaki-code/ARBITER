@@ -103,8 +103,12 @@ export async function GET() {
     const ecmwf = cityForecasts.find((f) => f.source === 'ecmwf');
     const icon = cityForecasts.find((f) => f.source === 'icon');
 
-    // If the analysis references a market that is no longer active, treat it as stale
-    const marketIsLive = !!market;
+    // Check if the SPECIFIC market the analysis was done for is still active
+    // (not just any active market for this city)
+    const analysisMarketIsLive = analysis
+      ? !!marketsAll?.find((m) => m.id === analysis.market_id)
+      : false;
+    const marketIsLive = analysisMarketIsLive;
 
     let signalType: CitySignal['signal_type'] = 'no_market';
     if (analysis && marketIsLive && analysis.edge !== null && analysis.edge > 0.05) {
@@ -120,8 +124,8 @@ export async function GET() {
     citySnapshots.push({
       city_name: city.name,
       city_id: city.id,
-      market_id: market?.id ?? analysis?.market_id ?? null,
-      market_active: marketIsLive,
+      market_id: analysis?.market_id ?? market?.id ?? null,
+      market_active: analysisMarketIsLive,
       consensus_high_f: consensus?.consensus_high_f ?? null,
       model_spread_f: consensus?.model_spread_f ?? null,
       agreement: consensus?.agreement ?? null,
