@@ -84,8 +84,17 @@ function classifyAsset(question: string): string {
   return 'Other';
 }
 
+interface Bet {
+  id: string;
+  market_id: string;
+  status: string;
+  amount_usd: number;
+  entry_price: number;
+}
+
 export default function CryptoPage() {
   const [data, setData] = useState<CryptoResponse | null>(null);
+  const [bets, setBets] = useState<Bet[]>([]);
   const [state, setState] = useState<DataState>('loading');
   const [asset, setAsset] = useState<string>('all');
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -93,11 +102,18 @@ export default function CryptoPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch('/api/crypto');
-      if (!res.ok) throw new Error('Failed to fetch');
-      const json: CryptoResponse = await res.json();
+      const [cryptoRes, betsRes] = await Promise.all([
+        fetch('/api/crypto'),
+        fetch('/api/bets'),
+      ]);
+      if (!cryptoRes.ok) throw new Error('Failed to fetch');
+      const json: CryptoResponse = await cryptoRes.json();
       setData(json);
       setState(!json.markets || json.markets.length === 0 ? 'empty' : 'fresh');
+      if (betsRes.ok) {
+        const betsJson = await betsRes.json();
+        setBets(betsJson.bets || []);
+      }
     } catch {
       setState(data ? 'stale' : 'error');
     }
@@ -118,6 +134,23 @@ export default function CryptoPage() {
 
   const getAnalysis = (marketId: string): CryptoAnalysis | undefined => {
     return (data?.analyses || []).find((a) => a.market_id === marketId);
+  };
+
+  const getBetStatus = (a: CryptoAnalysis): { label: string; color: string } => {
+    const openBet = bets.find((b) => b.market_id === a.market_id && b.status === 'OPEN');
+    if (openBet) return { label: `ACTIVE — $${openBet.amount_usd.toFixed(2)} at ${(openBet.entry_price * 100).toFixed(1)}¢`, color: 'bg-arbiter-amber/10 text-arbiter-amber border-arbiter-amber/30' };
+
+    // Check why place-bets would skip this
+    const market = (data?.markets || []).find((m) => m.id === a.market_id);
+    if (market) {
+      const hoursLeft = (new Date(market.resolution_date).getTime() - Date.now()) / 3600000;
+      if (hoursLeft < 1) return { label: 'Skipped — market expired', color: 'bg-red-500/10 text-red-400 border-red-500/20' };
+    }
+    if (a.edge < 0.05) return { label: 'Skipped — edge below 5% threshold', color: 'bg-arbiter-bg text-arbiter-text-3 border-arbiter-border/50' };
+    const entryPrice = a.direction === 'BUY_NO' && a.market_price < 0.5 ? 1 - a.market_price : a.market_price;
+    if (entryPrice >= 0.995) return { label: 'Skipped — entry price too high (no profit)', color: 'bg-arbiter-bg text-arbiter-text-3 border-arbiter-border/50' };
+    if (a.rec_bet_usd <= 0) return { label: 'Skipped — Kelly sizing returned $0', color: 'bg-arbiter-bg text-arbiter-text-3 border-arbiter-border/50' };
+    return { label: 'Auto-bet queued — next scan in ≤15 min', color: 'bg-arbiter-bg text-arbiter-text-3 border-arbiter-border/50' };
   };
 
   const formatUsd = (n: number) => {
@@ -358,6 +391,14 @@ export default function CryptoPage() {
                   {a.reasoning && (
                     <p className="text-[10px] text-arbiter-text-3 mt-2 leading-relaxed line-clamp-2">{a.reasoning}</p>
                   )}
+                  {(() => {
+                    const status = getBetStatus(a);
+                    return (
+                      <div className={`mt-2 w-full text-center text-[10px] font-semibold py-1.5 px-3 rounded border ${status.color}`}>
+                        {status.label}
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
