@@ -8,6 +8,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { executeBet } from '../../src/lib/execute-bet';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -61,6 +62,10 @@ export const handler = schedule('*/30 * * * *', async () => {
       'paper_trade_start_date',
       'total_paper_bets',
       'paper_win_rate',
+      'live_trading_enabled',
+      'live_kill_switch',
+      'live_max_single_bet_usd',
+      'live_max_daily_usd',
     ]);
 
   const config: Record<string, string> = {};
@@ -267,24 +272,31 @@ export const handler = schedule('*/30 * * * *', async () => {
       continue;
     }
 
-    // Insert the bet — use analysis_id only for weather (FK constraint)
-    // Sports and crypto analyses live in separate tables
-    const { error } = await supabase.from('bets').insert({
-      market_id: analysis.market_id,
-      analysis_id: analysis.source_table === 'weather_analyses' ? analysis.id : null,
-      category: analysis.category,
-      direction: analysis.direction,
-      outcome_label: outcomeLabel,
-      entry_price: entryPrice,
-      amount_usd: betAmount,
-      is_paper: true,
-      status: 'OPEN',
-      placed_at: new Date().toISOString(),
-    });
+    // Execute the bet — paper or live depending on config/guardrails
+    // executeBet handles the paper/live decision internally
+    const execResult = await executeBet(
+      supabase,
+      {
+        market_id: analysis.market_id,
+        analysis_id: analysis.source_table === 'weather_analyses' ? analysis.id : null,
+        category: analysis.category,
+        direction: analysis.direction,
+        outcome_label: outcomeLabel,
+        entry_price: entryPrice,
+        amount_usd: betAmount,
+      },
+      config,
+      // Only count live exposure for live order validation
+      0 // todayLiveExposure — TODO: track separately when live trading is active
+    );
 
-    if (error) {
-      console.error(`[place-bets] Insert error for ${analysis.id.substring(0, 8)}:`, error.message);
+    if (!execResult.success && !execResult.bet_id) {
+      console.error(`[place-bets] Execution error for ${analysis.id.substring(0, 8)}:`, execResult.error);
       continue;
+    }
+
+    if (!execResult.is_paper) {
+      console.log(`[place-bets] LIVE order placed: ${execResult.clob_order_id} status=${execResult.order_status}`);
     }
 
     placed++;

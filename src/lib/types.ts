@@ -108,6 +108,7 @@ export interface WeatherAnalysis {
 }
 
 export type BetStatus = 'OPEN' | 'WON' | 'LOST' | 'PUSHED';
+export type OrderStatus = 'NONE' | 'PENDING' | 'FILLED' | 'PARTIALLY_FILLED' | 'CANCELLED' | 'REJECTED' | 'EXPIRED';
 
 export interface Bet {
   id: string;
@@ -125,6 +126,14 @@ export interface Bet {
   status: BetStatus;
   resolved_at: string | null;
   notes: string | null;
+  // Live trading fields (null for paper bets)
+  clob_order_id: string | null;
+  transaction_hash: string | null;
+  filled_price: number | null;
+  filled_size: number | null;
+  condition_id: string | null;
+  token_id: string | null;
+  order_status: OrderStatus;
   // Joined from markets table
   market_question?: string | null;
   // Joined from analysis tables

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
+import { executeBet } from '@/lib/execute-bet';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow up to 60s for analysis + placement
@@ -57,7 +58,7 @@ export async function GET() {
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value')
-      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets']);
+      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -318,25 +319,32 @@ export async function GET() {
         continue;
       }
 
-      // analysis_id FK references weather_analyses — only set for weather bets
+      // Execute bet through the paper/live bridge
       const analysisId = analysis.category === 'weather' ? analysis.id : null;
 
-      const { error } = await supabase.from('bets').insert({
-        market_id: analysis.market_id,
-        analysis_id: analysisId,
-        category: analysis.category,
-        direction: analysis.direction,
-        outcome_label: outcomeLabel,
-        entry_price: entryPrice,
-        amount_usd: betAmount,
-        is_paper: true,
-        status: 'OPEN',
-        placed_at: new Date().toISOString(),
-      });
+      const execResult = await executeBet(
+        supabase,
+        {
+          market_id: analysis.market_id,
+          analysis_id: analysisId,
+          category: analysis.category,
+          direction: analysis.direction,
+          outcome_label: outcomeLabel,
+          entry_price: entryPrice,
+          amount_usd: betAmount,
+        },
+        config,
+        0, // todayLiveExposure
+        log
+      );
 
-      if (error) {
-        log.push(`Error: ${error.message}`);
+      if (!execResult.success && !execResult.bet_id) {
+        log.push(`Error: ${execResult.error}`);
         continue;
+      }
+
+      if (!execResult.is_paper) {
+        log.push(`LIVE ORDER: ${execResult.clob_order_id} status=${execResult.order_status}`);
       }
 
       placed++;
