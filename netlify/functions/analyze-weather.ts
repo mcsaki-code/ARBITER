@@ -194,6 +194,11 @@ export const handler = schedule('*/20 * * * *', async () => {
         // If > 100, likely edge * 1000; if 1-100, likely percentage
         rawEdge = rawEdge > 100 ? rawEdge / 1000 : rawEdge / 100;
       }
+      // For BUY_NO bets, edge = true_prob - market_price (negative when YES is overpriced).
+      // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
+      if (rawEdge !== null && analysis.best_bet?.direction === 'BUY_NO' && rawEdge < 0) {
+        rawEdge = -rawEdge;
+      }
 
       // Also normalize market_price and true_prob if they look like percentages
       let mktPrice = analysis.best_bet?.market_price ?? null;

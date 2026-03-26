@@ -266,7 +266,10 @@ Respond ONLY in valid JSON:
         if (!jsonMatch) continue;
 
         const analysis = JSON.parse(jsonMatch[0]);
-        const edgeNorm = normalizeEdge(analysis.edge);
+        // For BUY_NO bets, Claude returns edge = sportsbook_prob - polymarket_price (negative).
+        // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
+        const absRawEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
+        const edgeNorm = normalizeEdge(absRawEdge);
         const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
         const pmPriceNorm = normalizeProb(analysis.polymarket_price);
 
@@ -498,7 +501,10 @@ Respond ONLY in valid JSON (no markdown, no explanation):
       const analysis = JSON.parse(jsonMatch[0]);
 
       // ── Normalize before storing (FIX for 849 bug) ──────────
-      const edgeNorm   = normalizeEdge(analysis.edge);
+      // For BUY_NO bets, edge = sportsbook_prob - polymarket_price (negative).
+      // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
+      const absRawEdge2 = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
+      const edgeNorm   = normalizeEdge(absRawEdge2);
       const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
       const pmPriceNorm = normalizeProb(analysis.polymarket_price);
 

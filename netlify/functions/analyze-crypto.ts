@@ -246,7 +246,8 @@ Respond ONLY in JSON:
       let kellyFraction = 0;
       let recBetUsd = 0;
 
-      if (analysis.direction !== 'PASS' && analysis.edge >= MIN_EDGE_PCT) {
+      const absEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
+      if (analysis.direction !== 'PASS' && absEdge >= MIN_EDGE_PCT) {
         const { data: configRows } = await supabase
           .from('system_config')
           .select('key, value')
@@ -270,7 +271,12 @@ Respond ONLY in JSON:
       }
 
       // ── Normalize before storing (fixes the 849 bug at source) ──
-      const edgeNorm      = normalizeEdge(analysis.edge);
+      // For BUY_NO bets, edge = bracket_prob - market_price is negative (YES is overpriced).
+      // Store the absolute magnitude so place-bets' `edge > MIN_EDGE` filter works correctly.
+      const rawEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0
+        ? -analysis.edge
+        : analysis.edge;
+      const edgeNorm      = normalizeEdge(rawEdge);
       const bracketNorm   = normalizeProb(analysis.bracket_prob);
       const mktPriceNorm  = normalizeProb(analysis.market_price);
 
