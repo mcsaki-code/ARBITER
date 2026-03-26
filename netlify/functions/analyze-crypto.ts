@@ -131,10 +131,21 @@ export const handler = schedule('*/30 * * * *', async () => {
 
   console.log(`[analyze-crypto] ${candidates.length} markets matched to signal data`);
 
-  // Analyze top candidates with Claude
+  // Get recently analyzed market IDs to avoid re-analyzing every 30 min
+  const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString(); // 3h
+  const { data: recentRows } = await supabase
+    .from('crypto_analyses')
+    .select('market_id')
+    .gte('analyzed_at', recentCutoff);
+  const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
+
+  const freshCandidates = candidates.filter(c => !recentlyAnalyzed.has(c.market.id));
+  console.log(`[analyze-crypto] ${freshCandidates.length} fresh candidates (${candidates.length - freshCandidates.length} recently analyzed, skipping)`);
+
+  // Analyze top fresh candidates with Claude
   let analyzed = 0;
 
-  for (const candidate of candidates.slice(0, MAX_ANALYSES_PER_RUN)) {
+  for (const candidate of freshCandidates.slice(0, MAX_ANALYSES_PER_RUN)) {
     if (Date.now() - startTime > 20000) break;
 
     const { market, signal, asset } = candidate;
