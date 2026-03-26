@@ -255,8 +255,12 @@ Respond ONLY in JSON:
 
         const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '500');
 
-        const p = analysis.bracket_prob;
-        const c = analysis.market_price;
+        // For BUY_NO bets, Kelly must be computed on the NO side, not YES side.
+        // Using YES-side p/c for a BUY_NO bet gives negative fullKelly (we shouldn't buy YES)
+        // and kellyFraction stays 0 → place-bets falls to $3 minimum.
+        const isBuyNo = analysis.direction === 'BUY_NO';
+        const p = isBuyNo ? 1 - analysis.bracket_prob : analysis.bracket_prob;
+        const c = isBuyNo ? 1 - analysis.market_price : analysis.market_price;
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;

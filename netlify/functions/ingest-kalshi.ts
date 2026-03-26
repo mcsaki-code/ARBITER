@@ -113,15 +113,17 @@ export const handler = schedule('*/15 * * * *', async () => {
   // NOTE: Kalshi v2 API response uses 'active' for open markets (not 'open')
   // Prices are in decimal strings e.g. "0.5000" (already 0-1 range)
   //
-  // FILTER: Exclude auto-generated parlay/combo markets (KXMVE* tickers).
+  // FILTER: Exclude auto-generated parlay/combo markets (KXMVE* prefix).
   // These are multi-leg parlays with no equivalent Polymarket question —
   // they only clutter the DB and make cross-arb matching impossible.
+  // Variants: KXMVECROSSCATEGORY, KXMVESPORTSMULTIGAMEEXTENDED, etc.
+  // Use startsWith('KXMVE') to catch ALL variants — includes() on 'MVEC' missed KXMVES*.
   // Single-event markets have tickers like KXBTCD-*, KXINXD-*, KXFEDRATE-*, etc.
   const rows = allMarkets
     .filter(m => (m.status === 'active' || m.status === 'open') &&
       parseFloat(m.yes_ask_dollars ?? '0') > 0 &&
       parseFloat(m.no_ask_dollars ?? '0') > 0 &&
-      !m.ticker.includes('MVEC') &&          // exclude multi-variable event combos
+      !m.ticker.startsWith('KXMVE') &&       // exclude ALL multi-variable event combos (KXMVEC, KXMVES, etc.)
       !m.ticker.includes('MULTIGAME')        // exclude multi-game extended parlays
     )
     .map(m => ({

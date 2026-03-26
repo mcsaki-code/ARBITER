@@ -392,8 +392,10 @@ Respond ONLY in valid JSON:
       if (analysis.best_bet?.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
         const { data: configRows } = await supabase.from('system_config').select('key, value').in('key', ['paper_bankroll']);
         const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500');
-        const p = trueProbNorm ?? 0;
-        const c = mktPriceNorm ?? 0;
+        // BUY_NO: true_prob is YES probability, so flip to NO side for Kelly
+        const isBuyNo = analysis.best_bet?.direction === 'BUY_NO';
+        const p = isBuyNo ? 1 - (trueProbNorm ?? 0) : (trueProbNorm ?? 0);
+        const c = isBuyNo ? 1 - (mktPriceNorm ?? 0) : (mktPriceNorm ?? 0);
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;

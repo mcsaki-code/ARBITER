@@ -306,7 +306,10 @@ Respond ONLY in valid JSON:
         if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
           const { data: configRows } = await supabase.from('system_config').select('key, value').in('key', ['paper_bankroll']);
           const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500');
-          const p = sbProbNorm ?? 0; const c = pmPriceNorm ?? 0;
+          // BUY_NO: sportsbook_consensus is YES win-prob, so flip to NO side for Kelly
+          const isBuyNo = analysis.direction === 'BUY_NO';
+          const p = isBuyNo ? 1 - (sbProbNorm ?? 0) : (sbProbNorm ?? 0);
+          const c = isBuyNo ? 1 - (pmPriceNorm ?? 0) : (pmPriceNorm ?? 0);
           if (p > 0 && c > 0 && c < 1) {
             const b = (1 - c) / c;
             const fullKelly = (p * b - (1 - p)) / b;
@@ -558,8 +561,10 @@ Respond ONLY in valid JSON (no markdown, no explanation):
         const bankroll = parseFloat(
           configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500'
         );
-        const p = sbProbNorm ?? 0;
-        const c = pmPriceNorm ?? 0;
+        // BUY_NO: sportsbook_consensus is YES win-prob, so flip to NO side for Kelly
+        const isBuyNo2 = analysis.direction === 'BUY_NO';
+        const p = isBuyNo2 ? 1 - (sbProbNorm ?? 0) : (sbProbNorm ?? 0);
+        const c = isBuyNo2 ? 1 - (pmPriceNorm ?? 0) : (pmPriceNorm ?? 0);
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
