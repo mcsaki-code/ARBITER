@@ -258,6 +258,10 @@ export const handler = schedule('*/15 * * * *', async () => {
     } else if (analysis.category === 'crypto') {
       outcomeLabel = analysis.target_bracket || analysis.asset || null;
       entryPrice = analysis.market_price || null;
+    } else if (analysis.category === 'politics') {
+      // Politics analyses use best_outcome_label + market_price (same structure as weather)
+      outcomeLabel = analysis.best_outcome_label || null;
+      entryPrice = analysis.market_price || null;
     }
 
     // Entry price is already normalized above via normalizeProb
@@ -267,9 +271,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       entryPrice = 1 - entryPrice;
     }
 
-    // Need a valid entry price between 0.5% and 99.5%
-    // Weather brackets can legitimately be 1-5¢ — allow them through
-    if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
+    // Need a valid entry price — must be strictly above 0.3% and below 99.7%
+    // This allows thin political/weather markets (e.g. 0.5¢ underpriced event)
+    // while still blocking zero/near-zero pricing errors
+    if (!entryPrice || entryPrice < 0.003 || entryPrice >= 0.997) {
       console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
