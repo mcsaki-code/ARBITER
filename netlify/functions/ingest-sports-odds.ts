@@ -41,6 +41,7 @@ const BOOKMAKERS = 'draftkings,fanduel,betmgm,pinnacle';
 // In-season sport filter
 const TRACKED_ODDS_API: { sport: string; league: string }[] = [
   { sport: 'basketball_nba',          league: 'NBA' },
+  { sport: 'basketball_ncaab',        league: 'NCAAB' },   // ← March Madness!
   { sport: 'baseball_mlb',            league: 'MLB' },
   { sport: 'icehockey_nhl',           league: 'NHL' },
   { sport: 'soccer_epl',              league: 'Premier League' },
@@ -330,12 +331,28 @@ export const handler = schedule('0 * * * *', async () => {  // Every hour (was e
   console.log(`[ingest-sports] Pinnacle returned ${pinnacleRows.length} odds rows`);
   allOddsRows = pinnacleRows;
 
-  // If Pinnacle returned nothing (API changed?), fall back to The Odds API
-  if (allOddsRows.length === 0 && ODDS_API_KEY) {
+  // ── ALWAYS fetch NCAA basketball via Odds API — Pinnacle doesn't surface NCAAB ──
+  // NCAA Tournament ($6-7M markets each) is the biggest sports opportunity in March/April.
+  // This runs independently of the Pinnacle fallback so we always have NCAA odds.
+  if (ODDS_API_KEY) {
+    const nowMonth = new Date().getMonth(); // 0-indexed
+    if (nowMonth >= 2 && nowMonth <= 4) {   // March (2), April (3), May (4) = tournament months
+      console.log('[ingest-sports] Fetching NCAA basketball (March Madness / tournament)...');
+      const ncaaRows = await fetchOddsApiOdds('basketball_ncaab');
+      if (ncaaRows.length > 0) {
+        allOddsRows.push(...ncaaRows);
+        console.log(`[ingest-sports] NCAA: added ${ncaaRows.length} rows`);
+      }
+    }
+  }
+
+  // If Pinnacle returned nothing (API changed?), fall back to The Odds API for other sports
+  if (pinnacleRows.length === 0 && ODDS_API_KEY) {
     console.log('[ingest-sports] Pinnacle returned 0 rows — falling back to The Odds API');
     const now = new Date();
     const month = now.getMonth();
     const inSeasonSports = TRACKED_ODDS_API.filter(s => {
+      if (s.sport.includes('ncaab')) return false; // already fetched above
       if (s.sport.includes('nba')) return month >= 9 || month <= 5;
       if (s.sport.includes('mlb')) return month >= 2 && month <= 9;
       if (s.sport.includes('nhl')) return month >= 9 || month <= 5;

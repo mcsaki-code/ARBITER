@@ -256,9 +256,205 @@ export const handler = schedule('*/20 * * * *', async () => {
     }
   }
 
-  console.log(`[analyze-weather-v2] Done. Processed ${processed} markets in ${Date.now() - startTime}ms`);
+  console.log(`[analyze-weather-v2] Processed ${processed} weather markets in ${Date.now() - startTime}ms`);
+
+  // ── Phase 2: Temperature category market statistical analysis ──────────────
+  // 1,166+ markets: "Will the highest temp in Shanghai be 12°C on March 27?"
+  // Avg $50-70k liquidity, resolve within 3 days.
+  // No LLM needed — pure statistical edge using our weather_forecasts data.
+  // P(max = X°C) or P(max <= X°C) from Gaussian forecast distribution.
+  const tempAnalyzed = await analyzeTemperatureMarkets(startTime);
+  console.log(`[analyze-weather-v2] Done. +${tempAnalyzed} temperature markets. Total: ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Temperature Market Statistical Analysis
+// Uses weather_forecasts data to compute P(max_temp = threshold) etc.
+// Sigma = 2°C (typical 1-day forecast accuracy for max temperature)
+// ──────────────────────────────────────────────────────────────────────
+
+// Normal distribution CDF (Abramowitz & Stegun approximation, error < 7.5e-8)
+function normalCDF(x: number): number {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const phi = 1 - (1 / Math.sqrt(2 * Math.PI)) * Math.exp(-0.5 * x * x) * poly;
+  return x >= 0 ? phi : 1 - phi;
+}
+
+interface TemperatureParsed {
+  city: string;
+  threshold_c: number;
+  operator: 'exact' | 'lte' | 'gte';
+  date_str: string;   // e.g. "March 27"
+}
+
+function parseTemperatureQuestion(question: string): TemperatureParsed | null {
+  // Matches: "Will the highest temperature in [CITY] be [N]°C[ or below| or above] on [DATE]?"
+  const match = question.match(
+    /highest temperature in ([A-Za-z\s\u00C0-\u024F]+?) be (\d+)°C( or below| or above)? on ([A-Za-z]+ \d+)/i
+  );
+  if (!match) return null;
+  return {
+    city: match[1].trim(),
+    threshold_c: parseInt(match[2]),
+    operator: match[3]?.toLowerCase().includes('below') ? 'lte'
+             : match[3]?.toLowerCase().includes('above') ? 'gte'
+             : 'exact',
+    date_str: match[4].trim(),
+  };
+}
+
+// Convert "March 27" to a YYYY-MM-DD string (nearest future occurrence)
+function resolveDateStr(dateStr: string): string | null {
+  const months: Record<string, number> = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+    july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+  };
+  const parts = dateStr.toLowerCase().split(/\s+/);
+  const monthNum = months[parts[0]];
+  const day = parseInt(parts[1]);
+  if (monthNum === undefined || isNaN(day)) return null;
+
+  const now = new Date();
+  let year = now.getFullYear();
+  const candidate = new Date(year, monthNum, day);
+  if (candidate < now) candidate.setFullYear(year + 1);
+  return candidate.toISOString().split('T')[0];
+}
+
+async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
+  // Uses module-level `supabase` client (same service role as the main handler)
+  const MIN_EDGE = 0.08;          // 8% minimum — temp markets are niche
+  const SIGMA_C  = 2.0;           // ±2°C typical 1-day forecast accuracy
+  const MAX_PER_RUN = 20;
+
+  // Fetch temperature markets resolving in next 3 days with decent liquidity
+  const soon = new Date(Date.now() + 3 * 86400000).toISOString();
+  const { data: tempMarkets } = await supabase
+    .from('markets')
+    .select('id, question, outcome_prices, liquidity_usd, resolution_date')
+    .eq('is_active', true)
+    .eq('category', 'temperature')
+    .gt('liquidity_usd', 5000)
+    .gt('resolution_date', new Date(Date.now() + 1800000).toISOString()) // 30min min
+    .lt('resolution_date', soon)
+    .order('liquidity_usd', { ascending: false })
+    .limit(100);
+
+  if (!tempMarkets?.length) return 0;
+
+  // Pre-load recently analyzed to avoid duplicates
+  const recentCutoff = new Date(Date.now() - 4 * 3600000).toISOString();
+  const { data: recentTempRows } = await supabase
+    .from('weather_analyses')
+    .select('market_id')
+    .gte('analyzed_at', recentCutoff)
+    .in('market_id', tempMarkets.map(m => m.id));
+  const recentTempIds = new Set((recentTempRows ?? []).map((r: { market_id: string }) => r.market_id));
+
+  // Pre-load all weather_cities for matching
+  const { data: allCities } = await supabase.from('weather_cities').select('id, name, country');
+  const cityList = allCities ?? [];
+
+  let analyzed = 0;
+
+  for (const market of tempMarkets) {
+    if (Date.now() - startTime > 28000) break;  // stay under 30s Netlify limit
+    if (analyzed >= MAX_PER_RUN) break;
+    if (recentTempIds.has(market.id)) continue;
+
+    const parsed = parseTemperatureQuestion(market.question);
+    if (!parsed) continue;
+
+    const targetDate = resolveDateStr(parsed.date_str);
+    if (!targetDate) continue;
+
+    // Match city name (case-insensitive contains)
+    const cityNameLc = parsed.city.toLowerCase();
+    const city = cityList.find(c =>
+      c.name.toLowerCase() === cityNameLc ||
+      c.name.toLowerCase().includes(cityNameLc) ||
+      cityNameLc.includes(c.name.toLowerCase())
+    );
+    if (!city) continue; // No weather data for this city
+
+    // Get most recent forecast for this city and date
+    const { data: forecasts } = await supabase
+      .from('weather_forecasts')
+      .select('temp_high_f, source, fetched_at')
+      .eq('city_id', city.id)
+      .eq('valid_date', targetDate)
+      .order('fetched_at', { ascending: false })
+      .limit(5);
+
+    if (!forecasts?.length) continue;
+
+    // Average across sources for a consensus forecast
+    const avgHighF = forecasts.reduce((sum, f) => sum + (f.temp_high_f ?? 0), 0) / forecasts.length;
+    const mu_c = (avgHighF - 32) * 5 / 9;  // Forecast high in Celsius
+
+    // Compute probability based on operator
+    let trueProb: number;
+    const T = parsed.threshold_c;
+    if (parsed.operator === 'exact') {
+      // P(T - 0.5 < actual < T + 0.5) — what chance the rounded max == T?
+      trueProb = normalCDF((T + 0.5 - mu_c) / SIGMA_C) - normalCDF((T - 0.5 - mu_c) / SIGMA_C);
+    } else if (parsed.operator === 'lte') {
+      trueProb = normalCDF((T - mu_c) / SIGMA_C);
+    } else { // gte
+      trueProb = 1 - normalCDF((T - mu_c) / SIGMA_C);
+    }
+
+    const marketPrice = market.outcome_prices?.[0] ?? 0.5;
+    const edge = trueProb - marketPrice;
+    const absEdge = Math.abs(edge);
+
+    if (absEdge < MIN_EDGE) continue; // Not enough edge
+
+    const direction = edge > 0 ? 'BUY_YES' : 'BUY_NO';
+    const confidence = absEdge >= 0.20 ? 'HIGH' : absEdge >= 0.10 ? 'MEDIUM' : 'LOW';
+
+    // Kelly bet sizing
+    const { data: cfgRows } = await supabase.from('system_config').select('key, value').eq('key', 'paper_bankroll');
+    const bankroll = parseFloat(cfgRows?.[0]?.value ?? '5000');
+    const p = trueProb;
+    const c = direction === 'BUY_YES' ? marketPrice : (1 - marketPrice);
+    const b = (1 - c) / c;
+    const fullKelly = (p * b - (1 - p)) / b;
+    const confMult = confidence === 'HIGH' ? 0.8 : confidence === 'MEDIUM' ? 0.5 : 0.2;
+    const kellyFraction = fullKelly > 0 ? Math.min(fullKelly * 0.125 * confMult, 0.03) : 0;
+    const recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
+
+    await supabase.from('weather_analyses').insert({
+      market_id: market.id,
+      city_id: city.id,
+      consensus_id: null,
+      model_high_f: avgHighF,
+      model_spread_f: SIGMA_C * 1.8,   // approx spread in F
+      model_agreement: forecasts.length >= 3 ? 'HIGH' : 'MEDIUM',
+      market_type: 'temperature_statistical',
+      market_price: marketPrice,
+      true_prob: trueProb,
+      edge: Math.min(absEdge, 0.50),   // cap at 0.50 per policy
+      direction,
+      confidence,
+      kelly_fraction: kellyFraction,
+      rec_bet_usd: recBetUsd,
+      reasoning: `Statistical: forecast high ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), threshold ${T}°C ${parsed.operator}, P(match)=${(trueProb*100).toFixed(1)}%, market=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
+      auto_eligible: false,  // let place-bets decide based on confidence + edge
+      ensemble_prob: trueProb,
+      ensemble_edge: edge,
+      precip_consensus: null,
+      flags: [`forecast_sources_${forecasts.length}`, `sigma_${SIGMA_C}C`],
+    });
+
+    analyzed++;
+    console.log(`[analyze-weather-v2] 🌡️ ${parsed.city} ${parsed.operator} ${T}°C: forecast=${mu_c.toFixed(1)}°C, P=${(trueProb*100).toFixed(1)}%, market=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`);
+  }
+
+  return analyzed;
+}
 
 // ============================================================
 // Market type detection from question text

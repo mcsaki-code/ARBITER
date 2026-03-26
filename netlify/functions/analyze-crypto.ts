@@ -276,7 +276,9 @@ Respond ONLY in JSON:
       const rawEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0
         ? -analysis.edge
         : analysis.edge;
-      const edgeNorm      = normalizeEdge(rawEdge);
+      // Cap at 0.50: Claude sometimes returns edge=0.998 for near-certain NO bets
+      // (e.g., "BTC won't hit $150k this month") — uncapped, Kelly would over-bet massively.
+      const edgeNorm      = Math.min(normalizeEdge(rawEdge) ?? 0, 0.50) || null;
       const bracketNorm   = normalizeProb(analysis.bracket_prob);
       const mktPriceNorm  = normalizeProb(analysis.market_price);
 

@@ -99,6 +99,35 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'conor mcgregor': ['mcgregor', 'conor'],
   'jon jones': ['jones', 'jon jones', 'bones'],
   'israel adesanya': ['adesanya', 'izzy'],
+  // NCAA Basketball (March Madness — common tournament programs)
+  'connecticut huskies': ['connecticut', 'uconn', 'huskies'],
+  'michigan state spartans': ['michigan state', 'spartans', 'msu'],
+  'alabama crimson tide': ['alabama', 'crimson tide', 'bama'],
+  'michigan wolverines': ['michigan wolverines', 'wolverines'],
+  'duke blue devils': ['duke', 'blue devils'],
+  'kentucky wildcats': ['kentucky', 'wildcats', 'uk cats'],
+  'kansas jayhawks': ['kansas', 'jayhawks', 'ku'],
+  'north carolina tar heels': ['north carolina', 'unc', 'tar heels'],
+  'gonzaga bulldogs': ['gonzaga', 'bulldogs', 'zags'],
+  'houston cougars': ['houston cougars', 'cougars', 'uh'],
+  'purdue boilermakers': ['purdue', 'boilermakers'],
+  'tennessee volunteers': ['tennessee', 'vols', 'volunteers'],
+  'arizona wildcats': ['arizona wildcats', 'arizona', 'wildcats'],
+  'baylor bears': ['baylor', 'bears'],
+  'florida gators': ['florida', 'gators', 'uf'],
+  'illinois fighting illini': ['illinois', 'illini', 'fighting illini'],
+  'iowa state cyclones': ['iowa state', 'cyclones'],
+  'auburn tigers': ['auburn', 'tigers'],
+  'creighton bluejays': ['creighton', 'bluejays'],
+  'marquette golden eagles': ['marquette', 'golden eagles'],
+  'st. johns red storm': ["st. john's", 'st. johns', 'red storm'],
+  'texas longhorns': ['texas', 'longhorns', 'ut'],
+  'arkansas razorbacks': ['arkansas', 'razorbacks', 'hogs'],
+  'villanova wildcats': ['villanova', 'nova', 'wildcats'],
+  'indiana hoosiers': ['indiana', 'hoosiers', 'iu'],
+  'ucla bruins': ['ucla', 'bruins'],
+  'oregon ducks': ['oregon', 'ducks'],
+  'iowa hawkeyes': ['iowa', 'hawkeyes'],
 };
 
 function teamsMatchQuestion(question: string, homeTeam: string, awayTeam: string): boolean {
@@ -269,7 +298,7 @@ Respond ONLY in valid JSON:
         // For BUY_NO bets, Claude returns edge = sportsbook_prob - polymarket_price (negative).
         // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
         const absRawEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
-        const edgeNorm = normalizeEdge(absRawEdge);
+        const edgeNorm = Math.min(normalizeEdge(absRawEdge) ?? 0, 0.50) || null;
         const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
         const pmPriceNorm = normalizeProb(analysis.polymarket_price);
 
@@ -514,7 +543,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
       // For BUY_NO bets, edge = sportsbook_prob - polymarket_price (negative).
       // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
       const absRawEdge2 = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
-      const edgeNorm   = normalizeEdge(absRawEdge2);
+      const edgeNorm   = Math.min(normalizeEdge(absRawEdge2) ?? 0, 0.50) || null;
       const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
       const pmPriceNorm = normalizeProb(analysis.polymarket_price);
 

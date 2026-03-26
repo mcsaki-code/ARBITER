@@ -382,7 +382,8 @@ Respond ONLY in valid JSON:
 
       const analysis = JSON.parse(jsonMatch[0]);
 
-      const edgeNorm    = normalizeEdge(analysis.best_bet?.edge);
+      // Cap at 0.50 max — prevents over-sizing Kelly on near-certain calls
+      const edgeNorm    = Math.min(normalizeEdge(analysis.best_bet?.edge) ?? 0, 0.50) || null;
       const mktPriceNorm = normalizeProb(analysis.best_bet?.market_price);
       const trueProbNorm = normalizeProb(analysis.best_bet?.true_prob);
 
