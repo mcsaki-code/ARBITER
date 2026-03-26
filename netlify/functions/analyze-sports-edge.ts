@@ -185,12 +185,132 @@ export const handler = schedule('*/30 * * * *', async () => {
     .gte('fetched_at', cutoff)
     .eq('market_type', 'h2h');
 
-  if (!recentOdds?.length) {
-    console.log('[analyze-sports] No recent odds data — ingest may be delayed');
-    return { statusCode: 200 };
+  const oddsRows = recentOdds ?? [];
+  const hasOdds = oddsRows.length > 0;
+
+  if (!hasOdds) {
+    console.log('[analyze-sports] No recent sportsbook odds — running knowledge-only analysis on top markets');
+  } else {
+    console.log(`[analyze-sports] ${sportsMarkets.length} markets, ${oddsRows.length} odds rows`);
   }
 
-  console.log(`[analyze-sports] ${sportsMarkets.length} markets, ${recentOdds.length} odds rows`);
+  // ── KNOWLEDGE-ONLY PATH: analyze top markets when no sportsbook odds ──
+  if (!hasOdds) {
+    let analyzed = 0;
+    const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString();
+
+    for (const market of (sportsMarkets as MarketRow[]).slice(0, MAX_ANALYSES_PER_RUN)) {
+      if (Date.now() - startTime > 22000) break;
+      if (analyzed >= MAX_ANALYSES_PER_RUN) break;
+
+      const hoursRemaining = market.resolution_date
+        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000 : 0;
+      if (hoursRemaining < 2 || hoursRemaining > 168) continue;
+
+      // Skip recently analyzed
+      const { data: recent } = await supabase
+        .from('sports_analyses').select('id')
+        .eq('market_id', market.id).gte('analyzed_at', recentCutoff).limit(1);
+      if (recent?.length) continue;
+
+      const outcomesList = market.outcomes
+        .map((o: string, i: number) => `${o}: $${market.outcome_prices[i]?.toFixed(3) ?? '?'}`)
+        .join('\n');
+
+      const prompt = `You are ARBITER's sports analyst. Assess whether the Polymarket price is mis-priced vs your best estimate.
+
+MARKET: ${market.question}
+OUTCOMES:
+${outcomesList}
+LIQUIDITY: $${market.liquidity_usd.toLocaleString()} | VOLUME: $${market.volume_usd.toLocaleString()}
+RESOLVES: in ${Math.round(hoursRemaining)} hours
+
+TASK:
+1. Based on current team performance, standings, injuries, and recent news (use your training knowledge)
+2. Estimate the true probability for each outcome
+3. Compare to Polymarket prices — is there a genuine edge >= 5%?
+4. Be conservative — only flag high-confidence edges
+5. Set auto_eligible = true only if confidence HIGH/MEDIUM and edge >= 0.06
+
+Respond ONLY in valid JSON:
+{
+  "event_description": string,
+  "sport": string,
+  "sportsbook_consensus": number (your estimated true prob for YES side),
+  "polymarket_price": number,
+  "edge": number,
+  "direction": "BUY_YES"|"BUY_NO"|"PASS",
+  "confidence": "HIGH"|"MEDIUM"|"LOW",
+  "kelly_fraction": number,
+  "rec_bet_usd": number,
+  "reasoning": string,
+  "data_sources": ["claude_knowledge"],
+  "auto_eligible": boolean,
+  "flags": string[]
+}`;
+
+      try {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!res.ok) { console.error(`[analyze-sports] Claude error ${res.status}`); continue; }
+
+        const data = await res.json();
+        const text = data.content?.[0]?.text ?? '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+
+        const analysis = JSON.parse(jsonMatch[0]);
+        const edgeNorm = normalizeEdge(analysis.edge);
+        const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
+        const pmPriceNorm = normalizeProb(analysis.polymarket_price);
+
+        let kellyFraction = 0, recBetUsd = 0;
+        if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
+          const { data: configRows } = await supabase.from('system_config').select('key, value').in('key', ['paper_bankroll']);
+          const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500');
+          const p = sbProbNorm ?? 0; const c = pmPriceNorm ?? 0;
+          if (p > 0 && c > 0 && c < 1) {
+            const b = (1 - c) / c;
+            const fullKelly = (p * b - (1 - p)) / b;
+            if (fullKelly > 0) {
+              const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
+              kellyFraction = Math.min(fullKelly * 0.125 * confMult, 0.03);
+              recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
+            }
+          }
+        }
+
+        await supabase.from('sports_analyses').insert({
+          market_id: market.id,
+          event_description: analysis.event_description ?? market.question.substring(0, 100),
+          sport: analysis.sport ?? 'sports',
+          sportsbook_consensus: sbProbNorm,
+          polymarket_price: pmPriceNorm,
+          edge: edgeNorm,
+          direction: analysis.direction ?? 'PASS',
+          confidence: analysis.confidence ?? 'LOW',
+          kelly_fraction: kellyFraction,
+          rec_bet_usd: recBetUsd,
+          reasoning: analysis.reasoning ?? null,
+          data_sources: analysis.data_sources ?? ['claude_knowledge'],
+          auto_eligible: analysis.auto_eligible ?? false,
+          flags: analysis.flags ?? [],
+        });
+
+        analyzed++;
+        console.log(`[analyze-sports] ✅ [knowledge] "${market.question.substring(0, 60)}": edge=${edgeNorm?.toFixed(3)} dir=${analysis.direction}`);
+      } catch (err) {
+        console.error('[analyze-sports] Knowledge analysis error:', err);
+      }
+    }
+
+    console.log(`[analyze-sports] Knowledge-only mode: analyzed ${analyzed} markets in ${Date.now() - startTime}ms`);
+    return { statusCode: 200 };
+  }
 
   // Build consensus probabilities per event
   const consensusByEvent = new Map<string, {
@@ -198,7 +318,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     league: string; sport: string; commence: string; bookCount: number;
   }>();
 
-  for (const o of recentOdds) {
+  for (const o of oddsRows) {
     if (!consensusByEvent.has(o.event_id)) {
       consensusByEvent.set(o.event_id, {
         home: 0, away: 0,
@@ -214,8 +334,8 @@ export const handler = schedule('*/30 * * * *', async () => {
 
   // Average implied probs across sportsbooks per event
   for (const [eventId, info] of consensusByEvent) {
-    const homeOdds = recentOdds.filter(o => o.event_id === eventId && o.outcome_name === info.homeTeam);
-    const awayOdds = recentOdds.filter(o => o.event_id === eventId && o.outcome_name === info.awayTeam);
+    const homeOdds = oddsRows.filter(o => o.event_id === eventId && o.outcome_name === info.homeTeam);
+    const awayOdds = oddsRows.filter(o => o.event_id === eventId && o.outcome_name === info.awayTeam);
     if (homeOdds.length > 0) {
       info.home = homeOdds.reduce((s, o) => s + o.implied_prob, 0) / homeOdds.length;
       info.bookCount = homeOdds.length;
@@ -291,7 +411,7 @@ export const handler = schedule('*/30 * * * *', async () => {
       continue;
     }
 
-    const eventOdds = recentOdds.filter(
+    const eventOdds = oddsRows.filter(
       o => o.home_team === consensus.homeTeam && o.away_team === consensus.awayTeam && o.market_type === 'h2h'
     );
     const sbBreakdown = eventOdds
