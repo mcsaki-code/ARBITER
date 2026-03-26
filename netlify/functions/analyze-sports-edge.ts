@@ -162,13 +162,15 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get active sports markets (top 100 by volume)
+  // Get active sports markets with 2+ hours remaining (top 100 by volume)
+  const minSportsResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
   const { data: sportsMarkets } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true)
     .eq('category', 'sports')
     .gt('liquidity_usd', 5000)
+    .gt('resolution_date', minSportsResolutionDate)
     .order('volume_usd', { ascending: false })
     .limit(100);
 

@@ -25,12 +25,15 @@ export const handler = schedule('*/20 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get ALL active weather markets with city data
+  // Get active weather markets with city data — only those with 2+ hours remaining
+  // (prevents already-resolved today's markets from blocking future market analysis)
+  const minResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
   const { data: markets } = await supabase
     .from('markets')
     .select('*, weather_cities(*)')
     .eq('is_active', true)
-    .not('city_id', 'is', null);
+    .not('city_id', 'is', null)
+    .gt('resolution_date', minResolutionDate);
 
   if (!markets || markets.length === 0) {
     console.log('[analyze-weather-v2] No active markets with city matches');

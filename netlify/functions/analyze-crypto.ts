@@ -89,13 +89,15 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // Get active crypto markets from Polymarket
+  // Get active crypto markets with 2+ hours remaining
+  const minResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
   const { data: cryptoMarkets } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true)
     .eq('category', 'crypto')
     .gt('liquidity_usd', 5000)
+    .gt('resolution_date', minResolutionDate)
     .order('volume_usd', { ascending: false })
     .limit(30);
 
