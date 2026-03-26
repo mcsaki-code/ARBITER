@@ -150,7 +150,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     supabase.from('politics_analyses').select('*')
       .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
       .order('edge', { ascending: false }).limit(20)
-      .then(r => r.data ?? []).catch(() => [] as unknown[]),
+      .then(r => r.data ?? [], () => [] as unknown[]),
   ]);
 
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
