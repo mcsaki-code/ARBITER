@@ -365,6 +365,16 @@ Respond ONLY in valid JSON:
       if (!teamsMatchQuestion(market.question, info.homeTeam, info.awayTeam)) continue;
       if (market.outcome_prices.length < 2) continue;
 
+      // ── DURATION MISMATCH GUARD ──────────────────────────────────────
+      // Polymarket season-long markets (NBA championship, World Series winner)
+      // share team names with tonight's individual game, but resolve months later.
+      // Only match when the Polymarket market resolves within 7 days of the
+      // sportsbook game start — otherwise it's a category mismatch.
+      const marketHoursRemaining = market.resolution_date
+        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000 : 0;
+      const gameHoursFromNow = (new Date(info.commence).getTime() - Date.now()) / 3600000;
+      if (marketHoursRemaining > gameHoursFromNow + 168) continue; // >7-day gap → skip
+
       const pmYes = market.outcome_prices[0];
       const q = market.question.toLowerCase();
 

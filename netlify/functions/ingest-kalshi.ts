@@ -15,7 +15,9 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
+// Primary: main trading API (has BTC, S&P, politics, economics single-event markets)
+// Fallback: legacy elections domain (only serves sports parlays)
+const KALSHI_BASE = 'https://trading-api.kalshi.com/trade-api/v2';
 
 async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   try {
@@ -110,10 +112,18 @@ export const handler = schedule('*/15 * * * *', async () => {
   // Upsert to kalshi_markets table
   // NOTE: Kalshi v2 API response uses 'active' for open markets (not 'open')
   // Prices are in decimal strings e.g. "0.5000" (already 0-1 range)
+  //
+  // FILTER: Exclude auto-generated parlay/combo markets (KXMVE* tickers).
+  // These are multi-leg parlays with no equivalent Polymarket question —
+  // they only clutter the DB and make cross-arb matching impossible.
+  // Single-event markets have tickers like KXBTCD-*, KXINXD-*, KXFEDRATE-*, etc.
   const rows = allMarkets
     .filter(m => (m.status === 'active' || m.status === 'open') &&
       parseFloat(m.yes_ask_dollars ?? '0') > 0 &&
-      parseFloat(m.no_ask_dollars ?? '0') > 0)
+      parseFloat(m.no_ask_dollars ?? '0') > 0 &&
+      !m.ticker.includes('MVEC') &&          // exclude multi-variable event combos
+      !m.ticker.includes('MULTIGAME')        // exclude multi-game extended parlays
+    )
     .map(m => ({
       ticker: m.ticker,
       event_ticker: m.event_ticker,
