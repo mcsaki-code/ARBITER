@@ -18,7 +18,7 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_ANALYSES_PER_RUN = 6;
+const MAX_ANALYSES_PER_RUN = 8;
 const MIN_EDGE_PCT = 0.05;
 
 function normalizeEdge(raw: number | null | undefined): number | null {
@@ -123,14 +123,16 @@ export const handler = schedule('*/30 * * * *', async () => {
   }
 
   // Also fetch directly from markets table (already ingested)
+  // Fetch 200 politics markets sorted by liquidity so we cover the entire catalog
   const { data: dbPoliticsMarkets } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true)
     .eq('category', 'politics')
     .gt('liquidity_usd', 5000)
-    .order('volume_usd', { ascending: false })
-    .limit(50);
+    .gt('resolution_date', new Date(Date.now() + 3600000).toISOString())
+    .order('liquidity_usd', { ascending: false })
+    .limit(200);
 
   // Upsert newly found markets to DB
   if (politicsMarkets.length > 0) {
@@ -178,10 +180,27 @@ export const handler = schedule('*/30 * * * *', async () => {
   // ── 3. Analyze top markets with Claude ────────────────────
   let analyzed = 0;
 
-  // Sort by volume descending, skip recently analyzed
-  const recentCutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+  // Pre-load all recently-analyzed market IDs in ONE query (avoids N+1 Supabase calls)
+  const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString();
+  const { data: recentRows } = await supabase
+    .from('politics_analyses')
+    .select('market_id')
+    .gte('analyzed_at', recentCutoff);
+  const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
-  for (const market of allPoliticsMarkets.slice(0, MAX_ANALYSES_PER_RUN * 2)) {
+  // Sort: never-analyzed first (biggest opportunity), then by liquidity DESC
+  const sortedCandidates = [...allPoliticsMarkets].sort((a, b) => {
+    const aId = (a as { id?: string }).id ?? '';
+    const bId = (b as { id?: string }).id ?? '';
+    const aAnalyzed = recentlyAnalyzed.has(aId) ? 1 : 0;
+    const bAnalyzed = recentlyAnalyzed.has(bId) ? 1 : 0;
+    if (aAnalyzed !== bAnalyzed) return aAnalyzed - bAnalyzed;
+    const aLiq = (a as { liquidity_usd?: number }).liquidity_usd ?? 0;
+    const bLiq = (b as { liquidity_usd?: number }).liquidity_usd ?? 0;
+    return bLiq - aLiq;
+  });
+
+  for (const market of sortedCandidates) {
     if (Date.now() - startTime > 22000) break;
     if (analyzed >= MAX_ANALYSES_PER_RUN) break;
 
@@ -196,14 +215,8 @@ export const handler = schedule('*/30 * * * *', async () => {
 
     if (!mktId || liquidityUsd < 5000) continue;
 
-    // Skip recently analyzed
-    const { data: recent } = await supabase
-      .from('politics_analyses')
-      .select('id')
-      .eq('market_id', mktId)
-      .gte('analyzed_at', recentCutoff)
-      .limit(1);
-    if (recent?.length) continue;
+    // Skip recently analyzed (using pre-loaded set — no extra DB call)
+    if (recentlyAnalyzed.has(mktId)) continue;
 
     const outcomePrices: number[] = (market as { outcome_prices?: number[] }).outcome_prices ?? [];
     if (outcomePrices.length < 2) continue;

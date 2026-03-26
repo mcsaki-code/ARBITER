@@ -188,14 +188,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
     if (analysis.polymarket_price) analysis.polymarket_price = normalizeProb(analysis.polymarket_price);
 
-    // Must be auto-eligible (HIGH confidence, HIGH agreement, edge >= 0.08)
-    // OR at minimum: confidence >= MEDIUM, edge >= 0.05
-    const isAutoEligible = analysis.auto_eligible;
+    // Eligibility is determined HERE by our risk system, not by Claude's self-report.
+    // Claude's auto_eligible field is advisory only — LLMs add subjective flags
+    // (LONG_TIMEFRAME, HIGH_VOLATILITY_ASSET) that wrongly veto legitimate edges.
+    // Our rule: confidence >= MEDIUM AND edge >= MIN_EDGE.
     const isMediumEligible =
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
       edgeNorm >= MIN_EDGE;
 
-    if (!isAutoEligible && !isMediumEligible) continue;
+    if (!isMediumEligible) continue;
 
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase

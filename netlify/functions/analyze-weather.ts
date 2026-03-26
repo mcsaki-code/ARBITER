@@ -40,12 +40,27 @@ export const handler = schedule('*/20 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // Sort markets: prioritize higher liquidity and those not recently analyzed
-  const sortedMarkets = [...markets].sort((a, b) => (b.liquidity_usd || 0) - (a.liquidity_usd || 0));
+  // Pre-load recently analyzed market IDs to avoid re-analyzing same markets every run.
+  // Use 6h window so we cycle through ALL active markets rather than repeatedly hitting
+  // the same top-liquidity one (e.g., Tokyo). This lets the queue rotate properly.
+  const weatherRecentCutoff = new Date(Date.now() - 6 * 3600000).toISOString();
+  const { data: recentWeatherRows } = await supabase
+    .from('weather_analyses')
+    .select('market_id')
+    .gte('analyzed_at', weatherRecentCutoff);
+  const recentWeatherIds = new Set((recentWeatherRows ?? []).map((r: { market_id: string }) => r.market_id?.toString()));
+
+  // Sort: unanalyzed first, then by liquidity DESC
+  const sortedMarkets = [...markets].sort((a, b) => {
+    const aRecent = recentWeatherIds.has(a.id?.toString() ?? '') ? 1 : 0;
+    const bRecent = recentWeatherIds.has(b.id?.toString() ?? '') ? 1 : 0;
+    if (aRecent !== bRecent) return aRecent - bRecent;
+    return (b.liquidity_usd || 0) - (a.liquidity_usd || 0);
+  });
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 5)) {
-    // STRICT time guard: 22s (slightly more room for 5 markets)
+  for (const market of sortedMarkets.slice(0, 8)) {
+    // STRICT time guard: 22s
     if (Date.now() - startTime > 22000) break;
 
     const city = market.weather_cities;
