@@ -187,8 +187,17 @@ export const handler = schedule('0 * * * *', async () => {
     // Resolve the bet — handle BUY_NO logic correctly
     const betLabel = (bet.outcome_label || '').toLowerCase().trim();
     const winner = (winningOutcome || '').toLowerCase().trim();
+
+    // Categories where outcome_label is descriptive text (not an outcome name).
+    // For these, rely purely on direction: BUY_YES wins when "Yes" wins, BUY_NO when "No" wins.
+    const DIRECTION_BASED_CATEGORIES = ['crypto_momentum', 'whale_copy', 'politics', 'arb'];
+    const isDirectionBased = DIRECTION_BASED_CATEGORIES.includes(bet.category ?? '');
+
     let betWon: boolean;
-    if (bet.direction === 'BUY_NO') {
+    if (isDirectionBased) {
+      // Use direction as ground truth
+      betWon = bet.direction === 'BUY_YES' ? (winner === 'yes') : (winner === 'no');
+    } else if (bet.direction === 'BUY_NO') {
       // For BUY_NO: we win when our named outcome does NOT win
       // Exception: if outcome_label is literally "No", we win when "No" wins
       const isLiteralNo = betLabel === 'no';

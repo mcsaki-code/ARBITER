@@ -13,8 +13,21 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_ANALYSES_PER_RUN = 3;
+const MAX_ANALYSES_PER_RUN = 8;   // increased from 3
 const MIN_EDGE_PCT = 0.02;
+
+// ── Edge/Prob normalization (fixes Claude returning 849 instead of 0.849) ──
+function normalizeEdge(raw: number | null | undefined): number | null {
+  if (raw == null) return null;
+  if (raw > 100) return raw / 1000;
+  if (raw > 1)   return raw / 100;
+  return raw;
+}
+function normalizeProb(raw: number | null | undefined): number | null {
+  if (raw == null) return null;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
 
 interface SignalRow {
   id: string;
@@ -243,6 +256,11 @@ Respond ONLY in JSON:
         }
       }
 
+      // ── Normalize before storing (fixes the 849 bug at source) ──
+      const edgeNorm      = normalizeEdge(analysis.edge);
+      const bracketNorm   = normalizeProb(analysis.bracket_prob);
+      const mktPriceNorm  = normalizeProb(analysis.market_price);
+
       // Store analysis
       await supabase.from('crypto_analyses').insert({
         market_id: market.id,
@@ -250,9 +268,9 @@ Respond ONLY in JSON:
         asset: analysis.asset || asset,
         spot_at_analysis: analysis.spot_at_analysis || signal.spot_price,
         target_bracket: analysis.target_bracket,
-        bracket_prob: analysis.bracket_prob,
-        market_price: analysis.market_price,
-        edge: analysis.edge,
+        bracket_prob: bracketNorm,
+        market_price: mktPriceNorm,
+        edge: edgeNorm,
         direction: analysis.direction || 'PASS',
         confidence: analysis.confidence || 'LOW',
         kelly_fraction: kellyFraction,

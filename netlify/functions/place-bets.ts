@@ -19,13 +19,18 @@ const supabase = createClient(
 // Risk limits — calibrated to professional prediction market standards
 const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
-const MAX_DAILY_BETS_AUTO = 15;
+const MAX_DAILY_BETS_AUTO = 20;        // increased from 15
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
-const MIN_EDGE = 0.05;                 // 5% minimum edge (up from 2%)
-const MIN_EDGE_WEATHER = 0.08;         // 8% for weather (matching top bots)
+const MIN_EDGE = 0.05;                 // 5% minimum edge
+const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
 const MIN_LIQUIDITY = 5000;            // Skip thin markets
 const KELLY_FRACTION = 0.125;          // 1/8th Kelly (professional standard)
-const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2h max staleness
+// Per-category staleness windows — sports/crypto ingest runs hourly now
+const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
+const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
+const MAX_ANALYSIS_AGE_CRYPTO   = 4 * 3600000;  // 4h
+const MAX_ANALYSIS_AGE_POLITICS = 6 * 3600000;  // 6h
+const MAX_ANALYSIS_AGE_MS = 6 * 3600000;         // default fallback
 
 /** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
 function normalizeEdge(raw: number | null): number {
@@ -126,56 +131,36 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
 
-  // Collect eligible analyses from the last 2 hours across all verticals
-  const cutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_MS).toISOString();
-  const candidates: (AnalysisRow & { category: string; source_table: string })[] = [];
+  // Collect eligible analyses using per-category staleness windows (all in parallel)
+  const weatherCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_WEATHER).toISOString();
+  const sportsCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_SPORTS).toISOString();
+  const cryptoCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_CRYPTO).toISOString();
+  const politicsCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_POLITICS).toISOString();
 
-  // 1. Weather analyses — higher edge threshold (8%)
-  const { data: weatherAnalyses } = await supabase
-    .from('weather_analyses')
-    .select('*')
-    .gte('analyzed_at', cutoff)
-    .neq('direction', 'PASS')
-    .gt('edge', MIN_EDGE_WEATHER)
-    .order('edge', { ascending: false });
+  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses] = await Promise.all([
+    supabase.from('weather_analyses').select('*')
+      .gte('analyzed_at', weatherCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER)
+      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+    supabase.from('sports_analyses').select('*')
+      .gte('analyzed_at', sportsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
+      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+    supabase.from('crypto_analyses').select('*')
+      .gte('analyzed_at', cryptoCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
+      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+    supabase.from('politics_analyses').select('*')
+      .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
+      .order('edge', { ascending: false }).limit(20)
+      .then(r => r.data ?? []).catch(() => [] as unknown[]),
+  ]);
 
-  if (weatherAnalyses) {
-    for (const a of weatherAnalyses) {
-      candidates.push({ ...a, category: 'weather', source_table: 'weather_analyses' });
-    }
-  }
+  const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
+    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',  source_table: 'weather_analyses'  })),
+    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',   source_table: 'sports_analyses'   })),
+    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',   source_table: 'crypto_analyses'   })),
+    ...(politicsAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'politics', source_table: 'politics_analyses' })),
+  ];
 
-  // 2. Sports analyses
-  const { data: sportsAnalyses } = await supabase
-    .from('sports_analyses')
-    .select('*')
-    .gte('analyzed_at', cutoff)
-    .neq('direction', 'PASS')
-    .gt('edge', MIN_EDGE)
-    .order('edge', { ascending: false });
-
-  if (sportsAnalyses) {
-    for (const a of sportsAnalyses) {
-      candidates.push({ ...a, category: 'sports', source_table: 'sports_analyses' });
-    }
-  }
-
-  // 3. Crypto analyses
-  const { data: cryptoAnalyses } = await supabase
-    .from('crypto_analyses')
-    .select('*')
-    .gte('analyzed_at', cutoff)
-    .neq('direction', 'PASS')
-    .gt('edge', MIN_EDGE)
-    .order('edge', { ascending: false });
-
-  if (cryptoAnalyses) {
-    for (const a of cryptoAnalyses) {
-      candidates.push({ ...a, category: 'crypto', source_table: 'crypto_analyses' });
-    }
-  }
-
-  console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses?.length || 0}, sports: ${sportsAnalyses?.length || 0}, crypto: ${cryptoAnalyses?.length || 0})`);
+  console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses.length}, sports: ${sportsAnalyses.length}, crypto: ${cryptoAnalyses.length}, politics: ${(politicsAnalyses as unknown[]).length})`);
 
   // Sort all candidates by edge descending (best opportunities first)
   candidates.sort((a, b) => (b.edge || 0) - (a.edge || 0));

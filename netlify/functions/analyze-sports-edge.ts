@@ -1,8 +1,9 @@
 // ============================================================
-// Netlify Scheduled Function: Analyze Sports Edge
-// Runs every 30 minutes — uses sportsbook consensus vs Polymarket
-// prices to identify mispricings. Claude provides contextual
-// analysis for the strongest edges.
+// Netlify Scheduled Function: Analyze Sports Edge v2
+// Runs every 30 minutes — sportsbook consensus vs Polymarket
+// FIXED: Edge normalization before DB insert
+// FIXED: Team alias map + fuzzy matching (was only finding 1 market)
+// FIXED: Increased MAX_ANALYSES_PER_RUN from 3 to 8
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -14,8 +15,117 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_ANALYSES_PER_RUN = 3;
+const MAX_ANALYSES_PER_RUN = 8;   // was 3 — increased to find more bets
 const MIN_EDGE_PCT = 0.02;
+
+// ── Edge/Probability Normalization ────────────────────────
+// Claude sometimes returns 84.9 instead of 0.849
+function normalizeEdge(raw: number | null | undefined): number | null {
+  if (raw == null) return null;
+  if (raw > 100) return raw / 1000;
+  if (raw > 1)   return raw / 100;
+  return raw;
+}
+
+function normalizeProb(raw: number | null | undefined): number | null {
+  if (raw == null) return null;
+  if (raw > 1) return raw / 100;
+  return raw;
+}
+
+// ── Team Name Alias Map ────────────────────────────────────
+// Maps canonical team names (from sportsbooks) to Polymarket aliases.
+// Polymarket often uses short names, nicknames, or city names.
+const TEAM_ALIASES: Record<string, string[]> = {
+  // NBA
+  'los angeles lakers': ['lakers', 'la lakers', 'los angeles'],
+  'golden state warriors': ['warriors', 'gsw', 'golden state'],
+  'boston celtics': ['celtics', 'boston'],
+  'miami heat': ['heat', 'miami'],
+  'denver nuggets': ['nuggets', 'denver'],
+  'new york knicks': ['knicks', 'ny knicks', 'new york'],
+  'milwaukee bucks': ['bucks', 'milwaukee'],
+  'phoenix suns': ['suns', 'phoenix'],
+  'dallas mavericks': ['mavericks', 'mavs', 'dallas'],
+  'oklahoma city thunder': ['thunder', 'okc', 'oklahoma'],
+  'minnesota timberwolves': ['timberwolves', 'wolves', 'minnesota'],
+  'cleveland cavaliers': ['cavaliers', 'cavs', 'cleveland'],
+  'indiana pacers': ['pacers', 'indiana'],
+  'new orleans pelicans': ['pelicans', 'new orleans'],
+  'los angeles clippers': ['clippers', 'la clippers'],
+  'philadelphia 76ers': ['76ers', 'sixers', 'philadelphia'],
+  // NFL
+  'kansas city chiefs': ['chiefs', 'kansas city'],
+  'san francisco 49ers': ['49ers', 'niners', 'san francisco'],
+  'philadelphia eagles': ['eagles', 'philadelphia'],
+  'buffalo bills': ['bills', 'buffalo'],
+  'dallas cowboys': ['cowboys', 'dallas'],
+  'green bay packers': ['packers', 'green bay'],
+  'baltimore ravens': ['ravens', 'baltimore'],
+  'new england patriots': ['patriots', 'new england'],
+  // MLB
+  'new york yankees': ['yankees', 'ny yankees', 'new york'],
+  'los angeles dodgers': ['dodgers', 'la dodgers', 'los angeles'],
+  'houston astros': ['astros', 'houston'],
+  'atlanta braves': ['braves', 'atlanta'],
+  'new york mets': ['mets', 'ny mets'],
+  'chicago cubs': ['cubs', 'chicago'],
+  'boston red sox': ['red sox', 'boston'],
+  // NHL
+  'boston bruins': ['bruins', 'boston'],
+  'toronto maple leafs': ['maple leafs', 'leafs', 'toronto'],
+  'colorado avalanche': ['avalanche', 'colorado', 'avs'],
+  'vegas golden knights': ['golden knights', 'vegas', 'knights'],
+  'tampa bay lightning': ['lightning', 'tampa bay', 'tampa'],
+  // Soccer (EPL)
+  'manchester city': ['man city', 'mcfc', 'city'],
+  'manchester united': ['man utd', 'man united', 'mufc', 'united'],
+  'liverpool': ['liverpool', 'reds', 'lfc'],
+  'arsenal': ['arsenal', 'gunners'],
+  'chelsea': ['chelsea', 'blues'],
+  'tottenham hotspur': ['spurs', 'tottenham', 'thfc'],
+  'newcastle united': ['newcastle', 'magpies'],
+  'aston villa': ['aston villa', 'villa'],
+  // Soccer (La Liga / CL)
+  'atletico madrid': ['atletico', 'atlético', 'atleti', 'at. madrid'],
+  'real madrid': ['real madrid', 'madrid', 'los blancos'],
+  'fc barcelona': ['barcelona', 'barca', 'fcb'],
+  'inter milan': ['inter', 'inter milan', 'internazionale'],
+  'ac milan': ['milan', 'ac milan'],
+  'bayern munich': ['bayern', 'munich', 'fcb'],
+  'psg': ['paris saint-germain', 'psg', 'paris sg'],
+  'juventus': ['juventus', 'juve'],
+  // MMA
+  'conor mcgregor': ['mcgregor', 'conor'],
+  'jon jones': ['jones', 'jon jones', 'bones'],
+  'israel adesanya': ['adesanya', 'izzy'],
+};
+
+function teamsMatchQuestion(question: string, homeTeam: string, awayTeam: string): boolean {
+  const q = question.toLowerCase();
+
+  function checkTeam(team: string): boolean {
+    const t = team.toLowerCase();
+    if (q.includes(t)) return true;
+
+    // Check aliases
+    const aliases = TEAM_ALIASES[t] ?? [];
+    if (aliases.some(a => q.includes(a))) return true;
+
+    // Check last word (e.g., "Warriors" from "Golden State Warriors")
+    const words = t.split(' ');
+    const lastWord = words[words.length - 1];
+    if (lastWord.length >= 4 && q.includes(lastWord)) return true;
+
+    // Check first word (city name)
+    const firstWord = words[0];
+    if (firstWord.length >= 4 && q.includes(firstWord)) return true;
+
+    return false;
+  }
+
+  return checkTeam(homeTeam) || checkTeam(awayTeam);
+}
 
 interface MarketRow {
   id: string;
@@ -43,7 +153,7 @@ interface OddsRow {
 }
 
 export const handler = schedule('*/30 * * * *', async () => {
-  console.log('[analyze-sports] Starting sports edge analysis');
+  console.log('[analyze-sports] Starting sports edge analysis v2');
   const startTime = Date.now();
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -52,152 +162,155 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get active sports markets from Polymarket
+  // Get active sports markets (top 100 by volume)
   const { data: sportsMarkets } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true)
     .eq('category', 'sports')
-    .gt('liquidity_usd', 10000)
+    .gt('liquidity_usd', 5000)
     .order('volume_usd', { ascending: false })
-    .limit(50);
+    .limit(100);
 
-  if (!sportsMarkets || sportsMarkets.length === 0) {
+  if (!sportsMarkets?.length) {
     console.log('[analyze-sports] No active sports markets');
     return { statusCode: 200 };
   }
 
-  // Get recent odds data (last 2 hours)
-  const cutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+  // Get recent odds (last 4 hours — was 2h, increased for hourly ingest)
+  const cutoff = new Date(Date.now() - 4 * 3600000).toISOString();
   const { data: recentOdds } = await supabase
     .from('sports_odds')
     .select('*')
     .gte('fetched_at', cutoff)
     .eq('market_type', 'h2h');
 
-  if (!recentOdds || recentOdds.length === 0) {
-    console.log('[analyze-sports] No recent odds data');
+  if (!recentOdds?.length) {
+    console.log('[analyze-sports] No recent odds data — ingest may be delayed');
     return { statusCode: 200 };
   }
 
-  // Group odds by event_id to calculate consensus
-  const oddsByEvent = new Map<string, OddsRow[]>();
-  for (const o of recentOdds) {
-    const key = `${o.event_id}_${o.outcome_name}`;
-    if (!oddsByEvent.has(key)) oddsByEvent.set(key, []);
-    oddsByEvent.get(key)!.push(o);
-  }
+  console.log(`[analyze-sports] ${sportsMarkets.length} markets, ${recentOdds.length} odds rows`);
 
-  // Build consensus implied probabilities per event/outcome
-  const consensusByEvent = new Map<string, { home: number; away: number; homeTeam: string; awayTeam: string; league: string; sport: string; commence: string }>();
+  // Build consensus probabilities per event
+  const consensusByEvent = new Map<string, {
+    home: number; away: number; homeTeam: string; awayTeam: string;
+    league: string; sport: string; commence: string; bookCount: number;
+  }>();
 
   for (const o of recentOdds) {
     if (!consensusByEvent.has(o.event_id)) {
       consensusByEvent.set(o.event_id, {
-        home: 0,
-        away: 0,
+        home: 0, away: 0,
         homeTeam: o.home_team,
         awayTeam: o.away_team,
         league: o.league,
         sport: o.sport,
         commence: o.commence_time,
+        bookCount: 0,
       });
     }
   }
 
-  // Average implied prob across sportsbooks for each outcome
-  for (const [eventId, info] of consensusByEvent.entries()) {
-    const homeOdds = recentOdds.filter((o) => o.event_id === eventId && o.outcome_name === info.homeTeam);
-    const awayOdds = recentOdds.filter((o) => o.event_id === eventId && o.outcome_name === info.awayTeam);
-
+  // Average implied probs across sportsbooks per event
+  for (const [eventId, info] of consensusByEvent) {
+    const homeOdds = recentOdds.filter(o => o.event_id === eventId && o.outcome_name === info.homeTeam);
+    const awayOdds = recentOdds.filter(o => o.event_id === eventId && o.outcome_name === info.awayTeam);
     if (homeOdds.length > 0) {
       info.home = homeOdds.reduce((s, o) => s + o.implied_prob, 0) / homeOdds.length;
+      info.bookCount = homeOdds.length;
     }
     if (awayOdds.length > 0) {
       info.away = awayOdds.reduce((s, o) => s + o.implied_prob, 0) / awayOdds.length;
     }
   }
 
-  // Match Polymarket markets to sportsbook events and find edges
+  // Match Polymarket markets to sportsbook events using improved matching
   const edgeCandidates: {
     market: MarketRow;
-    consensus: { home: number; away: number; homeTeam: string; awayTeam: string; league: string; sport: string; commence: string };
+    consensus: { home: number; away: number; homeTeam: string; awayTeam: string; league: string; sport: string; commence: string; bookCount: number };
     edge: number;
     direction: string;
+    sbProb: number;
+    pmPrice: number;
   }[] = [];
 
   for (const market of sportsMarkets as MarketRow[]) {
-    const q = market.question.toLowerCase();
+    for (const [, info] of consensusByEvent) {
+      if (!teamsMatchQuestion(market.question, info.homeTeam, info.awayTeam)) continue;
+      if (market.outcome_prices.length < 2) continue;
 
-    for (const [, info] of consensusByEvent.entries()) {
+      const pmYes = market.outcome_prices[0];
+      const q = market.question.toLowerCase();
+
+      // Determine if YES = home win or away win
       const homeLC = info.homeTeam.toLowerCase();
-      const awayLC = info.awayTeam.toLowerCase();
+      const isHomeQuestion = q.includes(homeLC)
+        || (TEAM_ALIASES[homeLC] ?? []).some(a => q.includes(a))
+        || q.includes(homeLC.split(' ').pop() ?? '');
 
-      if (q.includes(homeLC) || q.includes(awayLC)) {
-        // Binary market: YES = first outcome wins
-        if (market.outcome_prices.length >= 2) {
-          const pmYes = market.outcome_prices[0];
-          const pmNo = market.outcome_prices[1];
+      const sbProb = isHomeQuestion ? info.home : info.away;
+      if (sbProb <= 0 || sbProb >= 1) continue;
 
-          // Compare to sportsbook consensus
-          // Check if "Yes" maps to home team win or away team win
-          const isHomeQ = q.includes(homeLC) && (q.includes('win') || q.includes('beat'));
+      const edgeYes = sbProb - pmYes;
+      const edgeNo  = (1 - sbProb) - market.outcome_prices[1];
+      const bestEdge = Math.max(edgeYes, edgeNo);
+      const bestDir = edgeYes > edgeNo ? 'BUY_YES' : 'BUY_NO';
+      const pmPrice = edgeYes > edgeNo ? pmYes : market.outcome_prices[1];
 
-          const sbProb = isHomeQ ? info.home : info.away;
-          if (sbProb > 0) {
-            const edgeYes = sbProb - pmYes;
-            const edgeNo = (1 - sbProb) - pmNo;
-
-            const bestEdge = Math.max(edgeYes, edgeNo);
-            const bestDirection = edgeYes > edgeNo ? 'BUY_YES' : 'BUY_NO';
-
-            if (bestEdge >= MIN_EDGE_PCT) {
-              edgeCandidates.push({ market, consensus: info, edge: bestEdge, direction: bestDirection });
-            }
-          }
-        }
-        break;
+      if (bestEdge >= MIN_EDGE_PCT) {
+        edgeCandidates.push({ market, consensus: info, edge: bestEdge, direction: bestDir, sbProb, pmPrice });
       }
+      break;
     }
   }
 
-  // Sort by edge descending
   edgeCandidates.sort((a, b) => b.edge - a.edge);
+  console.log(`[analyze-sports] ${edgeCandidates.length} edge candidates (>= ${MIN_EDGE_PCT * 100}%)`);
 
-  console.log(`[analyze-sports] Found ${edgeCandidates.length} edge candidates (>= ${MIN_EDGE_PCT * 100}%)`);
-
-  // Run Claude analysis on top candidates
   let analyzed = 0;
 
   for (const candidate of edgeCandidates.slice(0, MAX_ANALYSES_PER_RUN)) {
-    if (Date.now() - startTime > 20000) break;
+    if (Date.now() - startTime > 22000) break;
 
     const { market, consensus } = candidate;
     const hoursToGame = Math.max(0, (new Date(consensus.commence).getTime() - Date.now()) / 3600000);
+    if (hoursToGame < 1) continue;
 
-    if (hoursToGame < 1) continue; // Too close to game time
+    // Skip if already analyzed recently (last 2 hours) to avoid duplicate analyses
+    const recentCutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+    const { data: recentAnalysis } = await supabase
+      .from('sports_analyses')
+      .select('id')
+      .eq('market_id', market.id)
+      .gte('analyzed_at', recentCutoff)
+      .limit(1);
 
-    // Get sportsbook breakdown
+    if (recentAnalysis?.length) {
+      console.log(`[analyze-sports] Skip ${market.id.substring(0, 8)} — analyzed recently`);
+      continue;
+    }
+
     const eventOdds = recentOdds.filter(
-      (o) => o.home_team === consensus.homeTeam && o.away_team === consensus.awayTeam && o.market_type === 'h2h'
+      o => o.home_team === consensus.homeTeam && o.away_team === consensus.awayTeam && o.market_type === 'h2h'
     );
-
     const sbBreakdown = eventOdds
-      .map((o) => `${o.sportsbook}: ${o.outcome_name} ${o.implied_prob.toFixed(3)} (${o.price_decimal.toFixed(2)})`)
+      .map(o => `${o.sportsbook}: ${o.outcome_name} ${(o.implied_prob * 100).toFixed(1)}% (${o.price_decimal.toFixed(2)})`)
       .join('\n');
 
-    const prompt = `You are ARBITER's sports analyst. Compare sportsbook consensus to Polymarket prices and identify mispricings.
+    const prompt = `You are ARBITER's sports analyst. Compare sportsbook consensus to Polymarket prices and identify genuine mispricings.
 
 MATCHUP: ${consensus.homeTeam} vs ${consensus.awayTeam}
 LEAGUE: ${consensus.league}
 GAME TIME: ${new Date(consensus.commence).toLocaleString()} (${Math.round(hoursToGame)}h from now)
 
-SPORTSBOOK ODDS (implied probabilities):
-${sbBreakdown}
-
-SPORTSBOOK CONSENSUS:
+SPORTSBOOK CONSENSUS (vig-removed):
 - ${consensus.homeTeam} win: ${(consensus.home * 100).toFixed(1)}%
 - ${consensus.awayTeam} win: ${(consensus.away * 100).toFixed(1)}%
+- Books contributing: ${consensus.bookCount}
+
+SPORTSBOOK BREAKDOWN:
+${sbBreakdown || 'No individual book breakdown available'}
 
 POLYMARKET:
 - Question: ${market.question}
@@ -205,26 +318,31 @@ POLYMARKET:
 - NO:  $${market.outcome_prices[1]?.toFixed(3)}
 - Volume: $${market.volume_usd.toLocaleString()}
 - Liquidity: $${market.liquidity_usd.toLocaleString()}
+- Hours to resolution: ${Math.round(hoursToGame)}
+
+DETECTED EDGE: ${(candidate.edge * 100).toFixed(1)}% on ${candidate.direction} side
+Sportsbook true prob: ${(candidate.sbProb * 100).toFixed(1)}% | Polymarket price: $${candidate.pmPrice.toFixed(3)}
 
 TASK:
-1. Assess which side (YES/NO) offers an edge vs sportsbook consensus
-2. Consider lineup news, injuries, rest days, travel, and any known factors
-3. Calculate the true probability accounting for vig removal from sportsbook lines
-4. Determine if the edge is real or if Polymarket is pricing in something sportsbooks aren't
+1. Validate the detected edge — is the sportsbook consensus genuinely pricing this differently from Polymarket?
+2. Consider any known factors: injuries, lineup news, rest/travel, home court, weather
+3. Calculate the vig-removed true probability from sportsbook consensus
+4. Flag if Polymarket is pricing in something sportsbooks aren't (or vice versa)
+5. Set auto_eligible = true ONLY if: confidence HIGH or MEDIUM, edge >= 0.05, hours_to_game >= 2
 
-Respond ONLY in JSON:
+Respond ONLY in valid JSON (no markdown, no explanation):
 {
   "event_description": string,
   "sport": string,
-  "sportsbook_consensus": number (0-1, vig-removed true prob for favored outcome),
-  "polymarket_price": number (Polymarket price for same outcome),
-  "edge": number (true_prob - polymarket_price),
+  "sportsbook_consensus": number,
+  "polymarket_price": number,
+  "edge": number,
   "direction": "BUY_YES"|"BUY_NO"|"PASS",
   "confidence": "HIGH"|"MEDIUM"|"LOW",
   "kelly_fraction": number,
   "rec_bet_usd": number,
   "reasoning": string,
-  "data_sources": string[] (sportsbooks used),
+  "data_sources": string[],
   "auto_eligible": boolean,
   "flags": string[]
 }`;
@@ -251,61 +369,60 @@ Respond ONLY in JSON:
       }
 
       const data = await res.json();
-      const text = data.content?.[0]?.text;
-      if (!text) continue;
-
+      const text = data.content?.[0]?.text ?? '';
       const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
+      if (!jsonMatch) { console.warn('[analyze-sports] No JSON in Claude response'); continue; }
 
       const analysis = JSON.parse(jsonMatch[0]);
+
+      // ── Normalize before storing (FIX for 849 bug) ──────────
+      const edgeNorm   = normalizeEdge(analysis.edge);
+      const sbProbNorm = normalizeProb(analysis.sportsbook_consensus);
+      const pmPriceNorm = normalizeProb(analysis.polymarket_price);
 
       // Calculate Kelly bet size
       let kellyFraction = 0;
       let recBetUsd = 0;
-
-      if (analysis.direction !== 'PASS' && analysis.edge >= MIN_EDGE_PCT) {
+      if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
         const { data: configRows } = await supabase
           .from('system_config')
           .select('key, value')
           .in('key', ['paper_bankroll']);
-
-        const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '500');
-
-        const p = analysis.sportsbook_consensus;
-        const c = analysis.polymarket_price;
+        const bankroll = parseFloat(
+          configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500'
+        );
+        const p = sbProbNorm ?? 0;
+        const c = pmPriceNorm ?? 0;
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
           if (fullKelly > 0) {
-            const confMult = { HIGH: 1.0, MEDIUM: 0.6, LOW: 0.2 }[analysis.confidence as string] || 0.2;
-            const adjusted = fullKelly * 0.25 * (confMult as number);
-            const liquidityCap = (market.liquidity_usd * 0.02) / bankroll;
-            kellyFraction = Math.min(adjusted, 0.05, liquidityCap);
+            const confMult = analysis.confidence === 'HIGH' ? 1.0 : analysis.confidence === 'MEDIUM' ? 0.6 : 0.2;
+            kellyFraction = Math.min(fullKelly * 0.125 * confMult, 0.03, (market.liquidity_usd * 0.02) / bankroll);
             recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
           }
         }
       }
 
-      // Store analysis
       await supabase.from('sports_analyses').insert({
         market_id: market.id,
         event_description: analysis.event_description || `${consensus.homeTeam} vs ${consensus.awayTeam}`,
         sport: analysis.sport || consensus.sport,
-        sportsbook_consensus: analysis.sportsbook_consensus,
-        polymarket_price: analysis.polymarket_price,
-        edge: analysis.edge,
+        sportsbook_consensus: sbProbNorm,
+        polymarket_price: pmPriceNorm,
+        edge: edgeNorm,
         direction: analysis.direction || 'PASS',
         confidence: analysis.confidence || 'LOW',
         kelly_fraction: kellyFraction,
         rec_bet_usd: recBetUsd,
         reasoning: analysis.reasoning,
-        data_sources: analysis.data_sources || [],
+        data_sources: analysis.data_sources || ['pinnacle'],
         auto_eligible: analysis.auto_eligible || false,
         flags: analysis.flags || [],
       });
 
       analyzed++;
-      console.log(`[analyze-sports] Analyzed ${consensus.homeTeam} vs ${consensus.awayTeam}: edge=${analysis.edge?.toFixed(3)} dir=${analysis.direction}`);
+      console.log(`[analyze-sports] ✅ ${consensus.homeTeam} vs ${consensus.awayTeam}: edge=${edgeNorm?.toFixed(3)} dir=${analysis.direction} conf=${analysis.confidence}`);
     } catch (err) {
       console.error(`[analyze-sports] Analysis failed:`, err);
     }

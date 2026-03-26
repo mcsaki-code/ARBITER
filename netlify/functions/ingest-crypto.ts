@@ -1,7 +1,8 @@
 // ============================================================
-// Netlify Scheduled Function: Ingest Crypto Signals
-// Runs every 10 minutes — pulls BTC/ETH price data + indicators
-// and cross-references with Polymarket price bracket markets
+// Netlify Scheduled Function: Ingest Crypto Signals v2
+// Runs every 10 minutes — BTC/ETH/SOL price data + indicators
+// FIXED: Replaced Binance (US-blocked) with CoinCap + CryptoCompare
+// Both are free, no API keys, no geo restrictions
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -12,38 +13,98 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-interface BinanceTicker {
-  symbol: string;
-  lastPrice: string;
-  volume: string;
-  priceChange: string;
-  priceChangePercent: string;
-  highPrice: string;
-  lowPrice: string;
-  openPrice: string;
+async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!res.ok) {
+      console.warn(`[ingest-crypto] HTTP ${res.status} for ${url.split('?')[0]}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn(`[ingest-crypto] Fetch error for ${url.split('?')[0]}:`, err instanceof Error ? err.message : err);
+    return null;
+  }
 }
 
-interface BinanceKline {
-  0: number;  // open time
-  1: string;  // open
-  2: string;  // high
-  3: string;  // low
-  4: string;  // close
-  5: string;  // volume
+// ── Indicator Helpers ──────────────────────────────────────
+
+function calculateRSI(closes: number[], period = 14): number {
+  if (closes.length < period + 1) return 50;
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-interface CoinGeckoData {
-  bitcoin?: {
-    usd: number;
-    usd_24h_vol: number;
-    usd_24h_change: number;
-  };
-  ethereum?: {
-    usd: number;
-    usd_24h_vol: number;
-    usd_24h_change: number;
+function calculateBB(closes: number[], period = 20) {
+  const slice = closes.slice(-period);
+  const mid = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const variance = slice.reduce((s, v) => s + (v - mid) ** 2, 0) / slice.length;
+  const std = Math.sqrt(variance);
+  return { upper: mid + 2 * std, lower: mid - 2 * std, mid };
+}
+
+// ── CoinCap API ────────────────────────────────────────────
+// Free, no key, no US restrictions. Returns clean JSON.
+
+interface CoinCapAsset {
+  data: {
+    priceUsd: string;
+    changePercent24Hr: string;
+    volumeUsd24Hr: string;
+    vwap24Hr: string;
   };
 }
+
+const COINCAP_IDS: Record<string, string> = {
+  BTC: 'bitcoin',
+  ETH: 'ethereum',
+  SOL: 'solana',
+};
+
+// ── CryptoCompare API ──────────────────────────────────────
+// Free public endpoints, no key required for basic use.
+// US accessible. Returns OHLCV candle data.
+
+interface CCCandle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volumeto: number;
+}
+
+interface CCResponse {
+  Response: string;
+  Data: { Data: CCCandle[] };
+}
+
+async function fetchHourlyCandles(symbol: string, limit = 50): Promise<CCCandle[]> {
+  const data = await fetchJson(
+    `https://min-api.cryptocompare.com/data/v2/histohour?fsym=${symbol}&tsym=USD&limit=${limit}`
+  ) as CCResponse | null;
+  return data?.Data?.Data ?? [];
+}
+
+async function fetchMinuteCandles(symbol: string, limit = 15): Promise<CCCandle[]> {
+  const data = await fetchJson(
+    `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${symbol}&tsym=USD&limit=${limit}`
+  ) as CCResponse | null;
+  return data?.Data?.Data ?? [];
+}
+
+// ── Polymarket Market Discovery ────────────────────────────
 
 interface GammaMarket {
   conditionId: string;
@@ -63,87 +124,36 @@ interface GammaEvent {
   markets: GammaMarket[];
 }
 
-async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
-  }
-}
-
-// Simple RSI calculation from price data
-function calculateRSI(closes: number[], period = 14): number {
-  if (closes.length < period + 1) return 50;
-
-  let gains = 0;
-  let losses = 0;
-
-  for (let i = closes.length - period; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff;
-    else losses += Math.abs(diff);
-  }
-
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
-  if (avgLoss === 0) return 100;
-
-  const rs = avgGain / avgLoss;
-  return 100 - (100 / (1 + rs));
-}
-
-// Bollinger Bands
-function calculateBB(closes: number[], period = 20): { upper: number; lower: number; mid: number } {
-  const slice = closes.slice(-period);
-  const mid = slice.reduce((a, b) => a + b, 0) / slice.length;
-  const variance = slice.reduce((sum, val) => sum + Math.pow(val - mid, 2), 0) / slice.length;
-  const stdDev = Math.sqrt(variance);
-  return { upper: mid + 2 * stdDev, lower: mid - 2 * stdDev, mid };
-}
-
 export const handler = schedule('*/10 * * * *', async () => {
-  console.log('[ingest-crypto] Starting crypto signal ingestion');
+  console.log('[ingest-crypto] Starting crypto signal ingestion v2');
   const startTime = Date.now();
 
-  // ======== 1. FETCH PRICE DATA ========
+  // ── 1. Fetch spot prices and candles in parallel ───────────
+  const ASSETS = ['BTC', 'ETH', 'SOL'];
 
-  // Binance 24h ticker
-  const btcTicker = await fetchJson(
-    'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'
-  ) as BinanceTicker | null;
+  const [btcAsset, ethAsset, solAsset, btcCandles, ethCandles, solCandles, btcMinutes] =
+    await Promise.all([
+      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.BTC}`) as Promise<CoinCapAsset | null>,
+      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.ETH}`) as Promise<CoinCapAsset | null>,
+      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.SOL}`) as Promise<CoinCapAsset | null>,
+      fetchHourlyCandles('BTC', 50),
+      fetchHourlyCandles('ETH', 50),
+      fetchHourlyCandles('SOL', 50),
+      fetchMinuteCandles('BTC', 15),
+    ]);
 
-  const ethTicker = await fetchJson(
-    'https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT'
-  ) as BinanceTicker | null;
+  const assetData: Record<string, CoinCapAsset | null> = {
+    BTC: btcAsset,
+    ETH: ethAsset,
+    SOL: solAsset,
+  };
+  const candleData: Record<string, CCCandle[]> = {
+    BTC: btcCandles,
+    ETH: ethCandles,
+    SOL: solCandles,
+  };
 
-  // Binance 1h klines (last 50 candles for RSI/BB calculation)
-  const btcKlines = await fetchJson(
-    'https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=50'
-  ) as BinanceKline[] | null;
-
-  const ethKlines = await fetchJson(
-    'https://api.binance.com/api/v3/klines?symbol=ETHUSDT&interval=1h&limit=50'
-  ) as BinanceKline[] | null;
-
-  // CoinGecko for additional cross-reference
-  const cgData = await fetchJson(
-    'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_vol=true&include_24hr_change=true'
-  ) as CoinGeckoData | null;
-
-  // Coinglass funding rates (public endpoint)
-  const fundingData = await fetchJson(
-    'https://open-api.coinglass.com/public/v2/funding?symbol=BTC&time_type=h1'
-  ) as { data?: { fundingRate?: number }[] } | null;
-
-  // ======== 2. CALCULATE INDICATORS ========
-
-  const assets: { asset: string; ticker: BinanceTicker | null; klines: BinanceKline[] | null }[] = [
-    { asset: 'BTC', ticker: btcTicker, klines: btcKlines },
-    { asset: 'ETH', ticker: ethTicker, klines: ethKlines },
-  ];
-
+  // ── 2. Build signal rows ────────────────────────────────────
   const signalRows: {
     asset: string;
     spot_price: number;
@@ -158,155 +168,166 @@ export const handler = schedule('*/10 * * * *', async () => {
     fear_greed: number | null;
     implied_vol: number | null;
     signal_summary: string;
+    // New: momentum fields for 15-min strategy
+    momentum_1m: number | null;   // % change over last 3 1-min candles
+    momentum_5m: number | null;   // % change over last 5 1-min candles
+    candles_1m: string | null;    // JSON array of last 10 1-min closes (for momentum worker)
   }[] = [];
 
-  for (const { asset, ticker, klines } of assets) {
-    if (!ticker) {
-      console.log(`[ingest-crypto] No ticker data for ${asset}, skipping`);
+  for (const asset of ASSETS) {
+    const assetInfo = assetData[asset];
+    if (!assetInfo?.data) {
+      console.log(`[ingest-crypto] No CoinCap data for ${asset}, skipping`);
       continue;
     }
 
-    const spotPrice = parseFloat(ticker.lastPrice);
-    const openPrice = parseFloat(ticker.openPrice);
-    const volume24h = parseFloat(ticker.volume) * spotPrice; // Convert to USD
+    const spotPrice = parseFloat(assetInfo.data.priceUsd);
+    const change24h = parseFloat(assetInfo.data.changePercent24Hr);
+    const volume24h = parseFloat(assetInfo.data.volumeUsd24Hr);
+    const price24hAgo = spotPrice / (1 + change24h / 100);
 
-    // Calculate indicators from klines
+    const candles = candleData[asset];
     let rsi14: number | null = null;
     let bbUpper: number | null = null;
     let bbLower: number | null = null;
     let price1hAgo: number | null = null;
 
-    if (klines && klines.length > 20) {
-      const closes = klines.map((k) => parseFloat(k[4]));
+    if (candles.length > 20) {
+      const closes = candles.map(c => c.close);
       rsi14 = calculateRSI(closes);
       const bb = calculateBB(closes);
       bbUpper = bb.upper;
       bbLower = bb.lower;
-      price1hAgo = closes[closes.length - 2] || null;
+      price1hAgo = closes[closes.length - 2] ?? null;
     }
 
-    // Funding rate from Coinglass (only for BTC currently)
-    let fundingRate: number | null = null;
-    if (asset === 'BTC' && fundingData?.data?.[0]?.fundingRate !== undefined) {
-      fundingRate = fundingData.data[0].fundingRate;
+    // 1-minute momentum (only computed for BTC — most liquid for 15-min markets)
+    let momentum1m: number | null = null;
+    let momentum5m: number | null = null;
+    let candles1mJson: string | null = null;
+
+    if (asset === 'BTC' && btcMinutes.length >= 5) {
+      const minCloses = btcMinutes.map(c => c.close);
+      const last = minCloses[minCloses.length - 1];
+      const threeBack = minCloses[minCloses.length - 4];
+      const fiveBack = minCloses[minCloses.length - 6] ?? minCloses[0];
+      momentum1m = ((last - threeBack) / threeBack) * 100; // % over 3 mins
+      momentum5m = ((last - fiveBack) / fiveBack) * 100;   // % over 5 mins
+      candles1mJson = JSON.stringify(minCloses.slice(-10));
     }
 
-    // Build signal summary
     const signals: Record<string, string> = {};
     if (rsi14 !== null) {
-      if (rsi14 > 70) signals.rsi = 'OVERBOUGHT';
-      else if (rsi14 < 30) signals.rsi = 'OVERSOLD';
-      else signals.rsi = 'NEUTRAL';
+      signals.rsi = rsi14 > 70 ? 'OVERBOUGHT' : rsi14 < 30 ? 'OVERSOLD' : 'NEUTRAL';
     }
-    if (bbUpper && bbLower) {
-      if (spotPrice > bbUpper) signals.bollinger = 'ABOVE_UPPER';
-      else if (spotPrice < bbLower) signals.bollinger = 'BELOW_LOWER';
-      else signals.bollinger = 'WITHIN_BANDS';
+    if (bbUpper !== null && bbLower !== null) {
+      signals.bollinger = spotPrice > bbUpper ? 'ABOVE_UPPER'
+        : spotPrice < bbLower ? 'BELOW_LOWER' : 'WITHIN_BANDS';
     }
-    if (fundingRate !== null) {
-      if (fundingRate > 0.01) signals.funding = 'HIGH_LONG_PRESSURE';
-      else if (fundingRate < -0.01) signals.funding = 'HIGH_SHORT_PRESSURE';
-      else signals.funding = 'NEUTRAL';
+    if (momentum1m !== null) {
+      signals.momentum_3m = momentum1m > 0.3 ? 'STRONG_UP'
+        : momentum1m > 0.1 ? 'UP'
+        : momentum1m < -0.3 ? 'STRONG_DOWN'
+        : momentum1m < -0.1 ? 'DOWN' : 'FLAT';
     }
-
-    const priceChange24h = ((spotPrice - openPrice) / openPrice * 100).toFixed(2);
-    signals.momentum_24h = `${priceChange24h}%`;
+    signals.change_24h = `${change24h.toFixed(2)}%`;
 
     signalRows.push({
       asset,
       spot_price: spotPrice,
       price_1h_ago: price1hAgo,
-      price_24h_ago: openPrice,
+      price_24h_ago: price24hAgo,
       volume_24h: volume24h,
       rsi_14: rsi14,
       bb_upper: bbUpper,
       bb_lower: bbLower,
-      funding_rate: fundingRate,
-      open_interest: null, // Would need authenticated API
-      fear_greed: null, // Would need alternative.me API
-      implied_vol: null, // Would need Deribit API
+      funding_rate: null, // Coinglass requires auth now — skip
+      open_interest: null,
+      fear_greed: null,
+      implied_vol: null,
       signal_summary: JSON.stringify(signals),
+      momentum_1m: momentum1m,
+      momentum_5m: momentum5m,
+      candles_1m: candles1mJson,
     });
 
-    console.log(`[ingest-crypto] ${asset}: $${spotPrice.toFixed(2)} | RSI=${rsi14?.toFixed(1) ?? 'N/A'} | BB=[${bbLower?.toFixed(0) ?? '?'}, ${bbUpper?.toFixed(0) ?? '?'}] | 24h=${priceChange24h}%`);
+    console.log(
+      `[ingest-crypto] ${asset}: $${spotPrice.toFixed(2)} | RSI=${rsi14?.toFixed(1) ?? 'N/A'} | 24h=${change24h.toFixed(2)}% | mom3m=${momentum1m?.toFixed(3) ?? 'N/A'}%`
+    );
   }
 
-  // ======== 3. STORE SIGNALS ========
+  // ── 3. Store signals ────────────────────────────────────────
   if (signalRows.length > 0) {
     const { error } = await supabase.from('crypto_signals').insert(signalRows);
     if (error) console.error('[ingest-crypto] Insert error:', error.message);
     else console.log(`[ingest-crypto] Stored ${signalRows.length} signal snapshots`);
+  } else {
+    console.error('[ingest-crypto] No signal data produced — check CoinCap/CryptoCompare connectivity');
   }
 
-  // ======== 4. DISCOVER POLYMARKET CRYPTO MARKETS ========
-  const cryptoTagSlugs = ['crypto', 'bitcoin', 'ethereum'];
-  const polymarketCrypto: GammaMarket[] = [];
-  const seenIds = new Set<string>();
+  // ── 4. Discover Polymarket crypto markets (parallel) ────────
+  if (Date.now() - startTime < 15000) {
+    const cryptoTagSlugs = ['crypto', 'bitcoin', 'ethereum', 'solana'];
 
-  for (const slug of cryptoTagSlugs) {
-    if (Date.now() - startTime > 18000) break;
-    const tag = await fetchJson(
-      `https://gamma-api.polymarket.com/tags/slug/${slug}`
-    ) as { id?: number } | null;
+    const tagFetches = cryptoTagSlugs.map(slug =>
+      fetchJson(`https://gamma-api.polymarket.com/tags/slug/${slug}`)
+        .then(tag => (tag as { id?: number } | null)?.id ?? null)
+    );
+    const tagIds = (await Promise.all(tagFetches)).filter((id): id is number => id !== null);
+    const uniqueTagIds = [...new Set(tagIds)];
 
-    if (tag?.id) {
-      const events = await fetchJson(
-        `https://gamma-api.polymarket.com/events?tag_id=${tag.id}&active=true&closed=false&limit=100`
-      );
-      if (Array.isArray(events)) {
-        for (const event of events as GammaEvent[]) {
-          if (event.markets) {
-            for (const m of event.markets) {
-              if (m.conditionId && !seenIds.has(m.conditionId)) {
-                seenIds.add(m.conditionId);
-                polymarketCrypto.push(m);
-              }
-            }
-          }
+    const eventFetches = uniqueTagIds.map(id =>
+      fetchJson(`https://gamma-api.polymarket.com/events?tag_id=${id}&active=true&closed=false&limit=100`)
+    );
+    const eventPages = await Promise.all(eventFetches);
+
+    const seenIds = new Set<string>();
+    const cryptoMarketRows: object[] = [];
+
+    for (const page of eventPages) {
+      if (!Array.isArray(page)) continue;
+      for (const event of page as GammaEvent[]) {
+        if (!event.markets) continue;
+        for (const m of event.markets) {
+          if (!m.conditionId || seenIds.has(m.conditionId)) continue;
+          seenIds.add(m.conditionId);
+
+          let outcomes: string[];
+          let outcomePrices: number[];
+          try { outcomes = JSON.parse(m.outcomes); } catch { outcomes = m.outcomes?.split(',').map(s => s.trim()) || []; }
+          try { outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p)); } catch { outcomePrices = []; }
+
+          cryptoMarketRows.push({
+            condition_id: m.conditionId,
+            question: m.question,
+            category: 'crypto',
+            outcomes,
+            outcome_prices: outcomePrices,
+            volume_usd: parseFloat(m.volume) || 0,
+            liquidity_usd: parseFloat(m.liquidity) || 0,
+            resolution_date: m.endDate,
+            is_active: m.active && !m.closed,
+            updated_at: new Date().toISOString(),
+          });
         }
       }
     }
+
+    if (cryptoMarketRows.length > 0) {
+      const { error } = await supabase
+        .from('markets')
+        .upsert(cryptoMarketRows, { onConflict: 'condition_id' });
+      if (error) console.error('[ingest-crypto] Markets upsert error:', error.message);
+      else console.log(`[ingest-crypto] Upserted ${cryptoMarketRows.length} crypto markets`);
+    }
   }
 
-  console.log(`[ingest-crypto] Found ${polymarketCrypto.length} Polymarket crypto markets`);
-
-  // Upsert crypto markets into the markets table
-  if (polymarketCrypto.length > 0) {
-    const cryptoMarketRows = polymarketCrypto.map((m) => {
-      let outcomes: string[];
-      let outcomePrices: number[];
-      try { outcomes = JSON.parse(m.outcomes); } catch { outcomes = m.outcomes?.split(',').map(s => s.trim()) || []; }
-      try { outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p)); } catch { outcomePrices = []; }
-
-      return {
-        condition_id: m.conditionId,
-        question: m.question,
-        category: 'crypto',
-        outcomes,
-        outcome_prices: outcomePrices,
-        volume_usd: parseFloat(m.volume) || 0,
-        liquidity_usd: parseFloat(m.liquidity) || 0,
-        resolution_date: m.endDate,
-        is_active: m.active && !m.closed,
-        updated_at: new Date().toISOString(),
-      };
-    });
-
-    const { error } = await supabase
-      .from('markets')
-      .upsert(cryptoMarketRows, { onConflict: 'condition_id' });
-    if (error) console.error('[ingest-crypto] Markets upsert error:', error.message);
-    else console.log(`[ingest-crypto] Upserted ${cryptoMarketRows.length} crypto markets`);
-  }
-
-  // Cleanup: keep only last 24h of signal snapshots
+  // ── 5. Cleanup old signals ──────────────────────────────────
   await supabase
     .from('crypto_signals')
     .delete()
     .lt('fetched_at', new Date(Date.now() - 86400000).toISOString());
 
-  const elapsed = Date.now() - startTime;
-  console.log(`[ingest-crypto] Done in ${elapsed}ms`);
-
+  console.log(`[ingest-crypto] Done in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });

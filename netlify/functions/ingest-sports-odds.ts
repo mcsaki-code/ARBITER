@@ -1,7 +1,12 @@
 // ============================================================
-// Netlify Scheduled Function: Ingest Sports Odds
-// Runs every 10 minutes — pulls odds from The Odds API and
-// cross-references with Polymarket sports markets
+// Netlify Scheduled Function: Ingest Sports Odds v2
+// Runs every 60 minutes (was 10) to conserve API budget.
+// PRIMARY:  Pinnacle public feed (free, no key, sharpest lines)
+// FALLBACK: The Odds API (paid key, if ODDS_API_KEY is set)
+//
+// FIX: The Odds API free tier only allows 500 req/month.
+// Every-10-min polling = 1,440/day — exhausted in 8 hours.
+// New schedule (60 min) + Pinnacle first = no more budget burn.
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -12,158 +17,278 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// The Odds API — free tier: 500 requests/month
-// Set your API key in Netlify env vars as ODDS_API_KEY
-const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
-const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+// ── Pinnacle Public API ────────────────────────────────────
+// No API key. No rate limits. Sharpest lines in the world.
+// NOTE: Pinnacle shows closing lines — use as sharp consensus.
+const PINNACLE_BASE = 'https://guest.api.arcadia.pinnacle.com/0.1';
 
-// Sports we track (mapped to The Odds API sport keys)
-const TRACKED_SPORTS = [
-  'basketball_nba',
-  'basketball_ncaab',
-  'americanfootball_nfl',
-  'americanfootball_ncaaf',
-  'baseball_mlb',
-  'icehockey_nhl',
-  'mma_mixed_martial_arts',
-  'soccer_epl',
-  'soccer_uefa_champs_league',
-  'tennis_atp_french_open', // rotates by tournament
+// Known Pinnacle sport IDs (stable)
+const PINNACLE_SPORTS: { id: number; name: string; league: string }[] = [
+  { id: 487, name: 'basketball',       league: 'NBA' },
+  { id: 889, name: 'football',         league: 'NFL' },
+  { id: 3,   name: 'baseball',         league: 'MLB' },
+  { id: 4,   name: 'hockey',           league: 'NHL' },
+  { id: 29,  name: 'soccer',           league: 'Soccer' },
+  { id: 12,  name: 'mma',              league: 'UFC/MMA' },
+  { id: 33,  name: 'tennis',           league: 'Tennis' },
 ];
 
-// Sportsbook sources to pull (best coverage + most liquid)
-const BOOKMAKERS = 'draftkings,fanduel,betmgm,bovada,pointsbet';
+// ── The Odds API (fallback) ────────────────────────────────
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
+const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
+const BOOKMAKERS = 'draftkings,fanduel,betmgm,pinnacle';
 
-// Map Odds API sport keys to display league names
-const LEAGUE_MAP: Record<string, string> = {
-  basketball_nba: 'NBA',
-  basketball_ncaab: 'NCAA Basketball',
-  americanfootball_nfl: 'NFL',
-  americanfootball_ncaaf: 'NCAA Football',
-  baseball_mlb: 'MLB',
-  icehockey_nhl: 'NHL',
-  mma_mixed_martial_arts: 'UFC/MMA',
-  soccer_epl: 'Premier League',
-  soccer_uefa_champs_league: 'Champions League',
-  tennis_atp_french_open: 'Tennis ATP',
-};
+// In-season sport filter
+const TRACKED_ODDS_API: { sport: string; league: string }[] = [
+  { sport: 'basketball_nba',          league: 'NBA' },
+  { sport: 'baseball_mlb',            league: 'MLB' },
+  { sport: 'icehockey_nhl',           league: 'NHL' },
+  { sport: 'soccer_epl',              league: 'Premier League' },
+  { sport: 'soccer_uefa_champs_league', league: 'Champions League' },
+  { sport: 'mma_mixed_martial_arts',  league: 'UFC/MMA' },
+];
 
-interface OddsOutcome {
-  name: string;
-  price: number; // decimal odds
-  point?: number; // spread/total point
-}
+// ── Shared helpers ─────────────────────────────────────────
 
-interface OddsBookmaker {
-  key: string;
-  title: string;
-  markets: {
-    key: string; // 'h2h', 'spreads', 'totals'
-    outcomes: OddsOutcome[];
-  }[];
-}
-
-interface OddsEvent {
-  id: string;
-  sport_key: string;
-  sport_title: string;
-  commence_time: string;
-  home_team: string;
-  away_team: string;
-  bookmakers: OddsBookmaker[];
-}
-
-async function fetchOdds(sport: string): Promise<OddsEvent[]> {
-  if (!ODDS_API_KEY) {
-    console.log('[ingest-sports] No ODDS_API_KEY set, skipping');
-    return [];
-  }
-
+async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   try {
-    const url = `${ODDS_API_BASE}/sports/${sport}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h,spreads,totals&bookmakers=${BOOKMAKERS}&oddsFormat=decimal`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { Accept: 'application/json' },
+    });
     if (!res.ok) {
-      console.log(`[ingest-sports] ${sport}: HTTP ${res.status}`);
-      return [];
+      console.warn(`[ingest-sports] HTTP ${res.status}: ${url.split('?')[0]}`);
+      return null;
     }
-
-    // Log remaining API requests
-    const remaining = res.headers.get('x-requests-remaining');
-    if (remaining) {
-      console.log(`[ingest-sports] API requests remaining: ${remaining}`);
-    }
-
     return await res.json();
   } catch (err) {
-    console.error(`[ingest-sports] Fetch error for ${sport}:`, err);
-    return [];
-  }
-}
-
-async function fetchGamma(url: string): Promise<unknown> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
+    console.warn(`[ingest-sports] Fetch error: ${err instanceof Error ? err.message : err}`);
     return null;
   }
 }
 
-interface GammaMarket {
-  conditionId: string;
-  question: string;
-  outcomes: string;
-  outcomePrices: string;
-  volume: string;
-  liquidity: string;
-  endDate: string;
-  active: boolean;
-  closed: boolean;
+// Pinnacle response types
+interface PinnacleMatchup {
+  id: number;
+  league: { id: number; name: string };
+  startTime: string;
+  teams?: Array<{ id: number; name: string; type?: string }>; // type: 'home'|'away'
+  sides?: Array<{
+    label: string;  // 'home'|'away'
+    odds?: Array<{ price: number; designation: string }>;
+  }>;
+  // Straight markets
+  prices?: Array<{
+    designation: string; // 'home','away','draw'
+    price: number;       // American odds
+    participantId?: number;
+  }>;
 }
 
-interface GammaEvent {
-  id: string;
-  title: string;
-  markets: GammaMarket[];
+interface PinnacleLeague {
+  id: number;
+  name: string;
 }
 
-export const handler = schedule('*/10 * * * *', async () => {
-  console.log('[ingest-sports] Starting sports odds ingestion');
-  const startTime = Date.now();
+// Convert American odds to decimal and implied probability
+function americanToDecimal(american: number): number {
+  if (american > 0) return (american / 100) + 1;
+  return (100 / Math.abs(american)) + 1;
+}
 
-  if (!ODDS_API_KEY) {
-    console.log('[ingest-sports] ODDS_API_KEY not configured — set it in Netlify env vars');
-    console.log('[ingest-sports] Get a free key at https://the-odds-api.com/');
-    return { statusCode: 200 };
+function decimalToImplied(decimal: number): number {
+  return 1 / decimal;
+}
+
+// Remove vig from implied probs (Pinnacle is ~2.5% vig)
+function removeVig(probs: number[]): number[] {
+  const total = probs.reduce((a, b) => a + b, 0);
+  return probs.map(p => p / total);
+}
+
+// ── Build odds rows array ──────────────────────────────────
+type OddsRow = {
+  event_id: string;
+  sport: string;
+  league: string;
+  home_team: string;
+  away_team: string;
+  commence_time: string;
+  sportsbook: string;
+  market_type: string;
+  outcome_name: string;
+  price_decimal: number;
+  implied_prob: number;
+  point_spread: number | null;
+};
+
+async function fetchPinnacleOdds(startTime: number): Promise<OddsRow[]> {
+  const rows: OddsRow[] = [];
+  const now = new Date();
+  const month = now.getMonth();
+
+  // Filter to in-season sports
+  const inSeason = PINNACLE_SPORTS.filter(s => {
+    if (s.id === 487) return month >= 9 || month <= 5;   // NBA Oct-Jun
+    if (s.id === 889) return month >= 8 || month <= 1;   // NFL Sep-Feb
+    if (s.id === 3)   return month >= 2 && month <= 9;   // MLB Mar-Oct
+    if (s.id === 4)   return month >= 9 || month <= 5;   // NHL Oct-Jun
+    return true;
+  });
+
+  for (const sport of inSeason) {
+    if (Date.now() - startTime > 18000) break;
+
+    // Get leagues for this sport
+    const leagues = await fetchJson(
+      `${PINNACLE_BASE}/leagues?sportId=${sport.id}&hasOfferings=true&allowedOnly=true`
+    ) as PinnacleLeague[] | null;
+
+    if (!leagues?.length) continue;
+
+    // Focus on top leagues (first 3 by default)
+    const topLeagues = leagues.slice(0, 3);
+
+    for (const league of topLeagues) {
+      if (Date.now() - startTime > 18000) break;
+
+      const matchups = await fetchJson(
+        `${PINNACLE_BASE}/matchups?leagueIds=${league.id}&withSpecials=false&handicapType=asian`
+      ) as PinnacleMatchup[] | null;
+
+      if (!matchups?.length) continue;
+
+      for (const matchup of matchups) {
+        // Only upcoming games (next 7 days)
+        const gameTime = new Date(matchup.startTime).getTime();
+        if (gameTime < Date.now() || gameTime > Date.now() + 7 * 86400000) continue;
+
+        const homeTeam = matchup.teams?.find(t => t.type === 'home')?.name ?? matchup.teams?.[0]?.name ?? 'Home';
+        const awayTeam = matchup.teams?.find(t => t.type === 'away')?.name ?? matchup.teams?.[1]?.name ?? 'Away';
+
+        // Extract moneyline prices
+        const prices = matchup.prices ?? [];
+        const homePrice = prices.find(p => p.designation === 'home');
+        const awayPrice = prices.find(p => p.designation === 'away');
+
+        if (!homePrice || !awayPrice) continue;
+
+        const homeDecimal = americanToDecimal(homePrice.price);
+        const awayDecimal = americanToDecimal(awayPrice.price);
+        const [homeImplied, awayImplied] = removeVig([
+          decimalToImplied(homeDecimal),
+          decimalToImplied(awayDecimal),
+        ]);
+
+        const eventId = `pinnacle_${matchup.id}`;
+
+        rows.push({
+          event_id: eventId,
+          sport: sport.name,
+          league: league.name || sport.league,
+          home_team: homeTeam,
+          away_team: awayTeam,
+          commence_time: matchup.startTime,
+          sportsbook: 'pinnacle',
+          market_type: 'h2h',
+          outcome_name: homeTeam,
+          price_decimal: homeDecimal,
+          implied_prob: homeImplied,
+          point_spread: null,
+        });
+
+        rows.push({
+          event_id: eventId,
+          sport: sport.name,
+          league: league.name || sport.league,
+          home_team: homeTeam,
+          away_team: awayTeam,
+          commence_time: matchup.startTime,
+          sportsbook: 'pinnacle',
+          market_type: 'h2h',
+          outcome_name: awayTeam,
+          price_decimal: awayDecimal,
+          implied_prob: awayImplied,
+          point_spread: null,
+        });
+      }
+    }
   }
 
-  // Step 1: Fetch Polymarket sports markets for cross-referencing
-  const sportTagSlugs = ['sports', 'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'soccer', 'ufc'];
-  const polymarketSports: GammaMarket[] = [];
+  return rows;
+}
+
+async function fetchOddsApiOdds(sport: string): Promise<OddsRow[]> {
+  if (!ODDS_API_KEY) return [];
+
+  const url = `${ODDS_API_BASE}/sports/${sport}/odds?apiKey=${ODDS_API_KEY}&regions=us&markets=h2h&bookmakers=${BOOKMAKERS}&oddsFormat=decimal`;
+  const res = await fetchJson(url) as Array<{
+    id: string; sport_key: string; commence_time: string;
+    home_team: string; away_team: string;
+    bookmakers: Array<{
+      key: string;
+      markets: Array<{ key: string; outcomes: Array<{ name: string; price: number }> }>;
+    }>;
+  }> | null;
+
+  if (!res?.length) return [];
+
+  const rows: OddsRow[] = [];
+  for (const event of res) {
+    for (const bm of event.bookmakers) {
+      for (const mkt of bm.markets) {
+        for (const outcome of mkt.outcomes) {
+          rows.push({
+            event_id: event.id,
+            sport: event.sport_key,
+            league: event.sport_key.toUpperCase(),
+            home_team: event.home_team,
+            away_team: event.away_team,
+            commence_time: event.commence_time,
+            sportsbook: bm.key,
+            market_type: mkt.key,
+            outcome_name: outcome.name,
+            price_decimal: outcome.price,
+            implied_prob: 1 / outcome.price,
+            point_spread: null,
+          });
+        }
+      }
+    }
+  }
+  return rows;
+}
+
+// ── Main handler ───────────────────────────────────────────
+
+export const handler = schedule('0 * * * *', async () => {  // Every hour (was every 10 min)
+  console.log('[ingest-sports] Starting sports odds ingestion v2');
+  const startTime = Date.now();
+
+  // ── Step 1: Fetch Polymarket sports markets ─────────────────
+  const sportTagSlugs = ['sports', 'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'soccer', 'ufc', 'mma'];
+  const tagFetches = sportTagSlugs.map(slug =>
+    fetchJson(`https://gamma-api.polymarket.com/tags/slug/${slug}`)
+      .then(t => (t as { id?: number } | null)?.id ?? null)
+  );
+  const tagIds = (await Promise.all(tagFetches)).filter((id): id is number => id !== null);
+  const uniqueTagIds = [...new Set(tagIds)];
+
+  const eventFetches = uniqueTagIds.map(id =>
+    fetchJson(`https://gamma-api.polymarket.com/events?tag_id=${id}&active=true&closed=false&limit=100`)
+  );
+  const eventPages = await Promise.all(eventFetches);
+
+  const polymarketSports: { conditionId: string; question: string; outcomePrices: string }[] = [];
   const seenIds = new Set<string>();
 
-  for (const slug of sportTagSlugs) {
-    if (Date.now() - startTime > 10000) break;
-    const tag = await fetchGamma(
-      `https://gamma-api.polymarket.com/tags/slug/${slug}`
-    ) as { id?: number } | null;
-
-    if (tag?.id) {
-      const events = await fetchGamma(
-        `https://gamma-api.polymarket.com/events?tag_id=${tag.id}&active=true&closed=false&limit=100`
-      );
-      if (Array.isArray(events)) {
-        for (const event of events as GammaEvent[]) {
-          if (event.markets) {
-            for (const m of event.markets) {
-              if (m.conditionId && !seenIds.has(m.conditionId)) {
-                seenIds.add(m.conditionId);
-                polymarketSports.push(m);
-              }
-            }
-          }
+  for (const page of eventPages) {
+    if (!Array.isArray(page)) continue;
+    for (const event of page as Array<{ markets?: Array<{ conditionId: string; question: string; outcomePrices: string; active: boolean; closed: boolean }> }>) {
+      for (const m of event.markets ?? []) {
+        if (m.conditionId && !seenIds.has(m.conditionId) && m.active && !m.closed) {
+          seenIds.add(m.conditionId);
+          polymarketSports.push(m);
         }
       }
     }
@@ -171,167 +296,102 @@ export const handler = schedule('*/10 * * * *', async () => {
 
   console.log(`[ingest-sports] Found ${polymarketSports.length} Polymarket sports markets`);
 
-  // Step 2: Upsert Polymarket sports markets into the markets table
-  // (same as refresh-markets does for weather, but for sports)
-  const sportMarketRows = polymarketSports.map((m) => {
+  // Upsert Polymarket sports markets
+  const sportMarketRows = polymarketSports.map(m => {
     let outcomes: string[];
     let outcomePrices: number[];
-    try { outcomes = JSON.parse(m.outcomes); } catch { outcomes = m.outcomes?.split(',').map(s => s.trim()) || []; }
+    try { outcomes = JSON.parse((m as any).outcomes); } catch { outcomes = []; }
     try { outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p)); } catch { outcomePrices = []; }
-
     return {
       condition_id: m.conditionId,
       question: m.question,
       category: 'sports',
       outcomes,
       outcome_prices: outcomePrices,
-      volume_usd: parseFloat(m.volume) || 0,
-      liquidity_usd: parseFloat(m.liquidity) || 0,
-      resolution_date: m.endDate,
-      is_active: m.active && !m.closed,
+      volume_usd: parseFloat((m as any).volume) || 0,
+      liquidity_usd: parseFloat((m as any).liquidity) || 0,
+      resolution_date: (m as any).endDate,
+      is_active: true,
       updated_at: new Date().toISOString(),
     };
   });
 
   if (sportMarketRows.length > 0) {
-    const { error } = await supabase
-      .from('markets')
-      .upsert(sportMarketRows, { onConflict: 'condition_id' });
+    const { error } = await supabase.from('markets').upsert(sportMarketRows, { onConflict: 'condition_id' });
     if (error) console.error('[ingest-sports] Markets upsert error:', error.message);
     else console.log(`[ingest-sports] Upserted ${sportMarketRows.length} sports markets`);
   }
 
-  // Step 3: Fetch sportsbook odds for active sports
-  // Only fetch sports that are currently in season to conserve API budget
-  const now = new Date();
-  const month = now.getMonth(); // 0=Jan
+  // ── Step 2: Fetch odds — Pinnacle first, Odds API fallback ────
+  let allOddsRows: OddsRow[] = [];
 
-  // Filter to in-season sports
-  const inSeasonSports = TRACKED_SPORTS.filter((sport) => {
-    // NBA: Oct-Jun, NCAA BB: Nov-Apr, NFL: Sep-Feb, NCAA FB: Aug-Jan
-    // MLB: Mar-Oct, NHL: Oct-Jun, UFC: year-round, Soccer: year-round
-    if (sport.includes('nba')) return month >= 9 || month <= 5;
-    if (sport.includes('ncaab')) return month >= 10 || month <= 3;
-    if (sport.includes('nfl')) return month >= 8 || month <= 1;
-    if (sport.includes('ncaaf')) return month >= 7 || month <= 0;
-    if (sport.includes('mlb')) return month >= 2 && month <= 9;
-    if (sport.includes('nhl')) return month >= 9 || month <= 5;
-    return true; // UFC, soccer = year-round
-  });
+  console.log('[ingest-sports] Fetching Pinnacle public odds...');
+  const pinnacleRows = await fetchPinnacleOdds(startTime);
+  console.log(`[ingest-sports] Pinnacle returned ${pinnacleRows.length} odds rows`);
+  allOddsRows = pinnacleRows;
 
-  console.log(`[ingest-sports] Fetching odds for ${inSeasonSports.length} in-season sports`);
+  // If Pinnacle returned nothing (API changed?), fall back to The Odds API
+  if (allOddsRows.length === 0 && ODDS_API_KEY) {
+    console.log('[ingest-sports] Pinnacle returned 0 rows — falling back to The Odds API');
+    const now = new Date();
+    const month = now.getMonth();
+    const inSeasonSports = TRACKED_ODDS_API.filter(s => {
+      if (s.sport.includes('nba')) return month >= 9 || month <= 5;
+      if (s.sport.includes('mlb')) return month >= 2 && month <= 9;
+      if (s.sport.includes('nhl')) return month >= 9 || month <= 5;
+      if (s.sport.includes('nfl')) return month >= 8 || month <= 1;
+      return true;
+    });
 
-  const allOddsRows: {
-    event_id: string;
-    sport: string;
-    league: string;
-    home_team: string;
-    away_team: string;
-    commence_time: string;
-    sportsbook: string;
-    market_type: string;
-    outcome_name: string;
-    price_decimal: number;
-    implied_prob: number;
-    point_spread: number | null;
-  }[] = [];
-
-  for (const sport of inSeasonSports) {
-    if (Date.now() - startTime > 20000) break;
-
-    const events = await fetchOdds(sport);
-    const league = LEAGUE_MAP[sport] || sport;
-
-    for (const event of events) {
-      for (const bm of event.bookmakers) {
-        for (const mkt of bm.markets) {
-          for (const outcome of mkt.outcomes) {
-            allOddsRows.push({
-              event_id: event.id,
-              sport,
-              league,
-              home_team: event.home_team,
-              away_team: event.away_team,
-              commence_time: event.commence_time,
-              sportsbook: bm.key,
-              market_type: mkt.key,
-              outcome_name: outcome.name,
-              price_decimal: outcome.price,
-              implied_prob: 1 / outcome.price,
-              point_spread: outcome.point ?? null,
-            });
-          }
-        }
-      }
+    for (const s of inSeasonSports.slice(0, 3)) { // Max 3 to conserve quota
+      if (Date.now() - startTime > 20000) break;
+      const rows = await fetchOddsApiOdds(s.sport);
+      allOddsRows.push(...rows);
     }
+    console.log(`[ingest-sports] Odds API fallback returned ${allOddsRows.length} rows`);
   }
 
-  console.log(`[ingest-sports] Collected ${allOddsRows.length} odds data points`);
-
-  // Step 4: Batch upsert sports odds
+  // ── Step 3: Insert odds to DB ───────────────────────────────
   if (allOddsRows.length > 0) {
-    // Insert in chunks of 500 to avoid payload limits
     const chunkSize = 500;
     let inserted = 0;
-
     for (let i = 0; i < allOddsRows.length; i += chunkSize) {
       const chunk = allOddsRows.slice(i, i + chunkSize);
       const { error } = await supabase.from('sports_odds').insert(chunk);
-      if (error) {
-        console.error(`[ingest-sports] Insert error (chunk ${i}):`, error.message);
-      } else {
-        inserted += chunk.length;
-      }
+      if (!error) inserted += chunk.length;
+      else console.error(`[ingest-sports] Insert error chunk ${i}:`, error.message);
     }
-
     console.log(`[ingest-sports] Inserted ${inserted} odds rows`);
+  } else {
+    console.warn('[ingest-sports] No odds data from any source — check Pinnacle API and ODDS_API_KEY');
   }
 
-  // Step 5: Identify cross-platform edge opportunities
-  // Compare sportsbook consensus to Polymarket prices
+  // ── Step 4: Quick edge scan (log only) ─────────────────────
   if (polymarketSports.length > 0 && allOddsRows.length > 0) {
     let edgesFound = 0;
-
-    for (const pm of polymarketSports) {
+    for (const pm of polymarketSports.slice(0, 50)) {
       const q = pm.question.toLowerCase();
-
-      // Try to match Polymarket market to sportsbook event by team names
-      for (const oddsEvent of allOddsRows) {
-        const homeLC = oddsEvent.home_team.toLowerCase();
-        const awayLC = oddsEvent.away_team.toLowerCase();
-
-        if (q.includes(homeLC) || q.includes(awayLC)) {
-          // Found a match! Compare implied probabilities
+      for (const o of allOddsRows) {
+        if (o.market_type !== 'h2h') continue;
+        if (q.includes(o.home_team.toLowerCase()) || q.includes(o.away_team.toLowerCase())) {
           let pmPrices: number[];
-          try { pmPrices = JSON.parse(pm.outcomePrices).map((p: string) => parseFloat(p)); }
-          catch { continue; }
-
-          if (pmPrices.length >= 2 && oddsEvent.market_type === 'h2h') {
-            const pmYes = pmPrices[0];
-            const sbImplied = oddsEvent.implied_prob;
-            const edge = Math.abs(pmYes - sbImplied);
-
-            if (edge >= 0.05) { // 5% edge
-              edgesFound++;
-              console.log(`[ingest-sports] EDGE: ${oddsEvent.home_team} vs ${oddsEvent.away_team} | PM=${pmYes.toFixed(2)} SB=${sbImplied.toFixed(2)} | Edge=${(edge*100).toFixed(1)}%`);
-            }
-          }
-          break; // Only match once per Polymarket market
+          try { pmPrices = JSON.parse(pm.outcomePrices).map((p: string) => parseFloat(p)); } catch { continue; }
+          if (pmPrices.length < 2) continue;
+          const edge = Math.abs(pmPrices[0] - o.implied_prob);
+          if (edge >= 0.05) edgesFound++;
+          break;
         }
       }
     }
-
-    console.log(`[ingest-sports] Found ${edgesFound} sports edge opportunities (>= 5%)`);
+    console.log(`[ingest-sports] Quick scan found ${edgesFound} potential edge opportunities (>= 5%)`);
   }
 
-  // Cleanup: delete odds older than 24h to prevent table bloat
+  // ── Cleanup old odds ────────────────────────────────────────
   await supabase
     .from('sports_odds')
     .delete()
     .lt('fetched_at', new Date(Date.now() - 86400000).toISOString());
 
-  const elapsed = Date.now() - startTime;
-  console.log(`[ingest-sports] Done in ${elapsed}ms`);
-
+  console.log(`[ingest-sports] Done in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });

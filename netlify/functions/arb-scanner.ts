@@ -69,11 +69,11 @@ function categorizeMarket(question: string): string {
 }
 
 export const handler = schedule('*/15 * * * *', async () => {
-  console.log('[arb-scanner] Starting arbitrage scan');
+  console.log('[arb-scanner] Starting arbitrage scan v2 (parallel)');
   const startTime = Date.now();
 
-  const allMarkets: GammaMarket[] = [];
   const seenIds = new Set<string>();
+  const allMarkets: GammaMarket[] = [];
 
   function addMarket(m: GammaMarket) {
     if (m.conditionId && !seenIds.has(m.conditionId) && m.active && !m.closed) {
@@ -82,62 +82,41 @@ export const handler = schedule('*/15 * * * *', async () => {
     }
   }
 
-  // Scan across multiple high-volume tag categories
-  const tagSlugs = [
-    'temperature', 'weather', 'climate',
-    'sports', 'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'soccer', 'ufc',
-    'crypto', 'bitcoin', 'ethereum',
-    'politics', 'elections',
-    'economics', 'fed', 'inflation',
-    'culture', 'entertainment',
-  ];
+  // ── PARALLEL bulk fetch — covers all 7,000+ markets in one shot ──
+  // Fetch 15 pages of 500 markets in parallel (vs old sequential approach that timed out)
+  const BULK_PAGES = 15;
+  const bulkFetches = Array.from({ length: BULK_PAGES }, (_, i) =>
+    fetchGamma(
+      `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=${PAGE_SIZE}&offset=${i * PAGE_SIZE}`
+    ).then(page => (Array.isArray(page) ? page as GammaMarket[] : []))
+  );
 
-  const tagIds: number[] = [];
-  for (const slug of tagSlugs) {
-    // Time guard: stop after 20s to leave room for DB operations
-    if (Date.now() - startTime > 20000) break;
-
-    const tag = await fetchGamma(
-      `https://gamma-api.polymarket.com/tags/slug/${slug}`
-    ) as { id?: number } | null;
-    if (tag?.id && !tagIds.includes(tag.id)) {
-      tagIds.push(tag.id);
-    }
+  const bulkPages = await Promise.all(bulkFetches);
+  for (const page of bulkPages) {
+    for (const m of page) addMarket(m);
   }
 
-  console.log(`[arb-scanner] Resolved ${tagIds.length} unique tag IDs`);
+  console.log(`[arb-scanner] Bulk parallel fetch: ${allMarkets.length} unique active markets`);
 
-  // Fetch events by tag_id (each event contains nested markets)
-  for (const tagId of tagIds) {
-    if (Date.now() - startTime > 18000) break;
-
-    for (let offset = 0; offset < 3 * PAGE_SIZE; offset += PAGE_SIZE) {
-      if (Date.now() - startTime > 18000) break;
-
-      const page = await fetchGamma(
-        `https://gamma-api.polymarket.com/events?tag_id=${tagId}&active=true&closed=false&limit=${PAGE_SIZE}&offset=${offset}`
-      );
-      if (!Array.isArray(page) || page.length === 0) break;
-
-      for (const event of page as GammaEvent[]) {
-        if (event.markets && Array.isArray(event.markets)) {
-          for (const m of event.markets) addMarket(m);
-        }
-      }
-      if (page.length < PAGE_SIZE) break;
-    }
-  }
-
-  // Also do a broad fetch of active markets (no tag filter) to catch uncategorized markets
-  for (let offset = 0; offset < 5 * PAGE_SIZE; offset += PAGE_SIZE) {
-    if (Date.now() - startTime > 20000) break;
-
-    const page = await fetchGamma(
-      `https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=${PAGE_SIZE}&offset=${offset}`
+  // If bulk fetch didn't return much, also try tag-based fetches in parallel
+  if (allMarkets.length < 100) {
+    const tagSlugs = ['sports', 'crypto', 'politics', 'weather', 'economics'];
+    const tagFetches = tagSlugs.map(slug =>
+      fetchGamma(`https://gamma-api.polymarket.com/tags/slug/${slug}`)
+        .then(t => (t as { id?: number } | null)?.id ?? null)
     );
-    if (!Array.isArray(page) || page.length === 0) break;
-    for (const m of page as GammaMarket[]) addMarket(m);
-    if (page.length < PAGE_SIZE) break;
+    const tagIds = (await Promise.all(tagFetches)).filter((id): id is number => id !== null);
+
+    const eventFetches = tagIds.map(id =>
+      fetchGamma(`https://gamma-api.polymarket.com/events?tag_id=${id}&active=true&closed=false&limit=200`)
+        .then(page => (Array.isArray(page) ? page as GammaEvent[] : []))
+    );
+    const eventPages = await Promise.all(eventFetches);
+    for (const page of eventPages) {
+      for (const event of page) {
+        for (const m of (event.markets ?? [])) addMarket(m);
+      }
+    }
   }
 
   console.log(`[arb-scanner] Scanning ${allMarkets.length} active markets for arbitrage`);
