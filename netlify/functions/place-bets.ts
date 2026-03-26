@@ -176,7 +176,7 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Skip if we already have an open bet on this market
     if (openMarketIds.has(analysis.market_id)) {
-      console.log(`[place-bets] Skipping ${analysis.market_id.substring(0, 8)} — already have open position`);
+      console.log(`[place-bets] Skipping ${String(analysis.market_id).substring(0, 8)} — already have open position`);
       continue;
     }
 
@@ -275,7 +275,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     // This allows thin political/weather markets (e.g. 0.5¢ underpriced event)
     // while still blocking zero/near-zero pricing errors
     if (!entryPrice || entryPrice < 0.003 || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
+      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
 
@@ -298,7 +298,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     );
 
     if (!execResult.success && !execResult.bet_id) {
-      console.error(`[place-bets] Execution error for ${analysis.id.substring(0, 8)}:`, execResult.error);
+      console.error(`[place-bets] Execution error for ${String(analysis.id).substring(0, 8)}:`, execResult.error);
       continue;
     }
 
