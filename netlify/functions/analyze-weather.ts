@@ -329,14 +329,16 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
   const SIGMA_C  = 2.0;           // ±2°C typical 1-day forecast accuracy
   const MAX_PER_RUN = 20;
 
-  // Fetch temperature markets resolving in next 3 days with decent liquidity
+  // Fetch temperature markets resolving in next 3 days.
+  // These markets have $400-$2K liquidity (NOT $5K+) — pure statistical analysis
+  // needs no LLM so low liquidity is fine. 5000 threshold was blocking ALL of them.
   const soon = new Date(Date.now() + 3 * 86400000).toISOString();
   const { data: tempMarkets } = await supabase
     .from('markets')
     .select('id, question, outcome_prices, liquidity_usd, resolution_date')
     .eq('is_active', true)
     .eq('category', 'temperature')
-    .gt('liquidity_usd', 5000)
+    .gt('liquidity_usd', 400)      // lowered from 5000 — temp markets are $400-$2K
     .gt('resolution_date', new Date(Date.now() + 1800000).toISOString()) // 30min min
     .lt('resolution_date', soon)
     .order('liquidity_usd', { ascending: false })
@@ -434,6 +436,7 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
       model_spread_f: SIGMA_C * 1.8,   // approx spread in F
       model_agreement: forecasts.length >= 3 ? 'HIGH' : 'MEDIUM',
       market_type: 'temperature_statistical',
+      best_outcome_label: direction === 'BUY_YES' ? 'Yes' : 'No',
       market_price: marketPrice,
       true_prob: trueProb,
       edge: Math.min(absEdge, 0.50),   // cap at 0.50 per policy

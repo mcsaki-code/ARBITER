@@ -94,7 +94,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     config[r.key] = r.value;
   });
 
-  const bankroll = parseFloat(config.paper_bankroll || '500');
+  const bankroll = parseFloat(config.paper_bankroll || '5000');
   const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
   const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
@@ -210,8 +210,11 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd}`);
+    // Weather temperature markets have $400-$2K liquidity — allow a lower floor for them
+    // since Phase 2 statistical analysis requires no LLM and the edge is pure math.
+    const liquidityFloor = analysis.category === 'weather' ? 400 : MIN_LIQUIDITY;
+    if (currentMarket.liquidity_usd < liquidityFloor) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd} (floor $${liquidityFloor})`);
       continue;
     }
 
@@ -239,8 +242,9 @@ export const handler = schedule('*/15 * * * *', async () => {
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 
-    // Fallback: ~$3 for paper trading (0.6% of bankroll)
-    if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006);
+    // Fallback: 0.2% of bankroll (e.g. $10 on $5K bankroll) when kelly_fraction unavailable.
+    // The old $3 hardcoded minimum was left over from $500 bankroll assumptions.
+    if (betAmount <= 0) betAmount = Math.max(5, Math.round(bankroll * 0.002));
 
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);

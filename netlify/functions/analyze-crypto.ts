@@ -253,14 +253,21 @@ Respond ONLY in JSON:
           .select('key, value')
           .in('key', ['paper_bankroll']);
 
-        const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '500');
+        const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '5000');
 
-        // For BUY_NO bets, Kelly must be computed on the NO side, not YES side.
-        // Using YES-side p/c for a BUY_NO bet gives negative fullKelly (we shouldn't buy YES)
-        // and kellyFraction stays 0 → place-bets falls to $3 minimum.
+        // BUY_NO Kelly: Claude sometimes reports YES-side probs (bracket_prob < market_price,
+        // meaning YES is overpriced) and sometimes NO-side probs (bracket_prob > market_price,
+        // meaning NO is underpriced). Detect which side was reported and flip only when needed.
+        // Always-flip was wrong: e.g. bracket_prob=0.99, market_price=0.917 (NO side already)
+        // would flip to p=0.01, c=0.083 → fullKelly < 0.
         const isBuyNo = analysis.direction === 'BUY_NO';
-        const p = isBuyNo ? 1 - analysis.bracket_prob : analysis.bracket_prob;
-        const c = isBuyNo ? 1 - analysis.market_price : analysis.market_price;
+        let p = analysis.bracket_prob;
+        let c = analysis.market_price;
+        if (isBuyNo && p < c) {
+          // YES side reported (YES is overpriced) → flip to compute Kelly on NO side
+          p = 1 - p;
+          c = 1 - c;
+        }
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
