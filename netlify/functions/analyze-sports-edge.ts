@@ -130,6 +130,24 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'iowa hawkeyes': ['iowa', 'hawkeyes'],
 };
 
+// ── Futures Market Detector ────────────────────────────────
+// Season-long and futures markets share team names with tonight's games
+// but are fundamentally different. Skip them in game-level matching.
+const FUTURES_PATTERNS = [
+  /win the .*(championship|title|cup|series|league|trophy|pennant|super bowl|stanley cup|world series)/i,
+  /make the .*(playoffs|finals|postseason)/i,
+  /finish .*(season|year|campaign)/i,
+  /(season|year).*(champion|winner|mvp|award)/i,
+  /win .*(nba|nfl|mlb|nhl|ncaa|champions league|premier league|la liga|bundesliga|serie a|ligue 1)/i,
+  /qualified? for .*(world cup|olympics|tournament)/i,
+  /(?:2025[-–]26|2026[-–]27|2026|2027) .*(winner|champion|title)/i,
+  /will .*(win|claim) the (?!next game|tonight|today|this week)/i,
+];
+
+function isFuturesMarket(question: string): boolean {
+  return FUTURES_PATTERNS.some(p => p.test(question));
+}
+
 function teamsMatchQuestion(question: string, homeTeam: string, awayTeam: string): boolean {
   const q = question.toLowerCase();
 
@@ -234,9 +252,20 @@ export const handler = schedule('*/30 * * * *', async () => {
       if (Date.now() - startTime > 22000) break;
       if (analyzed >= MAX_ANALYSES_PER_RUN) break;
 
+      // Skip futures/season-long markets — Claude's knowledge is ~10 months stale,
+      // completely unreliable for season-long predictions (standings, injuries, trades)
+      if (isFuturesMarket(market.question)) {
+        console.log(`[analyze-sports] SKIP futures: "${market.question.substring(0, 60)}"`);
+        continue;
+      }
+
+      // Treat null resolution_date as Infinity → hoursRemaining > 72 → skipped
       const hoursRemaining = market.resolution_date
-        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000 : 0;
-      if (hoursRemaining < 2 || hoursRemaining > 168) continue;
+        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000
+        : Infinity;
+      // Tightened from 168h to 72h: knowledge-only mode only analyzes near-term game markets
+      // (season-long futures require current standings knowledge we don't have)
+      if (hoursRemaining < 2 || hoursRemaining > 72) continue;
 
       // Skip recently analyzed
       const { data: recent } = await supabase
@@ -250,6 +279,15 @@ export const handler = schedule('*/30 * * * *', async () => {
 
       const prompt = `You are ARBITER's sports analyst. Assess whether the Polymarket price is mis-priced vs your best estimate.
 
+⚠️  IMPORTANT CALIBRATION WARNING: Your training data has a knowledge cutoff of ~May 2025. The current date is approximately ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}. This means your knowledge is approximately 10+ months out of date. You do NOT know:
+- Current standings, records, or recent form
+- Trade deadline moves that occurred after May 2025
+- Current injuries or lineup news
+- Recent head-to-head results
+- The current state of this team's season
+
+Because of this knowledge gap, you MUST be extremely conservative. Only flag edges where you have HIGH confidence based on structural/historical factors that don't change quickly (e.g., a historically dominant favorite priced as an underdog). Set auto_eligible = false unless confidence is HIGH and the structural case is very clear.
+
 MARKET: ${market.question}
 OUTCOMES:
 ${outcomesList}
@@ -257,11 +295,11 @@ LIQUIDITY: $${market.liquidity_usd.toLocaleString()} | VOLUME: $${market.volume_
 RESOLVES: in ${Math.round(hoursRemaining)} hours
 
 TASK:
-1. Based on current team performance, standings, injuries, and recent news (use your training knowledge)
-2. Estimate the true probability for each outcome
-3. Compare to Polymarket prices — is there a genuine edge >= 5%?
-4. Be conservative — only flag high-confidence edges
-5. Set auto_eligible = true only if confidence HIGH/MEDIUM and edge >= 0.06
+1. With the caveat that your knowledge is ~10 months stale, estimate the true probability for each outcome
+2. Compare to Polymarket prices — is there a genuine structural edge >= 8%? (higher threshold than normal due to knowledge staleness)
+3. Be very conservative — only flag edges you would bet on even accounting for the knowledge gap
+4. Set auto_eligible = true ONLY if: confidence HIGH, edge >= 0.10, AND you can clearly explain why this is a structural advantage NOT dependent on recent form/standings
+5. Add "KNOWLEDGE_STALE_MAY_2025" to flags always
 
 Respond ONLY in valid JSON:
 {
@@ -274,8 +312,8 @@ Respond ONLY in valid JSON:
   "confidence": "HIGH"|"MEDIUM"|"LOW",
   "kelly_fraction": number,
   "rec_bet_usd": number,
-  "reasoning": string,
-  "data_sources": ["claude_knowledge"],
+  "reasoning": string (must acknowledge knowledge staleness),
+  "data_sources": ["claude_knowledge_stale_may2025"],
   "auto_eligible": boolean,
   "flags": string[]
 }`;
@@ -305,7 +343,7 @@ Respond ONLY in valid JSON:
         let kellyFraction = 0, recBetUsd = 0;
         if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
           const { data: configRows } = await supabase.from('system_config').select('key, value').in('key', ['paper_bankroll']);
-          const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500');
+          const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '5000');
           // BUY_NO: sportsbook_consensus is YES win-prob, so flip to NO side for Kelly
           const isBuyNo = analysis.direction === 'BUY_NO';
           const p = isBuyNo ? 1 - (sbProbNorm ?? 0) : (sbProbNorm ?? 0);
@@ -393,19 +431,24 @@ Respond ONLY in valid JSON:
   }[] = [];
 
   for (const market of sportsMarkets as MarketRow[]) {
+    // ── PRE-FILTER: reject season-long/futures markets immediately ──────
+    // These match team names but are not individual game markets.
+    if (isFuturesMarket(market.question)) continue;
+
     for (const [, info] of consensusByEvent) {
       if (!teamsMatchQuestion(market.question, info.homeTeam, info.awayTeam)) continue;
       if (market.outcome_prices.length < 2) continue;
 
       // ── DURATION MISMATCH GUARD ──────────────────────────────────────
-      // Polymarket season-long markets (NBA championship, World Series winner)
-      // share team names with tonight's individual game, but resolve months later.
-      // Only match when the Polymarket market resolves within 7 days of the
-      // sportsbook game start — otherwise it's a category mismatch.
+      // Polymarket season-long markets share team names with tonight's games
+      // but resolve months later. CRITICAL BUG FIX: null resolution_date was
+      // treated as 0 hours remaining (0 > game + 168 = false → not skipped!).
+      // Now treat null as Infinity so it always fails the duration check.
       const marketHoursRemaining = market.resolution_date
-        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000 : 0;
+        ? (new Date(market.resolution_date).getTime() - Date.now()) / 3600000
+        : Infinity; // null = unknown end date = treat as far future = skip
       const gameHoursFromNow = (new Date(info.commence).getTime() - Date.now()) / 3600000;
-      if (marketHoursRemaining > gameHoursFromNow + 168) continue; // >7-day gap → skip
+      if (marketHoursRemaining > gameHoursFromNow + 48) continue; // >2-day gap → skip (tightened from 7d)
 
       const pmYes = market.outcome_prices[0];
       const q = market.question.toLowerCase();
