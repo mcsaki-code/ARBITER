@@ -15,9 +15,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Primary: main trading API (has BTC, S&P, politics, economics single-event markets)
-// Fallback: legacy elections domain (only serves sports parlays)
-const KALSHI_BASE = 'https://trading-api.kalshi.com/trade-api/v2';
+const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
 
 async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   try {
@@ -41,16 +39,15 @@ interface KalshiMarket {
   event_ticker: string;
   title: string;
   subtitle?: string;
-  // Kalshi v2 API returns dollar-denominated string fields
-  yes_ask_dollars: string;
-  no_ask_dollars: string;
-  yes_bid_dollars: string;
-  no_bid_dollars: string;
-  last_price_dollars: string;
-  volume_fp: string | number;
-  open_interest_fp: string | number;
+  yes_ask: number;   // cents (0-99)
+  no_ask: number;
+  yes_bid: number;
+  no_bid: number;
+  last_price: number;
+  volume: number;
+  open_interest: number;
   close_time: string;
-  status: string;  // 'active' in response body, but query uses 'open'
+  status: string;
   category?: string;
 }
 
@@ -110,36 +107,22 @@ export const handler = schedule('*/15 * * * *', async () => {
   }
 
   // Upsert to kalshi_markets table
-  // NOTE: Kalshi v2 API response uses 'active' for open markets (not 'open')
-  // Prices are in decimal strings e.g. "0.5000" (already 0-1 range)
-  //
-  // FILTER: Exclude auto-generated parlay/combo markets (KXMVE* prefix).
-  // These are multi-leg parlays with no equivalent Polymarket question —
-  // they only clutter the DB and make cross-arb matching impossible.
-  // Variants: KXMVECROSSCATEGORY, KXMVESPORTSMULTIGAMEEXTENDED, etc.
-  // Use startsWith('KXMVE') to catch ALL variants — includes() on 'MVEC' missed KXMVES*.
-  // Single-event markets have tickers like KXBTCD-*, KXINXD-*, KXFEDRATE-*, etc.
   const rows = allMarkets
-    .filter(m => (m.status === 'active' || m.status === 'open') &&
-      parseFloat(m.yes_ask_dollars ?? '0') > 0 &&
-      parseFloat(m.no_ask_dollars ?? '0') > 0 &&
-      !m.ticker.startsWith('KXMVE') &&       // exclude ALL multi-variable event combos (KXMVEC, KXMVES, etc.)
-      !m.ticker.includes('MULTIGAME')        // exclude multi-game extended parlays
-    )
+    .filter(m => m.status === 'open' && m.yes_ask > 0 && m.no_ask > 0)
     .map(m => ({
       ticker: m.ticker,
       event_ticker: m.event_ticker,
       title: m.title,
       subtitle: m.subtitle ?? null,
-      yes_ask: parseFloat(m.yes_ask_dollars ?? '0'),   // already decimal 0-1
-      no_ask: parseFloat(m.no_ask_dollars ?? '0'),
-      yes_bid: parseFloat(m.yes_bid_dollars ?? '0'),
-      no_bid: parseFloat(m.no_bid_dollars ?? '0'),
-      last_price: parseFloat(m.last_price_dollars ?? '0'),
-      volume: parseFloat(String(m.volume_fp ?? '0')),
-      open_interest: parseFloat(String(m.open_interest_fp ?? '0')),
+      yes_ask: m.yes_ask / 100,   // convert cents to decimal
+      no_ask: m.no_ask / 100,
+      yes_bid: m.yes_bid / 100,
+      no_bid: m.no_bid / 100,
+      last_price: m.last_price / 100,
+      volume: m.volume,
+      open_interest: m.open_interest,
       close_time: m.close_time,
-      status: 'open',   // normalize to 'open' in our DB
+      status: m.status,
       category: m.category ?? 'other',
       updated_at: new Date().toISOString(),
     }));

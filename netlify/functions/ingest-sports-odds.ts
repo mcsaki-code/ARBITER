@@ -41,7 +41,6 @@ const BOOKMAKERS = 'draftkings,fanduel,betmgm,pinnacle';
 // In-season sport filter
 const TRACKED_ODDS_API: { sport: string; league: string }[] = [
   { sport: 'basketball_nba',          league: 'NBA' },
-  { sport: 'basketball_ncaab',        league: 'NCAAB' },   // ← March Madness!
   { sport: 'baseball_mlb',            league: 'MLB' },
   { sport: 'icehockey_nhl',           league: 'NHL' },
   { sport: 'soccer_epl',              league: 'Premier League' },
@@ -323,32 +322,20 @@ export const handler = schedule('0 * * * *', async () => {  // Every hour (was e
     else console.log(`[ingest-sports] Upserted ${sportMarketRows.length} sports markets`);
   }
 
-  // ── Step 2: Fetch odds — Pinnacle + NCAA in parallel ──────────
-  // CRITICAL: Run NCAA fetch in parallel with Pinnacle so it never gets
-  // blocked by Pinnacle's many sequential HTTP calls. NCAA Tournament
-  // ($6-7M markets) is the highest-value opportunity in March/April.
-  const nowMonth = new Date().getMonth(); // 0-indexed
-  const isTournamentSeason = nowMonth >= 2 && nowMonth <= 4; // Mar-May
-  const shouldFetchNcaa = !!ODDS_API_KEY && isTournamentSeason;
+  // ── Step 2: Fetch odds — Pinnacle first, Odds API fallback ────
+  let allOddsRows: OddsRow[] = [];
 
-  console.log('[ingest-sports] Fetching Pinnacle + NCAA odds in parallel...');
-  const [pinnacleRows, ncaaRows] = await Promise.all([
-    fetchPinnacleOdds(startTime),
-    shouldFetchNcaa ? fetchOddsApiOdds('basketball_ncaab') : Promise.resolve([]),
-  ]);
-
+  console.log('[ingest-sports] Fetching Pinnacle public odds...');
+  const pinnacleRows = await fetchPinnacleOdds(startTime);
   console.log(`[ingest-sports] Pinnacle returned ${pinnacleRows.length} odds rows`);
-  if (shouldFetchNcaa) console.log(`[ingest-sports] NCAA returned ${ncaaRows.length} odds rows`);
+  allOddsRows = pinnacleRows;
 
-  let allOddsRows: OddsRow[] = [...pinnacleRows, ...ncaaRows];
-
-  // If Pinnacle returned nothing (API changed?), fall back to The Odds API for other sports
-  if (pinnacleRows.length === 0 && ODDS_API_KEY) {
+  // If Pinnacle returned nothing (API changed?), fall back to The Odds API
+  if (allOddsRows.length === 0 && ODDS_API_KEY) {
     console.log('[ingest-sports] Pinnacle returned 0 rows — falling back to The Odds API');
     const now = new Date();
     const month = now.getMonth();
     const inSeasonSports = TRACKED_ODDS_API.filter(s => {
-      if (s.sport.includes('ncaab')) return false; // already fetched above
       if (s.sport.includes('nba')) return month >= 9 || month <= 5;
       if (s.sport.includes('mlb')) return month >= 2 && month <= 9;
       if (s.sport.includes('nhl')) return month >= 9 || month <= 5;

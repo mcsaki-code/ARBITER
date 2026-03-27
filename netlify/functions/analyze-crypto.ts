@@ -195,8 +195,19 @@ export const handler = schedule('*/30 * * * *', async () => {
     .gte('analyzed_at', recentCutoff);
   const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
-  const freshCandidates = candidates.filter(c => !recentlyAnalyzed.has(c.market.id));
-  console.log(`[analyze-crypto] ${freshCandidates.length} fresh candidates (${candidates.length - freshCandidates.length} recently analyzed, skipping)`);
+  // Skip markets where we already have an open bet — we can't add to the position
+  // and burning API credits on them generates contradictory signals (e.g. BUY_YES on a BUY_NO position).
+  const { data: openBetRows } = await supabase
+    .from('bets')
+    .select('market_id')
+    .eq('status', 'OPEN');
+  const openBetMarketIds = new Set((openBetRows ?? []).map((b: { market_id: string }) => b.market_id));
+
+  const freshCandidates = candidates.filter(c =>
+    !recentlyAnalyzed.has(c.market.id) && !openBetMarketIds.has(c.market.id)
+  );
+  const skippedOpen = candidates.filter(c => openBetMarketIds.has(c.market.id)).length;
+  console.log(`[analyze-crypto] ${freshCandidates.length} fresh candidates (${candidates.length - freshCandidates.length} skipped: ${recentlyAnalyzed.size} recently analyzed, ${skippedOpen} have open bets)`);
 
   // Analyze top fresh candidates with Claude
   let analyzed = 0;

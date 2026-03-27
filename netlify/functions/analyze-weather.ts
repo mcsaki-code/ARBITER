@@ -60,9 +60,9 @@ export const handler = schedule('*/20 * * * *', async () => {
   });
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 8)) {
-    // STRICT time guard: 22s
-    if (Date.now() - startTime > 22000) break;
+  for (const market of sortedMarkets.slice(0, 4)) {
+    // STRICT time guard: 14s — leaves 16s for Phase 2 statistical analysis
+    if (Date.now() - startTime > 14000) break;
 
     const city = market.weather_cities;
     if (!city) continue;
@@ -346,7 +346,7 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
   // Uses module-level `supabase` client (same service role as the main handler)
   const MIN_EDGE = 0.08;          // 8% minimum — temp markets are niche
   const SIGMA_C  = 2.0;           // ±2°C typical 1-day forecast accuracy
-  const MAX_PER_RUN = 20;
+  const MAX_PER_RUN = 50;         // Phase 1 now capped at 14s → Phase 2 gets ~16s, enough for 50 markets
 
   // Fetch temperature markets resolving in next 3 days.
   // These markets have $400-$2K liquidity (NOT $5K+) — pure statistical analysis
@@ -382,7 +382,7 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
   let analyzed = 0;
 
   for (const market of tempMarkets) {
-    if (Date.now() - startTime > 28000) break;  // stay under 30s Netlify limit
+    if (Date.now() - startTime > 29000) break;  // stay under 30s Netlify limit
     if (analyzed >= MAX_PER_RUN) break;
     if (recentTempIds.has(market.id)) continue;
 

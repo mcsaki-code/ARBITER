@@ -24,10 +24,7 @@ const MAX_BETS_PER_MARKET = 1;         // one bet per market
 const MIN_EDGE = 0.05;                 // 5% minimum edge
 const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
 const MIN_LIQUIDITY = 5000;            // Skip thin markets
-// NOTE: analyses already store kelly at 1/8 scale (fullKelly / 8).
-// KELLY_FRACTION=0.25 here makes the formula ratio 0.25/0.25=1.0, preserving
-// the 1/8 Kelly already baked in. Using 0.125 was halving it again to 1/16.
-const KELLY_FRACTION = 0.25;           // cancels with /0.25 denominator → net 1x on stored kelly
+const KELLY_FRACTION = 0.125;          // 1/8th Kelly (professional standard)
 // Per-category staleness windows — sports/crypto ingest runs hourly now
 const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
 const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
@@ -97,7 +94,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     config[r.key] = r.value;
   });
 
-  const bankroll = parseFloat(config.paper_bankroll || '5000');
+  const bankroll = parseFloat(config.paper_bankroll || '500');
   const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
   const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
@@ -153,7 +150,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     supabase.from('politics_analyses').select('*')
       .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
       .order('edge', { ascending: false }).limit(20)
-      .then(r => r.data ?? [], () => [] as unknown[]),
+      .then(r => r.data ?? []).catch(() => [] as unknown[]),
   ]);
 
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
@@ -179,7 +176,7 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Skip if we already have an open bet on this market
     if (openMarketIds.has(analysis.market_id)) {
-      console.log(`[place-bets] Skipping ${String(analysis.market_id).substring(0, 8)} — already have open position`);
+      console.log(`[place-bets] Skipping ${analysis.market_id.substring(0, 8)} — already have open position`);
       continue;
     }
 
@@ -191,15 +188,14 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
     if (analysis.polymarket_price) analysis.polymarket_price = normalizeProb(analysis.polymarket_price);
 
-    // Eligibility is determined HERE by our risk system, not by Claude's self-report.
-    // Claude's auto_eligible field is advisory only — LLMs add subjective flags
-    // (LONG_TIMEFRAME, HIGH_VOLATILITY_ASSET) that wrongly veto legitimate edges.
-    // Our rule: confidence >= MEDIUM AND edge >= MIN_EDGE.
+    // Must be auto-eligible (HIGH confidence, HIGH agreement, edge >= 0.08)
+    // OR at minimum: confidence >= MEDIUM, edge >= 0.05
+    const isAutoEligible = analysis.auto_eligible;
     const isMediumEligible =
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
       edgeNorm >= MIN_EDGE;
 
-    if (!isMediumEligible) continue;
+    if (!isAutoEligible && !isMediumEligible) continue;
 
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
@@ -213,11 +209,8 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    // Weather temperature markets have $400-$2K liquidity — allow a lower floor for them
-    // since Phase 2 statistical analysis requires no LLM and the edge is pure math.
-    const liquidityFloor = analysis.category === 'weather' ? 400 : MIN_LIQUIDITY;
-    if (currentMarket.liquidity_usd < liquidityFloor) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd} (floor $${liquidityFloor})`);
+    if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd}`);
       continue;
     }
 
@@ -245,9 +238,8 @@ export const handler = schedule('*/15 * * * *', async () => {
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 
-    // Fallback: 0.2% of bankroll (e.g. $10 on $5K bankroll) when kelly_fraction unavailable.
-    // The old $3 hardcoded minimum was left over from $500 bankroll assumptions.
-    if (betAmount <= 0) betAmount = Math.max(5, Math.round(bankroll * 0.002));
+    // Fallback: ~$3 for paper trading (0.6% of bankroll)
+    if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006);
 
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
@@ -266,10 +258,6 @@ export const handler = schedule('*/15 * * * *', async () => {
     } else if (analysis.category === 'crypto') {
       outcomeLabel = analysis.target_bracket || analysis.asset || null;
       entryPrice = analysis.market_price || null;
-    } else if (analysis.category === 'politics') {
-      // Politics analyses use best_outcome_label + market_price (same structure as weather)
-      outcomeLabel = analysis.best_outcome_label || null;
-      entryPrice = analysis.market_price || null;
     }
 
     // Entry price is already normalized above via normalizeProb
@@ -279,11 +267,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       entryPrice = 1 - entryPrice;
     }
 
-    // Need a valid entry price — must be strictly above 0.3% and below 99.7%
-    // This allows thin political/weather markets (e.g. 0.5¢ underpriced event)
-    // while still blocking zero/near-zero pricing errors
-    if (!entryPrice || entryPrice < 0.003 || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — invalid entry price ${entryPrice}`);
+    // Need a valid entry price between 0.5% and 99.5%
+    // Weather brackets can legitimately be 1-5¢ — allow them through
+    if (!entryPrice || entryPrice <= 0.005 || entryPrice >= 0.995) {
+      console.log(`[place-bets] Skipping analysis ${analysis.id.substring(0, 8)} — invalid entry price ${entryPrice}`);
       continue;
     }
 
@@ -293,7 +280,7 @@ export const handler = schedule('*/15 * * * *', async () => {
       supabase,
       {
         market_id: analysis.market_id,
-        analysis_id: analysis.id,  // always link — was wrongly null for crypto/sports/politics
+        analysis_id: analysis.source_table === 'weather_analyses' ? analysis.id : null,
         category: analysis.category,
         direction: analysis.direction,
         outcome_label: outcomeLabel,
@@ -306,7 +293,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     );
 
     if (!execResult.success && !execResult.bet_id) {
-      console.error(`[place-bets] Execution error for ${String(analysis.id).substring(0, 8)}:`, execResult.error);
+      console.error(`[place-bets] Execution error for ${analysis.id.substring(0, 8)}:`, execResult.error);
       continue;
     }
 

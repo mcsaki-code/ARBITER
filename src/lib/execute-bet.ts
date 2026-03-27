@@ -102,9 +102,21 @@ export async function executeBet(
   }
 
   // ========================================
-  // Paper bet path (unchanged behavior)
+  // Paper bet path
   // ========================================
   if (!goLive) {
+    // Look up condition_id so resolve-bets can match this bet to a Polymarket market.
+    // CRITICAL: without condition_id, bets can never be resolved and P&L tracking breaks.
+    let conditionId = params.condition_id;
+    if (!conditionId) {
+      const { data: mktRow } = await supabase
+        .from('markets')
+        .select('condition_id')
+        .eq('id', params.market_id)
+        .single();
+      conditionId = mktRow?.condition_id ?? undefined;
+    }
+
     const { data, error } = await supabase.from('bets').insert({
       market_id: params.market_id,
       analysis_id: params.analysis_id,
@@ -116,6 +128,7 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      condition_id: conditionId ?? null,
       placed_at: new Date().toISOString(),
     }).select('id').single();
 

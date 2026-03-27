@@ -479,19 +479,13 @@ export const handler = schedule('*/15 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  let processed = 0;
+  // Process ALL cities in parallel — previously sequential processing cut off ~12 cities
+  // every run because the 20s time limit was hit. With parallel execution, all 60+ cities
+  // complete within the same window since fetches are I/O bound (not CPU bound).
+  const cityResults = await Promise.allSettled(
+    cities.map(async (city) => {
+      const isUS = !!city.nws_office;
 
-  for (const city of cities) {
-    // STRICT time guard — 20s max (Netlify ~26s timeout)
-    if (Date.now() - startTime > 20000) {
-      console.warn(`[ingest-weather-v2] Time limit hit after ${processed} cities`);
-      break;
-    }
-
-    console.log(`[ingest-weather-v2] Processing ${city.name}`);
-    const isUS = !!city.nws_office;
-
-    try {
       // Fetch all sources in parallel (NWS + 3 models + HRRR + ensemble)
       const [nwsForecasts, meteoForecasts, hrrrForecasts, ensembleData] = await Promise.all([
         fetchNWSForCity(city),
@@ -502,36 +496,40 @@ export const handler = schedule('*/15 * * * *', async () => {
 
       const allForecasts = [...nwsForecasts, ...meteoForecasts, ...hrrrForecasts];
 
-      if (allForecasts.length > 0) {
-        // Insert all forecasts (new columns will be populated)
-        const { error: insertErr } = await supabase
-          .from('weather_forecasts')
-          .insert(allForecasts);
+      if (allForecasts.length === 0) return { city: city.name, count: 0 };
 
-        if (insertErr) {
-          console.error(`[ingest-weather-v2] Insert error for ${city.name}:`, insertErr);
-        }
+      // Insert all forecasts
+      const { error: insertErr } = await supabase
+        .from('weather_forecasts')
+        .insert(allForecasts);
 
-        // Calculate & store consensus for each date
-        const dates = [...new Set(allForecasts.map((f) => f.valid_date))];
-        for (const date of dates) {
-          const ensemble = ensembleData.find((e) => e.valid_date === date) ?? null;
-          const consensus = calculateConsensus(allForecasts, city.id, date, ensemble, isUS);
-          if (consensus) {
-            await supabase.from('weather_consensus').insert(consensus);
-          }
-        }
-
-        const modelSources = [...new Set(allForecasts.map((f) => f.source))];
-        console.log(`[ingest-weather-v2] ${city.name}: ${allForecasts.length} forecasts (${modelSources.join(',')}), ${ensembleData.length > 0 ? ensembleData[0].members + '-member ensemble' : 'no ensemble'}`);
+      if (insertErr) {
+        console.error(`[ingest-weather-v2] Insert error for ${city.name}:`, insertErr.message);
       }
 
-      processed++;
-    } catch (err) {
-      console.error(`[ingest-weather-v2] Failed for ${city.name}:`, err);
-    }
-  }
+      // Calculate & store consensus for each date
+      const dates = [...new Set(allForecasts.map((f) => f.valid_date))];
+      for (const date of dates) {
+        const ensemble = ensembleData.find((e) => e.valid_date === date) ?? null;
+        const consensus = calculateConsensus(allForecasts, city.id, date, ensemble, isUS);
+        if (consensus) {
+          await supabase.from('weather_consensus').insert(consensus);
+        }
+      }
 
-  console.log(`[ingest-weather-v2] Done. ${processed}/${cities.length} cities in ${Date.now() - startTime}ms`);
+      const modelSources = [...new Set(allForecasts.map((f) => f.source))];
+      return { city: city.name, count: allForecasts.length, sources: modelSources };
+    })
+  );
+
+  const processed = cityResults.filter(r => r.status === 'fulfilled').length;
+  const failed = cityResults.filter(r => r.status === 'rejected').length;
+  cityResults.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`[ingest-weather-v2] Failed for ${cities[i].name}:`, r.reason);
+    }
+  });
+
+  console.log(`[ingest-weather-v2] Done. ${processed}/${cities.length} cities succeeded, ${failed} failed in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });
