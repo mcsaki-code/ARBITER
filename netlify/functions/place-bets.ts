@@ -107,12 +107,21 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   const { data: todaysBets } = await supabase
     .from('bets')
-    .select('id, amount_usd, market_id')
+    .select('id, amount_usd, market_id, category')
     .gte('placed_at', todayStart.toISOString());
 
   const todayBetCount = todaysBets?.length || 0;
   const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
   const existingMarketIds = new Set(todaysBets?.map((b) => b.market_id) || []);
+
+  // Per-category exposure tracking — prevents any single category dominating daily exposure.
+  // Weather resolving the same day as placement means concentrated same-day exposure is extra risky.
+  const MAX_CATEGORY_EXPOSURE_PCT = 0.40; // no single category > 40% of daily budget
+  const categoryExposure: Record<string, number> = {};
+  for (const b of (todaysBets || [])) {
+    const cat = (b as unknown as { category?: string }).category || 'unknown';
+    categoryExposure[cat] = (categoryExposure[cat] || 0) + (b.amount_usd || 0);
+  }
 
   console.log(`[place-bets] Today: ${todayBetCount} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
@@ -202,6 +211,13 @@ export const handler = schedule('*/15 * * * *', async () => {
         console.log(`[place-bets] Skipping BTC bet — already have ${openCryptoBtcCount} open BTC positions (cap=${MAX_CORRELATED_CRYPTO})`);
         continue;
       }
+    }
+
+    // Per-category concentration cap: no category > 40% of total daily exposure budget
+    const catSpend = categoryExposure[analysis.category] || 0;
+    if (catSpend >= maxDailyExposure * MAX_CATEGORY_EXPOSURE_PCT) {
+      console.log(`[place-bets] Skipping ${analysis.category} — category already at $${catSpend.toFixed(0)} (${(catSpend / maxDailyExposure * 100).toFixed(0)}% of daily budget)`);
+      continue;
     }
 
     // Normalize edge and price values (handle Claude returning 849 instead of 0.849)
@@ -359,6 +375,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     totalDeployed += betAmount;
     openMarketIds.add(analysis.market_id);
     existingMarketIds.add(analysis.market_id);
+    categoryExposure[analysis.category] = (categoryExposure[analysis.category] || 0) + betAmount;
 
     console.log(
       `[place-bets] Placed ${analysis.category} bet: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${edgeNorm.toFixed(3)} conf=${analysis.confidence}`

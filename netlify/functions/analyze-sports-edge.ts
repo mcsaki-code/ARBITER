@@ -130,6 +130,27 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'iowa hawkeyes': ['iowa', 'hawkeyes'],
 };
 
+// ── Sport Name Normalizer ──────────────────────────────────
+// Claude returns inconsistent sport strings ("Soccer", "BASKETBALL_NBA",
+// "BASEBALL_MLB", "MIXED_SPORTS_ERROR"). Normalize to clean lowercase slugs.
+function normalizeSport(raw: string | null | undefined, fallback?: string): string {
+  const s = (raw ?? fallback ?? 'sports').toLowerCase().trim();
+  if (s.includes('basketball') || s === 'nba')  return 'basketball';
+  if (s.includes('baseball')   || s === 'mlb')  return 'baseball';
+  if (s.includes('football')   || s === 'nfl')  return 'football';
+  if (s.includes('hockey')     || s === 'nhl')  return 'hockey';
+  if (s.includes('soccer') || s.includes('mls') || s.includes('epl')
+    || s.includes('la liga') || s.includes('bundesliga') || s.includes('serie a')
+    || s.includes('ligue 1') || s.includes('champions league')) return 'soccer';
+  if (s.includes('mma') || s.includes('ufc'))   return 'mma';
+  if (s.includes('tennis'))  return 'tennis';
+  if (s.includes('golf'))    return 'golf';
+  if (s.includes('cricket')) return 'cricket';
+  // Catch-all for ERROR/MISMATCH codes — log and default to sports
+  if (s.includes('error') || s.includes('mismatch') || s.includes('mixed')) return 'sports';
+  return 'sports';
+}
+
 // ── Futures Market Detector ────────────────────────────────
 // Season-long and futures markets share team names with tonight's games
 // but are fundamentally different. Skip them in game-level matching.
@@ -365,7 +386,7 @@ Respond ONLY in valid JSON:
         await supabase.from('sports_analyses').insert({
           market_id: market.id,
           event_description: analysis.event_description ?? market.question.substring(0, 100),
-          sport: analysis.sport ?? 'sports',
+          sport: normalizeSport(analysis.sport),
           sportsbook_consensus: sbProbNorm,
           polymarket_price: pmPriceNorm,
           edge: edgeNorm,
@@ -625,7 +646,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
       await supabase.from('sports_analyses').insert({
         market_id: market.id,
         event_description: analysis.event_description || `${consensus.homeTeam} vs ${consensus.awayTeam}`,
-        sport: analysis.sport || consensus.sport,
+        sport: normalizeSport(analysis.sport, consensus.sport),
         sportsbook_consensus: sbProbNorm,
         polymarket_price: pmPriceNorm,
         edge: edgeNorm,
