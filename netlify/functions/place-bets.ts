@@ -24,7 +24,10 @@ const MAX_BETS_PER_MARKET = 1;         // one bet per market
 const MIN_EDGE = 0.05;                 // 5% minimum edge
 const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
 const MIN_LIQUIDITY = 5000;            // Skip thin markets
-const KELLY_FRACTION = 0.125;          // 1/8th Kelly (professional standard)
+// NOTE: analyses already store kelly at 1/8 scale (fullKelly / 8).
+// KELLY_FRACTION=0.25 here makes the formula ratio 0.25/0.25=1.0, preserving
+// the 1/8 Kelly already baked in. Using 0.125 was halving it again to 1/16.
+const KELLY_FRACTION = 0.25;           // cancels with /0.25 denominator → net 1x on stored kelly
 // Per-category staleness windows — sports/crypto ingest runs hourly now
 const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
 const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
@@ -290,7 +293,7 @@ export const handler = schedule('*/15 * * * *', async () => {
       supabase,
       {
         market_id: analysis.market_id,
-        analysis_id: analysis.source_table === 'weather_analyses' ? analysis.id : null,
+        analysis_id: analysis.id,  // always link — was wrongly null for crypto/sports/politics
         category: analysis.category,
         direction: analysis.direction,
         outcome_label: outcomeLabel,
