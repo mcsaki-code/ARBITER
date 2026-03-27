@@ -192,6 +192,9 @@ export const handler = schedule('*/30 * * * *', async () => {
   const now = new Date();
   const cutoffNearTerm = new Date(now.getTime() + 45 * 24 * 3600000).toISOString(); // 45 days out
   const cutoffMin      = new Date(now.getTime() + 2 * 3600000).toISOString();        // at least 2h left
+  // Hard cap: skip anything resolving > 12 months out (2028 elections, celebrity speculation).
+  // These are priced efficiently by millions of traders — no news edge possible.
+  const cutoffMaxLong  = new Date(now.getTime() + 12 * 30 * 24 * 3600000).toISOString();
 
   const [{ data: nearTermMarkets }, { data: longerTermMarkets }] = await Promise.all([
     // Near-term: resolving in 2h–45 days — high priority for news edge
@@ -203,14 +206,16 @@ export const handler = schedule('*/30 * * * *', async () => {
       .lt('resolution_date', cutoffNearTerm)
       .order('resolution_date', { ascending: true })  // soonest first
       .limit(100),
-    // Longer-term: 45+ days out — lower priority, only analyzed if time permits
+    // Longer-term: 45 days–12 months — lower priority, only analyzed if time permits.
+    // Excludes 2028 elections (> 12 months) which are efficiently priced.
     supabase.from('markets').select('*')
       .eq('is_active', true)
       .eq('category', 'politics')
       .gt('liquidity_usd', 50000)    // higher liquidity bar for long-term
       .gte('resolution_date', cutoffNearTerm)
+      .lt('resolution_date', cutoffMaxLong)  // no 2028 elections
       .order('liquidity_usd', { ascending: false })
-      .limit(50),
+      .limit(30),
   ]);
 
   // Combine: near-term first, longer-term as fallback
@@ -270,20 +275,33 @@ export const handler = schedule('*/30 * * * *', async () => {
   // ── 4. Analyze top markets with Claude ────────────────────
   let analyzed = 0;
 
-  // Pre-load all recently-analyzed market IDs in ONE query (avoids N+1 Supabase calls)
-  const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString();
+  // Pre-load recently-analyzed market IDs — use 24h window to cover both tiers.
+  // Near-term markets (< 45 days): re-analyze every 3h (fresh news can shift them quickly)
+  // Long-term markets (45 days–12 months): re-analyze every 24h (slow-moving)
+  const recentCutoffNearTerm = new Date(Date.now() - 3 * 3600000).toISOString();
+  const recentCutoffLongTerm = new Date(Date.now() - 24 * 3600000).toISOString();
   const { data: recentRows } = await supabase
     .from('politics_analyses')
-    .select('market_id')
-    .gte('analyzed_at', recentCutoff);
-  const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
+    .select('market_id, analyzed_at')
+    .gte('analyzed_at', recentCutoffLongTerm); // load last 24h for both tiers
+  const analyzedIn3h  = new Set((recentRows ?? []).filter((r: { analyzed_at: string }) => r.analyzed_at >= recentCutoffNearTerm).map((r: { market_id: string }) => r.market_id));
+  const analyzedIn24h = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
-  // Sort: never-analyzed first (biggest opportunity), then by liquidity DESC
+  const cutoffNearTermMs = now.getTime() + 45 * 24 * 3600000;
+
+  // Sort: near-term first (always beats long-term), then unanalyzed > analyzed, then liquidity DESC
   const sortedCandidates = [...allPoliticsMarkets].sort((a, b) => {
     const aId = (a as { id?: string }).id ?? '';
     const bId = (b as { id?: string }).id ?? '';
-    const aAnalyzed = recentlyAnalyzed.has(aId) ? 1 : 0;
-    const bAnalyzed = recentlyAnalyzed.has(bId) ? 1 : 0;
+    const aResMs = new Date((a as { resolution_date?: string }).resolution_date ?? (a as { endDate?: string }).endDate ?? '').getTime() || Infinity;
+    const bResMs = new Date((b as { resolution_date?: string }).resolution_date ?? (b as { endDate?: string }).endDate ?? '').getTime() || Infinity;
+    const aIsNear = aResMs <= cutoffNearTermMs;
+    const bIsNear = bResMs <= cutoffNearTermMs;
+    // Near-term always comes before long-term
+    if (aIsNear !== bIsNear) return aIsNear ? -1 : 1;
+    // Within same tier: unanalyzed beats analyzed
+    const aAnalyzed = (aIsNear ? analyzedIn3h : analyzedIn24h).has(aId) ? 1 : 0;
+    const bAnalyzed = (bIsNear ? analyzedIn3h : analyzedIn24h).has(bId) ? 1 : 0;
     if (aAnalyzed !== bAnalyzed) return aAnalyzed - bAnalyzed;
     const aLiq = (a as { liquidity_usd?: number }).liquidity_usd ?? 0;
     const bLiq = (b as { liquidity_usd?: number }).liquidity_usd ?? 0;
@@ -305,8 +323,14 @@ export const handler = schedule('*/30 * * * *', async () => {
 
     if (!mktId || liquidityUsd < 5000) continue;
 
-    // Skip recently analyzed (using pre-loaded set — no extra DB call)
-    if (recentlyAnalyzed.has(mktId)) continue;
+    // Skip recently analyzed — use tier-appropriate recency window.
+    // Near-term (< 45 days): 3h window (news can move fast).
+    // Long-term: 24h window (avoid burning API budget on efficiently priced markets).
+    const marketIsNearTerm = resolutionDate
+      ? new Date(resolutionDate).getTime() <= cutoffNearTermMs
+      : false;
+    const wasRecentlyAnalyzed = marketIsNearTerm ? analyzedIn3h.has(mktId) : analyzedIn24h.has(mktId);
+    if (wasRecentlyAnalyzed) continue;
 
     const outcomePrices: number[] = (market as { outcome_prices?: number[] }).outcome_prices ?? [];
     if (outcomePrices.length < 2) continue;
