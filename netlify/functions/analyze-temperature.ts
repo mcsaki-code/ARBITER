@@ -115,14 +115,16 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   console.log(`[analyze-temperature] Found ${tempMarkets.length} eligible markets`);
 
-  // Pre-load recently analyzed (last 4h) to avoid re-analysis
+  // Pre-load recently analyzed (last 4h) to avoid re-analysis.
+  // NOTE: Do NOT use .in() with 200 market IDs — it hits PostgREST URL length
+  // limits and silently returns empty, causing every market to be re-analyzed
+  // every run. Load ALL recent temperature_statistical rows and filter in memory.
   const recentCutoff = new Date(Date.now() - 4 * 3600000).toISOString();
   const { data: recentRows } = await supabase
     .from('weather_analyses')
     .select('market_id')
     .gte('analyzed_at', recentCutoff)
-    .eq('market_type', 'temperature_statistical')
-    .in('market_id', tempMarkets.map(m => m.id));
+    .eq('market_type', 'temperature_statistical');
   const recentIds = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
   // Pre-load all weather cities for matching

@@ -126,13 +126,20 @@ export const handler = schedule('*/15 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // Also get ALL open bet market IDs to avoid duplicate positions
+  // Also get ALL open bet market IDs + labels to avoid duplicate positions
+  // and enforce correlation limits (e.g. max 2 BTC-related open bets)
   const { data: openBets } = await supabase
     .from('bets')
-    .select('market_id')
+    .select('market_id, category, outcome_label')
     .eq('status', 'OPEN');
 
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
+
+  // Count open crypto bets by underlying asset to cap correlated exposure.
+  // BTC is the main offender — we've had 5+ simultaneous BTC price bets.
+  const openCryptoBtcCount = (openBets || []).filter(
+    (b) => b.category === 'crypto' && (b.outcome_label || '').toLowerCase().includes('bitcoin')
+  ).length;
 
   // Collect eligible analyses using per-category staleness windows (all in parallel)
   const weatherCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_WEATHER).toISOString();
@@ -185,6 +192,17 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Skip if already bet on this market today
     if (existingMarketIds.has(analysis.market_id)) continue;
+
+    // Crypto correlation cap: max 2 open BTC positions simultaneously.
+    // Having 5+ simultaneous "BTC hits $X" bets creates correlated drawdown risk.
+    const MAX_CORRELATED_CRYPTO = 2;
+    if (analysis.category === 'crypto') {
+      const label = ((analysis.target_bracket || analysis.asset || '') as string).toLowerCase();
+      if (label.includes('bitcoin') && openCryptoBtcCount >= MAX_CORRELATED_CRYPTO) {
+        console.log(`[place-bets] Skipping BTC bet — already have ${openCryptoBtcCount} open BTC positions (cap=${MAX_CORRELATED_CRYPTO})`);
+        continue;
+      }
+    }
 
     // Normalize edge and price values (handle Claude returning 849 instead of 0.849)
     const edgeNorm = normalizeEdge(analysis.edge);
@@ -284,11 +302,25 @@ export const handler = schedule('*/15 * * * *', async () => {
     }
 
     // Need a valid entry price — must be strictly above 0.3% and below 99.7%
-    // This allows thin political/weather markets (e.g. 0.5¢ underpriced event)
-    // while still blocking zero/near-zero pricing errors
-    if (!entryPrice || entryPrice < 0.003 || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — invalid entry price ${entryPrice}`);
+    // Minimum entry price: 2% floor (professional standard).
+    // Below 2% adverse selection dominates — if the market prices YES at <2%,
+    // there's almost certainly smarter money on the other side. Also blocks
+    // near-certain losers like "BTC $90K in 4 days" at 0.4%.
+    const MIN_ENTRY_PRICE = 0.02;
+    if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
+      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} below 2% floor`);
       continue;
+    }
+
+    // Near-expiry filter for crypto: don't bet on monthly/quarterly crypto targets
+    // in the final 7 days when the price gap is clearly insurmountable.
+    // e.g. "BTC hits $90K by March 31" on March 27 at 0.004 = throwing money away.
+    if (analysis.category === 'crypto' && currentMarket.resolution_date) {
+      const daysLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 86400000;
+      if (daysLeft < 7 && entryPrice < 0.10) {
+        console.log(`[place-bets] Skipping near-expiry crypto: ${daysLeft.toFixed(1)} days left, price=${entryPrice?.toFixed(3)} — too late`);
+        continue;
+      }
     }
 
     // Execute the bet — paper or live depending on config/guardrails
