@@ -343,6 +343,28 @@ Respond ONLY in JSON:
 
       const analysis = JSON.parse(jsonMatch[0]);
 
+      // ── POST-PROCESSING HARD GATE ──────────────────────────────────
+      // Claude's prompt rules are advisory — LLMs can rationalize around them.
+      // These code-level overrides are non-negotiable and cannot be ignored.
+      if (tc && analysis.direction === 'BUY_YES') {
+        // Gate 1: >5%/day required move within 7 days → physically impossible to sustain
+        if (tc.requiredDailyPct > 5 && tc.daysRemaining < 7) {
+          console.log(`[analyze-crypto] HARD GATE: ${tc.requiredDailyPct.toFixed(1)}%/day required in ${tc.daysRemaining.toFixed(1)} days — forcing PASS on BUY_YES`);
+          analysis.direction = 'PASS';
+          analysis.auto_eligible = false;
+          if (!analysis.flags) analysis.flags = [];
+          analysis.flags.push('HARD_GATE_DAILY_MOVE_EXCEEDED');
+        }
+        // Gate 2: >30% move required within 30 days for long-shot YES bets priced under 3%
+        if (tc.absPctMove > 30 && tc.daysRemaining < 30 && (analysis.market_price ?? 1) < 0.03) {
+          console.log(`[analyze-crypto] HARD GATE: ${tc.absPctMove.toFixed(0)}% move in ${tc.daysRemaining.toFixed(1)} days with <3% market price — forcing PASS`);
+          analysis.direction = 'PASS';
+          analysis.auto_eligible = false;
+          if (!analysis.flags) analysis.flags = [];
+          analysis.flags.push('HARD_GATE_EXTREME_MOVE_SHORT_WINDOW');
+        }
+      }
+
       // Calculate Kelly bet size
       let kellyFraction = 0;
       let recBetUsd = 0;

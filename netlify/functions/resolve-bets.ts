@@ -237,7 +237,7 @@ export const handler = schedule('0 * * * *', async () => {
       .eq('key', 'paper_bankroll')
       .single();
 
-    const bankroll = parseFloat(bankrollRow?.value || '500');
+    const bankroll = parseFloat(bankrollRow?.value || '5000');
     const newBankroll = Math.round((bankroll + totalPnl) * 100) / 100;
 
     await supabase
