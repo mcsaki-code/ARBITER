@@ -559,7 +559,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
           .select('key, value')
           .in('key', ['paper_bankroll']);
         const bankroll = parseFloat(
-          configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500'
+          configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '5000'
         );
         // BUY_NO: sportsbook_consensus is YES win-prob, so flip to NO side for Kelly
         const isBuyNo2 = analysis.direction === 'BUY_NO';

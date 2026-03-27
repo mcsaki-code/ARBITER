@@ -33,6 +33,7 @@ export const handler = schedule('*/20 * * * *', async () => {
     .select('*, weather_cities(*)')
     .eq('is_active', true)
     .not('city_id', 'is', null)
+    .neq('category', 'temperature')   // temperature markets handled by Phase 2 statistical analysis
     .gt('resolution_date', minResolutionDate);
 
   if (!markets || markets.length === 0) {
@@ -174,7 +175,7 @@ export const handler = schedule('*/20 * * * *', async () => {
         configRows?.forEach((r: { key: string; value: string }) => {
           config[r.key] = r.value;
         });
-        const bankroll = parseFloat(config.paper_bankroll || '500');
+        const bankroll = parseFloat(config.paper_bankroll || '5000');
 
         const p = analysis.best_bet.true_prob;
         const c = analysis.best_bet.market_price;
@@ -352,6 +353,7 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
     .from('weather_analyses')
     .select('market_id')
     .gte('analyzed_at', recentCutoff)
+    .eq('market_type', 'temperature_statistical')   // only skip if Phase 2 already ran (not Phase 1 LLM attempts)
     .in('market_id', tempMarkets.map(m => m.id));
   const recentTempIds = new Set((recentTempRows ?? []).map((r: { market_id: string }) => r.market_id));
 
