@@ -255,11 +255,16 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    // Calculate bet size using 1/8th Kelly (professional standard)
+    // Calculate bet size using 1/8th Kelly (professional standard).
+    // Cap kelly_fraction at 0.03 before applying confidence multiplier to prevent
+    // stale inflated-edge analyses (e.g. weather avg 0.665) from sizing to the
+    // 3% bankroll limit on every single bet. Real 8-20% edges get normal sizing.
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
       const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
-      const adjustedKelly = Math.min(analysis.kelly_fraction * KELLY_FRACTION / 0.25 * confMult, 0.03);
+      // Cap kelly_fraction at what a realistic 35% edge would produce before multiplying
+      const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
+      const adjustedKelly = Math.min(cappedKelly * KELLY_FRACTION / 0.25 * confMult, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 

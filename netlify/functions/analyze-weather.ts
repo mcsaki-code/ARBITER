@@ -215,6 +215,10 @@ export const handler = schedule('*/20 * * * *', async () => {
       if (rawEdge !== null && analysis.best_bet?.direction === 'BUY_NO' && rawEdge < 0) {
         rawEdge = -rawEdge;
       }
+      // Sanity cap: weather edges above 35% are almost certainly Claude overconfidence.
+      // Real forecasting edges are rarely > 20-25%. Cap prevents DB avg inflation
+      // and ensures calibration metrics stay meaningful.
+      if (rawEdge !== null && rawEdge > 0.35) rawEdge = 0.35;
 
       // Also normalize market_price and true_prob if they look like percentages
       let mktPrice = analysis.best_bet?.market_price ?? null;
