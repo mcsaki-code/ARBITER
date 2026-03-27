@@ -18,7 +18,7 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_ANALYSES_PER_RUN = 6;
+const MAX_ANALYSES_PER_RUN = 8;
 const MIN_EDGE_PCT = 0.05;
 
 function normalizeEdge(raw: number | null | undefined): number | null {
@@ -72,6 +72,68 @@ interface GammaMarket {
   closed: boolean;
 }
 
+// ── RSS News Headlines Fetcher ──────────────────────────────
+// Fetches recent political headlines from free RSS feeds to
+// ground Claude's reasoning in current events.
+// Includes structured sources used by top prediction market bots:
+//   - White House (executive orders, proclamations)
+//   - AP Politics (fast-breaking news)
+//   - Reuters Politics + World
+//   - Federal Reserve (rate decisions, statements)
+//   - NYT Politics
+const POLITICS_RSS_FEEDS = [
+  'https://www.whitehouse.gov/feed/',                        // Executive orders & proclamations
+  'https://feeds.reuters.com/reuters/politicsNews',
+  'https://feeds.reuters.com/reuters/worldNews',
+  'https://feeds.bbci.co.uk/news/politics/rss.xml',
+  'https://feeds.bbci.co.uk/news/world/rss.xml',
+  'https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml',
+  'https://rss.nytimes.com/services/xml/rss/nyt/Economy.xml', // Economic news
+  'https://apnews.com/rss/apf-politics',                     // AP breaking politics
+  'https://apnews.com/rss/apf-economy',                      // AP economic news
+];
+
+async function fetchPoliticsNewsHeadlines(timeoutMs = 4000): Promise<string[]> {
+  const headlines: string[] = [];
+  const fetches = POLITICS_RSS_FEEDS.map(async (url) => {
+    try {
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: { 'User-Agent': 'ARBITER/1.0 (+https://arbit3r.netlify.app)', Accept: 'application/rss+xml, application/xml, text/xml' },
+      });
+      if (!res.ok) return;
+      const xml = await res.text();
+      // Extract <title> tags (skip the first one, which is the feed title)
+      const matches = [...xml.matchAll(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/gs)];
+      for (const m of matches.slice(1, 8)) {
+        const title = m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').trim();
+        if (title.length > 10 && title.length < 200) headlines.push(title);
+      }
+    } catch { /* silently skip failed feeds */ }
+  });
+  await Promise.allSettled(fetches);
+  // Deduplicate and return top 15
+  return [...new Set(headlines)].slice(0, 15);
+}
+
+// ── Headline Relevance Filter ───────────────────────────────
+// Returns headlines relevant to the given question (keyword overlap)
+function filterRelevantHeadlines(headlines: string[], question: string, maxCount = 5): string[] {
+  const qWords = new Set(
+    question.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 4)
+  );
+  const scored = headlines.map(h => {
+    const hWords = h.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 4);
+    const overlap = hWords.filter(w => qWords.has(w)).length;
+    return { h, overlap };
+  });
+  return scored
+    .filter(s => s.overlap > 0)
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, maxCount)
+    .map(s => s.h);
+}
+
 function titleOverlap(a: string, b: string): number {
   const words = (s: string) => new Set(
     s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(w => w.length > 4)
@@ -122,15 +184,40 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Also fetch directly from markets table (already ingested)
-  const { data: dbPoliticsMarkets } = await supabase
-    .from('markets')
-    .select('*')
-    .eq('is_active', true)
-    .eq('category', 'politics')
-    .gt('liquidity_usd', 5000)
-    .order('volume_usd', { ascending: false })
-    .limit(50);
+  // Also fetch directly from markets table (already ingested).
+  // PRIORITY: near-term markets (resolving within 45 days) come first.
+  // These are where news-driven edge exists — 2028 election markets
+  // are already efficiently priced by millions of traders and should
+  // NOT dominate our analysis budget.
+  const now = new Date();
+  const cutoffNearTerm = new Date(now.getTime() + 45 * 24 * 3600000).toISOString(); // 45 days out
+  const cutoffMin      = new Date(now.getTime() + 2 * 3600000).toISOString();        // at least 2h left
+
+  const [{ data: nearTermMarkets }, { data: longerTermMarkets }] = await Promise.all([
+    // Near-term: resolving in 2h–45 days — high priority for news edge
+    supabase.from('markets').select('*')
+      .eq('is_active', true)
+      .eq('category', 'politics')
+      .gt('liquidity_usd', 5000)
+      .gt('resolution_date', cutoffMin)
+      .lt('resolution_date', cutoffNearTerm)
+      .order('resolution_date', { ascending: true })  // soonest first
+      .limit(100),
+    // Longer-term: 45+ days out — lower priority, only analyzed if time permits
+    supabase.from('markets').select('*')
+      .eq('is_active', true)
+      .eq('category', 'politics')
+      .gt('liquidity_usd', 50000)    // higher liquidity bar for long-term
+      .gte('resolution_date', cutoffNearTerm)
+      .order('liquidity_usd', { ascending: false })
+      .limit(50),
+  ]);
+
+  // Combine: near-term first, longer-term as fallback
+  const dbPoliticsMarkets = [
+    ...(nearTermMarkets ?? []),
+    ...(longerTermMarkets ?? []),
+  ];
 
   // Upsert newly found markets to DB
   if (politicsMarkets.length > 0) {
@@ -175,13 +262,35 @@ export const handler = schedule('*/30 * * * *', async () => {
   const predictItMarkets = predictItData?.markets ?? [];
   console.log(`[analyze-politics] ${predictItMarkets.length} PredictIt markets for cross-reference`);
 
-  // ── 3. Analyze top markets with Claude ────────────────────
+  // ── 3. Fetch current political news headlines ──────────────
+  // Run in parallel with DB queries — used to ground Claude's reasoning
+  const newsHeadlines = await fetchPoliticsNewsHeadlines(4000);
+  console.log(`[analyze-politics] Fetched ${newsHeadlines.length} news headlines for context`);
+
+  // ── 4. Analyze top markets with Claude ────────────────────
   let analyzed = 0;
 
-  // Sort by volume descending, skip recently analyzed
-  const recentCutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+  // Pre-load all recently-analyzed market IDs in ONE query (avoids N+1 Supabase calls)
+  const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString();
+  const { data: recentRows } = await supabase
+    .from('politics_analyses')
+    .select('market_id')
+    .gte('analyzed_at', recentCutoff);
+  const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
-  for (const market of allPoliticsMarkets.slice(0, MAX_ANALYSES_PER_RUN * 2)) {
+  // Sort: never-analyzed first (biggest opportunity), then by liquidity DESC
+  const sortedCandidates = [...allPoliticsMarkets].sort((a, b) => {
+    const aId = (a as { id?: string }).id ?? '';
+    const bId = (b as { id?: string }).id ?? '';
+    const aAnalyzed = recentlyAnalyzed.has(aId) ? 1 : 0;
+    const bAnalyzed = recentlyAnalyzed.has(bId) ? 1 : 0;
+    if (aAnalyzed !== bAnalyzed) return aAnalyzed - bAnalyzed;
+    const aLiq = (a as { liquidity_usd?: number }).liquidity_usd ?? 0;
+    const bLiq = (b as { liquidity_usd?: number }).liquidity_usd ?? 0;
+    return bLiq - aLiq;
+  });
+
+  for (const market of sortedCandidates) {
     if (Date.now() - startTime > 22000) break;
     if (analyzed >= MAX_ANALYSES_PER_RUN) break;
 
@@ -196,14 +305,8 @@ export const handler = schedule('*/30 * * * *', async () => {
 
     if (!mktId || liquidityUsd < 5000) continue;
 
-    // Skip recently analyzed
-    const { data: recent } = await supabase
-      .from('politics_analyses')
-      .select('id')
-      .eq('market_id', mktId)
-      .gte('analyzed_at', recentCutoff)
-      .limit(1);
-    if (recent?.length) continue;
+    // Skip recently analyzed (using pre-loaded set — no extra DB call)
+    if (recentlyAnalyzed.has(mktId)) continue;
 
     const outcomePrices: number[] = (market as { outcome_prices?: number[] }).outcome_prices ?? [];
     if (outcomePrices.length < 2) continue;
@@ -233,33 +336,57 @@ ${piMatch.contracts.filter(c => c.status === 'Open').slice(0, 4).map(c =>
 ).join('\n')}`
       : 'PREDICTIT: No matching market found';
 
-    const prompt = `You are ARBITER's politics analyst. Compare market prices to ground-truth indicators and find mispricings.
+    // Filter news headlines relevant to this market
+    const relevantHeadlines = filterRelevantHeadlines(newsHeadlines, question, 5);
+    const newsSection = relevantHeadlines.length > 0
+      ? `\nRECENT NEWS (RSS headlines, use for current context):\n${relevantHeadlines.map(h => `- ${h}`).join('\n')}`
+      : '';
+
+    // Long-shot calibration note for sub-5% markets
+    const yesPrice = outcomePrices[0] ?? 0.5;
+    const longShotGuidance = yesPrice < 0.05
+      ? `\nLONG-SHOT CALIBRATION NOTE: This market is priced at ${(yesPrice * 100).toFixed(1)}% YES — a 1-in-${Math.round(1/yesPrice)} implied probability. To have edge, you need a TRUE probability meaningfully above or below this anchor. Be explicitly Bayesian: start from the base rate for this event type, update only on specific strong evidence. Avoid anchoring bias toward round numbers. A 2% market priced at 1.5% is only a 0.5% edge — typically not worth betting unless very high confidence.`
+      : '';
+
+    const isNearTerm = hoursRemaining <= 24 * 45; // within 45 days
+    const daysRemaining = hoursRemaining / 24;
+
+    const prompt = `You are ARBITER's politics/news edge detector. Your job is to find MISPRICINGS between current Polymarket prices and reality — driven by breaking news, policy announcements, economic data, or events that traders haven't fully priced in yet.
 
 POLYMARKET QUESTION: ${question}
 LIQUIDITY: $${liquidityUsd.toLocaleString()} | VOLUME: $${volumeUsd.toLocaleString()}
-RESOLVES IN: ${Math.round(hoursRemaining)} hours
+RESOLVES IN: ${Math.round(hoursRemaining)} hours (~${daysRemaining.toFixed(1)} days) — ${daysRemaining <= 3 ? '🔴 VERY NEAR-TERM' : daysRemaining <= 14 ? '🟡 NEAR-TERM' : daysRemaining <= 45 ? '🟢 MEDIUM-TERM' : '⚪ LONG-TERM (discount edge)'}
 
 POLYMARKET OUTCOMES (price = implied probability):
 ${outcomesList}
 
 ${piSection}
+${newsSection}
+${longShotGuidance}
+
+EDGE CATEGORIES — which type of edge might this market have?
+A) NEWS EDGE: Recent news has changed the outcome probability but market hasn't repriced yet
+B) CROSS-MARKET EDGE: PredictIt or Kalshi prices this differently (structural arbitrage)
+C) CALIBRATION EDGE: Market is systematically mispriced vs base rates (e.g., overreacting to unlikely scenario)
+D) DATA EDGE: Official data release (CPI, jobs, Fed rate) makes outcome probability much clearer
 
 TASK:
-1. Assess the fair probability for each outcome based on:
-   - Current polling/consensus (use your training knowledge up to your cutoff)
-   - PredictIt cross-reference if available (sharp money)
-   - Base rates for this type of event
-   - Recent news that may have repriced the market
-2. Calculate edge = true_prob - market_price for each outcome
-3. Select the single best bet if edge >= 0.05
-4. Be conservative — politics markets are liquid and often efficiently priced
-5. Set auto_eligible = true only if confidence HIGH/MEDIUM and edge >= 0.06
-6. Flag if this is a near-term event vs a long-duration market (weight accordingly)
+1. Identify which edge type applies (A/B/C/D), or NONE if efficiently priced
+2. Estimate true probability using the strongest available signal:
+   - If news headlines show a directly relevant development, weight it heavily
+   - If PredictIt aligns with Polymarket → sharp money says price is right → lower edge
+   - Use base rates for recurring event types (elections, rate decisions, etc.)
+3. Calculate edge = true_prob - market_price
+4. Set direction = PASS unless edge >= 0.05 AND you have a specific signal (not just vague priors)
+5. Set auto_eligible = true only for: confidence HIGH/MEDIUM + edge >= 0.06 + specific evidence + daysRemaining <= 30
+6. For markets > 45 days out: apply 40% discount to any edge (long-term efficient market)
+7. NEVER bet on "will X win 2028 election" type questions — too far, too noisy
 
 Respond ONLY in valid JSON:
 {
   "question_summary": string,
-  "category": "election"|"policy"|"geopolitical"|"economic"|"other",
+  "category": "executive_action"|"economic_data"|"election"|"geopolitical"|"legal"|"policy"|"other",
+  "edge_type": "NEWS"|"CROSS_MARKET"|"CALIBRATION"|"DATA"|"NONE",
   "best_bet": {
     "outcome_index": number,
     "outcome_label": string,
@@ -300,7 +427,8 @@ Respond ONLY in valid JSON:
 
       const analysis = JSON.parse(jsonMatch[0]);
 
-      const edgeNorm    = normalizeEdge(analysis.best_bet?.edge);
+      // Cap at 0.50 max — prevents over-sizing Kelly on near-certain calls
+      const edgeNorm    = Math.min(normalizeEdge(analysis.best_bet?.edge) ?? 0, 0.50) || null;
       const mktPriceNorm = normalizeProb(analysis.best_bet?.market_price);
       const trueProbNorm = normalizeProb(analysis.best_bet?.true_prob);
 
@@ -309,8 +437,10 @@ Respond ONLY in valid JSON:
       if (analysis.best_bet?.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
         const { data: configRows } = await supabase.from('system_config').select('key, value').in('key', ['paper_bankroll']);
         const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '500');
-        const p = trueProbNorm ?? 0;
-        const c = mktPriceNorm ?? 0;
+        // BUY_NO: true_prob is YES probability, so flip to NO side for Kelly
+        const isBuyNo = analysis.best_bet?.direction === 'BUY_NO';
+        const p = isBuyNo ? 1 - (trueProbNorm ?? 0) : (trueProbNorm ?? 0);
+        const c = isBuyNo ? 1 - (mktPriceNorm ?? 0) : (mktPriceNorm ?? 0);
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;

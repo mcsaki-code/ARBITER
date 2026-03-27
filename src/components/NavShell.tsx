@@ -82,6 +82,7 @@ const NAV_ITEMS = [
   { href: '/sports', label: 'Sports', Icon: IconSports },
   { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
+  { href: '/politics', label: 'Politics', Icon: IconNews },
   { href: '/arb', label: 'Arbitrage', Icon: IconArb },
   { href: '/tracker', label: 'Results', Icon: IconTracker },
   { href: '/analytics', label: 'Analytics', Icon: IconAnalytics },
