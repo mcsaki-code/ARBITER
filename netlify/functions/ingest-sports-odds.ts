@@ -323,28 +323,24 @@ export const handler = schedule('0 * * * *', async () => {  // Every hour (was e
     else console.log(`[ingest-sports] Upserted ${sportMarketRows.length} sports markets`);
   }
 
-  // ── Step 2: Fetch odds — Pinnacle first, Odds API fallback ────
-  let allOddsRows: OddsRow[] = [];
+  // ── Step 2: Fetch odds — Pinnacle + NCAA in parallel ──────────
+  // CRITICAL: Run NCAA fetch in parallel with Pinnacle so it never gets
+  // blocked by Pinnacle's many sequential HTTP calls. NCAA Tournament
+  // ($6-7M markets) is the highest-value opportunity in March/April.
+  const nowMonth = new Date().getMonth(); // 0-indexed
+  const isTournamentSeason = nowMonth >= 2 && nowMonth <= 4; // Mar-May
+  const shouldFetchNcaa = !!ODDS_API_KEY && isTournamentSeason;
 
-  console.log('[ingest-sports] Fetching Pinnacle public odds...');
-  const pinnacleRows = await fetchPinnacleOdds(startTime);
+  console.log('[ingest-sports] Fetching Pinnacle + NCAA odds in parallel...');
+  const [pinnacleRows, ncaaRows] = await Promise.all([
+    fetchPinnacleOdds(startTime),
+    shouldFetchNcaa ? fetchOddsApiOdds('basketball_ncaab') : Promise.resolve([]),
+  ]);
+
   console.log(`[ingest-sports] Pinnacle returned ${pinnacleRows.length} odds rows`);
-  allOddsRows = pinnacleRows;
+  if (shouldFetchNcaa) console.log(`[ingest-sports] NCAA returned ${ncaaRows.length} odds rows`);
 
-  // ── ALWAYS fetch NCAA basketball via Odds API — Pinnacle doesn't surface NCAAB ──
-  // NCAA Tournament ($6-7M markets each) is the biggest sports opportunity in March/April.
-  // This runs independently of the Pinnacle fallback so we always have NCAA odds.
-  if (ODDS_API_KEY) {
-    const nowMonth = new Date().getMonth(); // 0-indexed
-    if (nowMonth >= 2 && nowMonth <= 4) {   // March (2), April (3), May (4) = tournament months
-      console.log('[ingest-sports] Fetching NCAA basketball (March Madness / tournament)...');
-      const ncaaRows = await fetchOddsApiOdds('basketball_ncaab');
-      if (ncaaRows.length > 0) {
-        allOddsRows.push(...ncaaRows);
-        console.log(`[ingest-sports] NCAA: added ${ncaaRows.length} rows`);
-      }
-    }
-  }
+  let allOddsRows: OddsRow[] = [...pinnacleRows, ...ncaaRows];
 
   // If Pinnacle returned nothing (API changed?), fall back to The Odds API for other sports
   if (pinnacleRows.length === 0 && ODDS_API_KEY) {
