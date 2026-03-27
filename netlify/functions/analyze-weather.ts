@@ -358,7 +358,7 @@ async function analyzeTemperatureMarkets(startTime: number): Promise<number> {
   const recentTempIds = new Set((recentTempRows ?? []).map((r: { market_id: string }) => r.market_id));
 
   // Pre-load all weather_cities for matching
-  const { data: allCities } = await supabase.from('weather_cities').select('id, name, country');
+  const { data: allCities } = await supabase.from('weather_cities').select('id, name');  // no 'country' col in schema
   const cityList = allCities ?? [];
 
   let analyzed = 0;
