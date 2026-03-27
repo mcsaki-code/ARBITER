@@ -137,7 +137,7 @@ export default function PoliticsPage() {
       const res = await fetch('/api/politics');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setData(await res.json());
-      setState('success');
+      setState('fresh');
     } catch {
       setState('error');
     }
@@ -188,7 +188,7 @@ export default function PoliticsPage() {
         </button>
       </div>
 
-      <DataStateWrapper state={state} onRetry={load}>
+      <DataStateWrapper state={state}>
         {/* Summary stats */}
         {s && (
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
@@ -292,11 +292,9 @@ export default function PoliticsPage() {
                         </div>
                       </div>
                       <div className="flex-shrink-0 text-right">
-                        <Badge
-                          value={edge}
-                          direction={a.direction === 'BUY_NO' ? 'BUY_NO' : 'BUY_YES'}
-                          size="lg"
-                        />
+                        <Badge variant={a.direction === 'BUY_NO' ? 'amber' : edge > 0.1 ? 'green' : 'blue'}>
+                          {a.direction === 'BUY_NO' ? 'NO' : 'YES'} +{(edge * 100).toFixed(1)}%
+                        </Badge>
                         <div className="text-xs font-mono text-arbiter-muted mt-1">
                           mkt {fmt(a.market_price, true)} → {fmt(a.true_prob, true)}
                         </div>

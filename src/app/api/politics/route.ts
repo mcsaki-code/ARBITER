@@ -73,8 +73,9 @@ export async function GET() {
   }
 
   // Recent analyses (last 2h) — what's hot right now
-  const recentAnalyses = enrichedAnalyses.filter(
-    (a: { analyzed_at?: string }) => a.analyzed_at && a.analyzed_at > twoHoursAgo
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recentAnalyses = (enrichedAnalyses as any[]).filter(
+    (a) => a.analyzed_at && a.analyzed_at > twoHoursAgo
   );
 
   // P&L summary
@@ -84,13 +85,10 @@ export async function GET() {
   const winRate  = resolvedBets.length > 0 ? wins / resolvedBets.length : null;
 
   // Top opportunities: betable analyses sorted by |edge|
-  const topOpportunities = enrichedAnalyses
-    .filter((a: { direction?: string; edge?: unknown }) =>
-      a.direction !== 'PASS' && parseFloat(String(a.edge ?? 0)) >= 0.05
-    )
-    .sort((a: { edge?: unknown }, b: { edge?: unknown }) =>
-      Math.abs(parseFloat(String(b.edge ?? 0))) - Math.abs(parseFloat(String(a.edge ?? 0)))
-    )
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const topOpportunities = (enrichedAnalyses as any[])
+    .filter((a) => a.direction !== 'PASS' && parseFloat(String(a.edge ?? 0)) >= 0.05)
+    .sort((a, b) => Math.abs(parseFloat(String(b.edge ?? 0))) - Math.abs(parseFloat(String(a.edge ?? 0))))
     .slice(0, 20);
 
   return NextResponse.json({
