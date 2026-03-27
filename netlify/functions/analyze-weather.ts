@@ -291,19 +291,37 @@ interface TemperatureParsed {
 }
 
 function parseTemperatureQuestion(question: string): TemperatureParsed | null {
-  // Matches: "Will the highest temperature in [CITY] be [N]°C[ or below| or above] on [DATE]?"
-  const match = question.match(
+  // Matches °C markets: "Will the highest temperature in [CITY] be [N]°C[ or below| or above] on [DATE]?"
+  const matchC = question.match(
     /highest temperature in ([A-Za-z\s\u00C0-\u024F]+?) be (\d+)°C( or below| or above)? on ([A-Za-z]+ \d+)/i
   );
-  if (!match) return null;
-  return {
-    city: match[1].trim(),
-    threshold_c: parseInt(match[2]),
-    operator: match[3]?.toLowerCase().includes('below') ? 'lte'
-             : match[3]?.toLowerCase().includes('above') ? 'gte'
-             : 'exact',
-    date_str: match[4].trim(),
-  };
+  if (matchC) {
+    return {
+      city: matchC[1].trim(),
+      threshold_c: parseInt(matchC[2]),
+      operator: matchC[3]?.toLowerCase().includes('below') ? 'lte'
+               : matchC[3]?.toLowerCase().includes('above') ? 'gte'
+               : 'exact',
+      date_str: matchC[4].trim(),
+    };
+  }
+  // Matches °F markets: "Will the highest temperature in [CITY] be [N]°F[ or higher| or lower] on [DATE]?"
+  const matchF = question.match(
+    /highest temperature in ([A-Za-z\s\u00C0-\u024F]+?) be (\d+)°F( or higher| or lower| or above| or below)? on ([A-Za-z]+ \d+)/i
+  );
+  if (matchF) {
+    const f = parseInt(matchF[2]);
+    const op = matchF[3]?.toLowerCase();
+    return {
+      city: matchF[1].trim(),
+      threshold_c: Math.round((f - 32) * 5 / 9),  // convert °F to °C
+      operator: (op?.includes('lower') || op?.includes('below')) ? 'lte'
+               : (op?.includes('higher') || op?.includes('above')) ? 'gte'
+               : 'exact',
+      date_str: matchF[4].trim(),
+    };
+  }
+  return null;
 }
 
 // Convert "March 27" to a YYYY-MM-DD string (nearest future occurrence)
