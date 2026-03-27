@@ -218,7 +218,11 @@ export const handler = schedule('*/15 * * * *', async () => {
     const kellyFraction = fullKelly > 0 ? Math.min(fullKelly * 0.125 * confMult, 0.03) : 0;
     const recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
 
-    const { error: insertErr } = await supabase.from('weather_analyses').insert({
+    // Upsert with conflict on (market_id, analysis_date) unique index.
+    // If a concurrent Netlify instance already wrote this market today,
+    // we update in place rather than inserting a duplicate row.
+    const todayDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const { error: insertErr } = await supabase.from('weather_analyses').upsert({
       market_id: market.id,
       city_id: city.id,
       consensus_id: null,
@@ -240,10 +244,12 @@ export const handler = schedule('*/15 * * * *', async () => {
       ensemble_edge: edge,
       precip_consensus: null,
       flags: [`forecast_sources_${forecasts.length}`, `sigma_${SIGMA_C}C`, `pWin_${(pWin * 100).toFixed(1)}pct`],
-    });
+      analysis_date: todayDate,
+      analyzed_at: new Date().toISOString(),
+    }, { onConflict: 'market_id,analysis_date', ignoreDuplicates: false });
 
     if (insertErr) {
-      console.error(`[analyze-temperature] Insert error for market ${market.id}:`, insertErr.message);
+      console.error(`[analyze-temperature] Upsert error for market ${market.id}:`, insertErr.message);
       continue;
     }
 
