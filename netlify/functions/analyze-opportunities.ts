@@ -31,10 +31,13 @@ const MIN_LIQUIDITY         = 8000;   // $8K floor — opportunity markets need 
 const REANALYSIS_COOLDOWN_H = 12;     // Don't re-analyze the same market more often than every 12h
 const FETCH_TIMEOUT_MS      = 6000;
 
-// Categories already handled by dedicated analyzers — skip these
-const COVERED_CATEGORIES = new Set([
-  'weather', 'sports', 'crypto', 'cryptocurrency',
-  'politics', 'political', 'us-politics', 'us_politics',
+// Categories with dedicated analyzers — we still scan these but only when
+// the dedicated analyzer hasn't touched the market recently (12h cooldown).
+// This turns the scanner into a "mop-up" for the long tail each category
+// can't reach per-run. (Sports: 1,187 high-liq; Crypto: 820; Politics: 508)
+// Temperature markets are covered by analyze-temperature.ts — skip entirely.
+const SKIP_CATEGORIES = new Set([
+  'temperature', 'precipitation',  // fully covered by weather/temperature analyzers
 ]);
 
 // ── Cross-market reference fetchers ──────────────────────────────────
@@ -136,11 +139,30 @@ export const handler = schedule('*/30 * * * *', async () => {
   const { data: openBets } = await supabase.from('bets').select('market_id').eq('status', 'OPEN');
   const openMarketIds = new Set((openBets ?? []).map((b: { market_id: string }) => b.market_id));
 
-  // ── 2. Find uncovered high-liquidity markets ──────────────────────
-  // Strategy: rotate through the database by sampling markets we haven't
-  // analyzed recently, ordered by liquidity to maximize value per API call.
-  // Exclude categories already covered by dedicated analyzers.
-  const minResolution = new Date(Date.now() + 6 * 3600000).toISOString(); // at least 6h remaining
+  // ── 2. Find high-liquidity markets NOT analyzed by any pipeline recently ─
+  // Strategy: load markets that haven't been touched by weather/sports/crypto/
+  // politics analyzers in the last 12h. Sorted by liquidity — biggest
+  // untouched opportunities first.
+  // Temperature/precipitation markets are fully covered by the weather analyzer.
+  const minResolution    = new Date(Date.now() + 6 * 3600000).toISOString();
+  const dedicatedCutoff  = new Date(Date.now() - REANALYSIS_COOLDOWN_H * 3600000).toISOString();
+
+  // Get market_ids recently covered by dedicated analyzers so we don't duplicate
+  const [waRows, saRows, caRows, paRows] = await Promise.all([
+    supabase.from('weather_analyses') .select('market_id').gte('analyzed_at', dedicatedCutoff).then(r => r.data ?? []),
+    supabase.from('sports_analyses')  .select('market_id').gte('analyzed_at', dedicatedCutoff).then(r => r.data ?? []),
+    supabase.from('crypto_analyses')  .select('market_id').gte('analyzed_at', dedicatedCutoff).then(r => r.data ?? []),
+    supabase.from('politics_analyses').select('market_id').gte('analyzed_at', dedicatedCutoff).then(r => r.data ?? []),
+  ]);
+
+  const dedicatedCoverage = new Set<string>([
+    ...(waRows as { market_id: string }[]).map(r => r.market_id),
+    ...(saRows as { market_id: string }[]).map(r => r.market_id),
+    ...(caRows as { market_id: string }[]).map(r => r.market_id),
+    ...(paRows as { market_id: string }[]).map(r => r.market_id),
+  ]);
+
+  console.log(`[opportunities] Dedicated coverage in last ${REANALYSIS_COOLDOWN_H}h: ${dedicatedCoverage.size} markets`);
 
   const { data: candidateMarkets } = await supabase
     .from('markets')
@@ -149,16 +171,14 @@ export const handler = schedule('*/30 * * * *', async () => {
     .eq('is_resolved', false)
     .gte('liquidity_usd', MIN_LIQUIDITY)
     .gt('resolution_date', minResolution)
-    // Exclude extreme certainty prices — not much edge to find near 0 or 1
     .order('liquidity_usd', { ascending: false })
-    .limit(200);
+    .limit(300);
 
   if (!candidateMarkets || candidateMarkets.length === 0) {
     console.log('[opportunities] No candidate markets found');
     return { statusCode: 200 };
   }
 
-  // Filter out covered categories + recently analyzed + open positions + extremes
   interface Market {
     id: string;
     question: string;
@@ -169,11 +189,14 @@ export const handler = schedule('*/30 * * * *', async () => {
   }
 
   const filtered = (candidateMarkets as Market[]).filter(m => {
+    // Skip if already analyzed by any pipeline recently
     if (recentlyAnalyzed.has(m.id)) return false;
+    if (dedicatedCoverage.has(m.id)) return false;
     if (openMarketIds.has(m.id)) return false;
+    // Skip temperature/precipitation — fully covered by weather analyzer
     const cat = (m.category ?? '').toLowerCase();
-    if (COVERED_CATEGORIES.has(cat)) return false;
-    // Exclude extreme prices (already essentially resolved)
+    if (SKIP_CATEGORIES.has(cat)) return false;
+    // Exclude extreme prices — market is near-resolved, not much edge left
     const yesPrice = m.outcome_prices?.[0];
     if (yesPrice == null) return false;
     if (yesPrice < 0.03 || yesPrice > 0.97) return false;
@@ -262,7 +285,15 @@ export const handler = schedule('*/30 * * * *', async () => {
 
     const daysRemaining = (new Date(market.resolution_date).getTime() - Date.now()) / 86400000;
 
-    const prompt = `You are ARBITER's general opportunity analyst. You scan Polymarket for mispricings across all market categories.
+    const categoryHint = (() => {
+      const cat = (market.category ?? '').toLowerCase();
+      if (cat === 'sports') return 'SPORTS market — no live odds available. Use your knowledge of the teams/event + cross-market references. Be cautious without real-time data.';
+      if (cat === 'crypto') return 'CRYPTO market — no live price feed. Use your knowledge of the asset + cross-market references. Crypto moves fast; be conservative without real-time data.';
+      if (cat === 'politics') return 'POLITICS market — use cross-market references heavily. Political prediction markets often have stale prices after news events.';
+      return 'General market — use your broad knowledge and cross-market references.';
+    })();
+
+    const prompt = `You are ARBITER's general opportunity analyst. You scan Polymarket for mispricings across all categories, focusing on markets missed by dedicated analyzers.
 
 MARKET: "${market.question}"
 Category: ${market.category || 'uncategorized'}
@@ -271,31 +302,33 @@ Polymarket NO Price: $${(1 - yesPrice).toFixed(3)}
 Liquidity: $${(market.liquidity_usd ?? 0).toLocaleString()}
 Days Remaining: ${daysRemaining.toFixed(1)}
 Resolution: ${market.resolution_date}
+
+CATEGORY CONTEXT: ${categoryHint}
 ${crossMarketSection ? `\nCROSS-MARKET REFERENCES:${crossMarketSection}` : '\nCROSS-MARKET REFERENCES: None found'}
 
 YOUR TASK:
 1. Assess whether the current Polymarket price is mispriced
-2. Estimate the true probability for the YES outcome using your knowledge + any cross-market data
+2. Estimate the true probability for YES using your knowledge + cross-market data
 3. Calculate edge = |true_prob - market_price|
-4. If cross-market sources BOTH diverge >10pp from Polymarket in the same direction → HIGH confidence, auto_eligible = true
-5. If only one cross-market source or divergence is 5-10pp → MEDIUM confidence
-6. If no cross-market refs or divergence <5pp → LOW confidence or PASS
+4. CROSS_MARKET EDGE: If 2+ external sources BOTH diverge >10pp from Polymarket in the same direction → HIGH confidence, auto_eligible = true
+5. If 1 source diverges >10pp or 2 sources diverge 5-10pp → MEDIUM confidence
+6. No refs or <5pp divergence → LOW confidence or PASS
 
 CROSS-MARKET CONSENSUS: ${crossMarketCount >= 2
-  ? `${crossMarketCount} sources agree → strong signal`
+  ? `${crossMarketCount} sources agree → strong cross-market signal`
   : crossMarketCount === 1
-  ? '1 source only → moderate signal'
-  : 'No refs found → rely on your knowledge alone'}
+  ? '1 source only → treat as moderate signal'
+  : 'No external refs — rely on knowledge alone (be more conservative)'}
 ${crossMarketConsensus !== null
-  ? `External consensus probability: ${(crossMarketConsensus * 100).toFixed(1)}%`
+  ? `External consensus: ${(crossMarketConsensus * 100).toFixed(1)}%`
   : ''}
 
-IMPORTANT:
-- Knowledge cutoff is ~May 2025; for events after that, trust cross-market references over your priors
-- Only recommend bets with edge >= 0.05 (5%)
-- A PASS is fine if you're uncertain — don't force an edge
-- For resolution dates > 30 days out, be MORE conservative (more time = more uncertainty)
-- Never bet both sides of the same event
+CONSTRAINTS:
+- Knowledge cutoff ~May 2025 — for recent events, trust cross-market refs over priors
+- Only recommend bets with edge >= 0.05
+- PASS is valid — don't manufacture an edge you don't see
+- Markets resolving >30 days out: be more conservative
+- Sports/crypto without live data: default to PASS unless cross-market refs strongly diverge
 
 Respond ONLY in valid JSON:
 {
