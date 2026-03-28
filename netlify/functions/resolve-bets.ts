@@ -211,6 +211,14 @@ export const handler = schedule('0 * * * *', async () => {
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;
 
+    // Brier score = (predicted_prob - actual_outcome)^2
+    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality over time.
+    const predictedProb = bet.direction === 'BUY_YES'
+      ? (bet.entry_price ?? 0.5)
+      : 1 - (bet.entry_price ?? 0.5);
+    const actualOutcome = betWon ? 1.0 : 0.0;
+    const brierScore = Math.pow(predictedProb - actualOutcome, 2);
+
     await supabase
       .from('bets')
       .update({
@@ -219,6 +227,8 @@ export const handler = schedule('0 * * * *', async () => {
         pnl,
         resolved_at: new Date().toISOString(),
         notes: `Auto-resolved: winner "${winningOutcome}" | ${betWon ? 'WIN' : 'LOSS'}`,
+        predicted_prob: predictedProb,
+        brier_score: Math.round(brierScore * 10000) / 10000,
       })
       .eq('id', bet.id);
 

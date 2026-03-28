@@ -17,7 +17,7 @@ export const handler = schedule('0 0 * * *', async () => {
   // Get ALL bets (paper and live) — no is_paper filter so we count everything
   const { data: bets } = await supabase
     .from('bets')
-    .select('status, pnl, amount_usd, category');
+    .select('status, pnl, amount_usd, category, confidence, predicted_prob, brier_score, entry_price, direction');
 
   if (!bets) return { statusCode: 200 };
 
@@ -68,6 +68,46 @@ export const handler = schedule('0 0 * * *', async () => {
       { key: 'total_paper_wagered',value: totalWagered.toFixed(2),    updated_at: new Date().toISOString() },
       { key: 'paper_roi_pct',      value: roi.toFixed(2),             updated_at: new Date().toISOString() },
     ]);
+
+  // ─── Calibration rollup per category × confidence tier ───────────────────
+  // Tracks how well our predicted probabilities match actual outcomes (Brier score).
+  // This is the #1 metric that separates professional forecasters from noise.
+  const categories = ['weather', 'sports', 'crypto', 'politics', 'sentiment'];
+  const tiers = ['LOW', 'MEDIUM', 'HIGH'];
+  const resolvedBets = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
+
+  for (const cat of categories) {
+    for (const tier of tiers) {
+      const cohort = resolvedBets.filter(
+        (b) => b.category === cat && (b.confidence || 'MEDIUM') === tier
+      );
+      if (cohort.length === 0) continue;
+
+      const cohortWins   = cohort.filter((b) => b.status === 'WON').length;
+      const cohortLosses = cohort.length - cohortWins;
+      const avgBrier     = cohort.reduce((s, b) => s + (b.brier_score || 0), 0) / cohort.length;
+      const avgEdge      = 0; // edge not stored on bets — tracked in analyses
+      const avgPnl       = cohort.reduce((s, b) => s + (b.pnl || 0), 0) / cohort.length;
+      const predictedWR  = cohort.reduce((s, b) => {
+        const pp = b.predicted_prob ?? (b.direction === 'BUY_YES' ? (b.entry_price ?? 0.5) : 1 - (b.entry_price ?? 0.5));
+        return s + pp;
+      }, 0) / cohort.length;
+
+      await supabase.from('calibration_snapshots').upsert({
+        snapshot_date: todayStr,
+        category: cat,
+        confidence_tier: tier,
+        total_bets: cohort.length,
+        wins: cohortWins,
+        losses: cohortLosses,
+        predicted_win_rate: Math.round(predictedWR * 10000) / 10000,
+        actual_win_rate: cohort.length > 0 ? Math.round(cohortWins / cohort.length * 10000) / 10000 : null,
+        avg_brier_score: Math.round(avgBrier * 10000) / 10000,
+        avg_edge: avgEdge,
+        avg_pnl: Math.round(avgPnl * 100) / 100,
+      }, { onConflict: 'snapshot_date,category,confidence_tier' });
+    }
+  }
 
   console.log(`[performance-snapshot] Done: ${totalBets} total (${openBets} open, ${wins}W/${losses}L), ROI=${roi.toFixed(1)}%, PnL=$${totalPnl.toFixed(2)}`);
   return { statusCode: 200 };

@@ -14,9 +14,18 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const MIN_EDGE  = 0.08;   // 8% minimum edge — temperature niche markets
-const SIGMA_C   = 2.0;    // ±2°C typical 1-day forecast accuracy for max temperature
-const MAX_PER_RUN = 80;   // Full 28s window → process up to 80 markets
+const MIN_EDGE    = 0.08;   // 8% minimum edge — temperature niche markets
+const MAX_PER_RUN = 80;     // Full 28s window → process up to 80 markets
+const MIN_HOURS_TO_RESOLUTION = 4; // Don't bet if market closes in < 4h
+
+// Forecast uncertainty (sigma) scales with lead time — the further out, the wider the bell curve.
+// Day-0 (resolves today): ±1.5°C. Day-1: ±2.5°C. Day-2: ±3.5°C. Day-3+: ±4.5°C
+function sigmaForDaysOut(daysOut: number): number {
+  if (daysOut <= 0) return 1.5;
+  if (daysOut <= 1) return 2.5;
+  if (daysOut <= 2) return 3.5;
+  return 4.5;
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Normal distribution CDF (Abramowitz & Stegun, error < 7.5e-8)
@@ -98,7 +107,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     .eq('is_active', true)
     .eq('category', 'temperature')
     .gt('liquidity_usd', 400)
-    .gt('resolution_date', new Date(Date.now() + 1800000).toISOString()) // 30min min
+    .gt('resolution_date', new Date(Date.now() + MIN_HOURS_TO_RESOLUTION * 3600000).toISOString()) // 4h min
     .lt('resolution_date', soon)
     .order('liquidity_usd', { ascending: false })
     .limit(200);
@@ -181,6 +190,12 @@ export const handler = schedule('*/15 * * * *', async () => {
     const avgHighF = forecasts.reduce((sum, f) => sum + (f.temp_high_f ?? 0), 0) / forecasts.length;
     const mu_c = (avgHighF - 32) * 5 / 9;  // Convert to Celsius
 
+    // Scale sigma by how far out the target date is — wider uncertainty further out
+    const daysOut = market.resolution_date
+      ? Math.max(0, (new Date(market.resolution_date).getTime() - Date.now()) / 86400000)
+      : 1;
+    const SIGMA_C = sigmaForDaysOut(daysOut);
+
     // P(max temp meets condition)
     const T = parsed.threshold_c;
     let trueProb: number;
@@ -239,11 +254,13 @@ export const handler = schedule('*/15 * * * *', async () => {
       kelly_fraction: kellyFraction,
       rec_bet_usd: recBetUsd,
       reasoning: `Statistical: forecast high ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), threshold ${T}°C ${parsed.operator}, P(match)=${(trueProb * 100).toFixed(1)}%, market=${(marketPrice * 100).toFixed(2)}%, edge=${(edge * 100).toFixed(1)}%`,
-      auto_eligible: false,
+      // auto_eligible: true when edge is real (HIGH confidence, ≥3 forecast sources, ≥8% edge)
+      // and the market isn't in its last 4h (already filtered above by MIN_HOURS_TO_RESOLUTION)
+      auto_eligible: confidence === 'HIGH' && forecasts.length >= 3 && absEdge >= MIN_EDGE,
       ensemble_prob: trueProb,
       ensemble_edge: edge,
       precip_consensus: null,
-      flags: [`forecast_sources_${forecasts.length}`, `sigma_${SIGMA_C}C`, `pWin_${(pWin * 100).toFixed(1)}pct`],
+      flags: [`forecast_sources_${forecasts.length}`, `sigma_${SIGMA_C.toFixed(1)}C`, `days_out_${daysOut.toFixed(1)}`, `pWin_${(pWin * 100).toFixed(1)}pct`],
       analysis_date: todayDate,
       analyzed_at: new Date().toISOString(),
     }, { onConflict: 'market_id,analysis_date', ignoreDuplicates: false });

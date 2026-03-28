@@ -264,10 +264,14 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    // Check time remaining
+    // Check time remaining — require at least 4h for weather/crypto, 2h for others
     if (currentMarket.resolution_date) {
       const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
-      if (hoursLeft < 1) continue;
+      const minHours = (analysis.category === 'weather' || analysis.category === 'crypto') ? 4 : 2;
+      if (hoursLeft < minHours) {
+        console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${minHours}h for ${analysis.category})`);
+        continue;
+      }
     }
 
     // Spread-aware edge filter: edge must be 2x estimated spread
@@ -304,6 +308,16 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
     if (betAmount < 1) break;
+
+    // Liquidity cap: never deploy more than 5% of the market's total liquidity.
+    // On paper this doesn't matter, but protects us when live trading starts —
+    // a $120 bet into a $400 market would move the price 15-20% on execution.
+    const maxByLiquidity = Math.max(1, (currentMarket.liquidity_usd || 0) * 0.05);
+    if (betAmount > maxByLiquidity) {
+      console.log(`[place-bets] Capping ${analysis.market_id.substring(0, 8)} bet from $${betAmount.toFixed(0)} to $${maxByLiquidity.toFixed(0)} (5% of $${currentMarket.liquidity_usd} liquidity)`);
+      betAmount = Math.round(maxByLiquidity * 100) / 100;
+    }
+    if (betAmount < 1) continue;
 
     // Determine outcome label and entry price
     let outcomeLabel: string | null = null;

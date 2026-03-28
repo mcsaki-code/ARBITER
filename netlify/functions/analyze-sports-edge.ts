@@ -259,13 +259,17 @@ export const handler = schedule('*/30 * * * *', async () => {
   const hasOdds = oddsRows.length > 0;
 
   if (!hasOdds) {
-    console.log('[analyze-sports] No recent sportsbook odds — running knowledge-only analysis on top markets');
+    // Knowledge-only mode disabled: Claude's training data is 10+ months stale for sports.
+    // Every run was producing phantom edges of 60-90% (hallucinated) with confidence:LOW,
+    // wasting API quota and filling the DB with noise. Sportsbook-odds path only.
+    console.log('[analyze-sports] No recent sportsbook odds — skipping (knowledge-only disabled due to stale data)');
+    return { statusCode: 200 };
   } else {
     console.log(`[analyze-sports] ${sportsMarkets.length} markets, ${oddsRows.length} odds rows`);
   }
 
-  // ── KNOWLEDGE-ONLY PATH: analyze top markets when no sportsbook odds ──
-  if (!hasOdds) {
+  // ── KNOWLEDGE-ONLY PATH: DISABLED (kept for reference, unreachable) ──
+  if (false && !hasOdds) {
     let analyzed = 0;
     const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString();
 
