@@ -407,5 +407,80 @@ POST https://arbit3r.netlify.app/api/trigger/bets
 
 ---
 
-*Last updated: March 22, 2026*
+---
+
+## 14. Sentiment Pipeline (Trump + Options Flow)
+
+### Overview
+A 6th edge-detection source that correlates Truth Social posts with options market anomalies to identify mispricings on Polymarket before the crowd catches up.
+
+**Key insight**: Trump posts on tariffs, crypto, and macro frequently precede Polymarket price moves. When a high-impact post coincides with unusual options flow (put/call ratio Z-score), the signal confidence is highest.
+
+### Architecture
+
+```
+ingest-options-flow (*/5 min)    ingest-trump-social (*/5 min)
+        ↓                                  ↓
+options_flow_signals             trump_posts
+        ↘                               ↙
+         analyze-sentiment-edge (*/10 min)
+                    ↓
+          sentiment_analyses
+                    ↓
+            place-bets (*/15 min)
+```
+
+### Functions
+
+#### `ingest-options-flow.ts` — every 5 min
+- Fetches CBOE delayed quotes for **SPY, QQQ, TLT** (free, no auth)
+- Falls back to Yahoo Finance if CBOE unavailable
+- Computes put/call ratio, rolling 48h mean/stddev, Z-score
+- Marks `is_anomaly = true` when |Z| ≥ 2.0; sets `anomaly_direction` = BULLISH | BEARISH
+- Auto-prunes signals older than 7 days
+
+#### `ingest-trump-social.ts` — every 5 min
+- Fetches `https://truthsocial.com/@realDonaldTrump.rss` (public, no auth)
+- Falls back to rss.app mirror if Truth Social unreachable
+- Custom XML/RSS parser — no external deps, stays within Netlify 10s timeout
+- 29-keyword scoring matrix across 7 categories: tariff, crypto, fed, stocks, energy, geo, politics
+- Compound scoring: multiple high-impact keywords increase score exponentially
+- Only stores posts with `market_impact_score ≥ 0.15`; upserts on `post_id`
+
+#### `analyze-sentiment-edge.ts` — every 10 min
+- **90-minute correlation window** for options anomalies + Trump posts
+- Three signal types: `options_trump` (both), `trump_only` (score ≥ 0.35), `options_only` (Z ≥ 3.0)
+- Finds Polymarket markets via ILIKE on question text using category keywords
+- Calls Claude Sonnet to assess edge vs market price
+- Min edge: **6%** — caps `rec_bet_usd` at 2% bankroll
+
+### Database Tables
+- `options_flow_signals` (12 cols): ticker, pcr, z-score, is_anomaly, anomaly_direction
+- `trump_posts` (9 cols): post_id UNIQUE, content, market_impact_score, categories[]
+- `sentiment_analyses` (17 cols): signal_type, edge, direction, confidence, auto_eligible
+
+### Frontend: `/sentiment`
+Three-column dashboard: Options Flow | Trump Posts | Sentiment Analyses. Auto-refreshes every 60s.
+
+### Integration
+Sentiment analyses are the 5th betting source in `place-bets.ts`, with a 2-hour freshness window and 40% category exposure cap.
+
+### Monitoring
+```sql
+-- Recent options anomalies
+SELECT ticker, put_call_ratio, zscore, anomaly_direction, detected_at
+FROM options_flow_signals WHERE is_anomaly = true ORDER BY detected_at DESC LIMIT 5;
+
+-- Recent high-impact Trump posts
+SELECT posted_at, market_impact_score, categories, LEFT(content, 100)
+FROM trump_posts WHERE market_impact_score >= 0.4 ORDER BY posted_at DESC LIMIT 5;
+
+-- Actionable sentiment analyses
+SELECT analyzed_at, signal_type, direction, edge, confidence
+FROM sentiment_analyses WHERE auto_eligible = true ORDER BY analyzed_at DESC LIMIT 10;
+```
+
+---
+
+*Last updated: March 28, 2026*
 *Project owner: Matt Csaki (mattcsaki@gmail.com)*
