@@ -176,7 +176,7 @@ process.on('uncaughtException', (err) => {
 async function main() {
   console.log('');
   console.log('╔═══════════════════════════════════════════╗');
-  console.log('║        ARBITER Railway Worker v1.0        ║');
+  console.log('║        ARBITER Railway Worker v1.1        ║');
   console.log('║  Persistent analysis — no timeout limits  ║');
   console.log('╚═══════════════════════════════════════════╝');
   console.log('');
@@ -195,7 +195,7 @@ async function main() {
   // Log startup to DB
   await supabase.from('system_config').upsert([
     { key: 'railway_worker_started_at', value: new Date().toISOString() },
-    { key: 'railway_worker_version',    value: '1.0.0' },
+    { key: 'railway_worker_version',    value: '1.1.0' },
   ], { onConflict: 'key' });
 
   // Run all loops concurrently — they never return (infinite while loops)

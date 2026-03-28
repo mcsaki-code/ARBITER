@@ -7,10 +7,9 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 
 const MIN_EDGE  = 0.08;   // 8% minimum edge
-const SIGMA_C   = 2.0;    // ±2°C typical 1-day forecast accuracy
-const SIGMA_2D  = 2.8;    // ±2.8°C for 2-day forecasts (σ grows with √t)
-const SIGMA_3D  = 3.4;    // ±3.4°C for 3-day forecasts
-const SIGMA_5D  = 4.5;    // ±4.5°C for 4-5 day forecasts
+// Sigma scales with forecast lead time (uncertainty grows with √t)
+// Day-0: 1.5°C, Day-1: 2.5°C, Day-2: 3.5°C, Day-3+: 4.5°C
+// Matches analyze-temperature.ts Netlify function sigma table
 
 // Abramowitz & Stegun normal CDF (error < 7.5e-8)
 function normalCDF(x: number): number {
@@ -75,10 +74,10 @@ export function resolveDateStr(dateStr: string): string | null {
 }
 
 function sigmaCForDaysOut(daysOut: number): number {
-  if (daysOut <= 1) return SIGMA_C;
-  if (daysOut <= 2) return SIGMA_2D;
-  if (daysOut <= 3) return SIGMA_3D;
-  return SIGMA_5D;
+  if (daysOut <= 0) return 1.5;   // same-day: tight ±1.5°C
+  if (daysOut <= 1) return 2.5;   // 1-day out: ±2.5°C
+  if (daysOut <= 2) return 3.5;   // 2-day out: ±3.5°C
+  return 4.5;                     // 3-5 day out: ±4.5°C
 }
 
 export interface TempAnalysisResult {
@@ -232,11 +231,11 @@ export async function analyzeTemperatureMarkets(
       kelly_fraction: kellyFraction,
       rec_bet_usd: recBetUsd,
       reasoning: `[Railway] Statistical: forecast ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), threshold ${T}°C ${parsed.operator}, sigma=${sigma}°C (${daysOut}d out), P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
-      auto_eligible: false,
+      auto_eligible: confidence === 'HIGH' && forecasts.length >= 3 && absEdge >= MIN_EDGE,
       ensemble_prob: trueProb,
       ensemble_edge: edge,
       precip_consensus: null,
-      flags: [`railway_worker`, `forecast_sources_${forecasts.length}`, `sigma_${sigma}C`, `days_out_${daysOut}`],
+      flags: [`railway_worker`, `forecast_sources_${forecasts.length}`, `sigma_${sigma.toFixed(1)}C`, `days_out_${daysOut}`, `pWin_${(pWin * 100).toFixed(1)}pct`],
     });
 
     if (insertErr) { errors++; continue; }
