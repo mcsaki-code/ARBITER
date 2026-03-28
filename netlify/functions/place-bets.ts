@@ -33,7 +33,8 @@ const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
 const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
 const MAX_ANALYSIS_AGE_CRYPTO   = 4 * 3600000;  // 4h
 const MAX_ANALYSIS_AGE_POLITICS = 6 * 3600000;  // 6h
-const MAX_ANALYSIS_AGE_MS = 6 * 3600000;         // default fallback
+const MAX_ANALYSIS_AGE_MS        = 6 * 3600000;  // default fallback
+const MAX_ANALYSIS_AGE_SENTIMENT = 2 * 3600000;  // 2h — sentiment signals stale fast
 
 /** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
 function normalizeEdge(raw: number | null): number {
@@ -156,7 +157,9 @@ export const handler = schedule('*/15 * * * *', async () => {
   const cryptoCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_CRYPTO).toISOString();
   const politicsCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_POLITICS).toISOString();
 
-  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses] = await Promise.all([
+  const sentimentCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_SENTIMENT).toISOString();
+
+  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses, sentimentAnalyses] = await Promise.all([
     supabase.from('weather_analyses').select('*')
       .gte('analyzed_at', weatherCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER)
       .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
@@ -170,13 +173,19 @@ export const handler = schedule('*/15 * * * *', async () => {
       .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
       .order('edge', { ascending: false }).limit(20)
       .then(r => r.data ?? [], () => [] as unknown[]),
+    // Sentiment analyses — Trump tweet + options flow correlated signals
+    supabase.from('sentiment_analyses').select('*')
+      .gte('analyzed_at', sentimentCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
+      .order('edge', { ascending: false }).limit(10)
+      .then(r => r.data ?? [], () => [] as unknown[]),
   ]);
 
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
-    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',  source_table: 'weather_analyses'  })),
-    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',   source_table: 'sports_analyses'   })),
-    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',   source_table: 'crypto_analyses'   })),
-    ...(politicsAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'politics', source_table: 'politics_analyses' })),
+    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',   source_table: 'weather_analyses'   })),
+    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',    source_table: 'sports_analyses'    })),
+    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',    source_table: 'crypto_analyses'    })),
+    ...(politicsAnalyses  as AnalysisRow[]).map(a => ({ ...a, category: 'politics',  source_table: 'politics_analyses'  })),
+    ...(sentimentAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'sentiment', source_table: 'sentiment_analyses' })),
   ];
 
   console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses.length}, sports: ${sportsAnalyses.length}, crypto: ${cryptoAnalyses.length}, politics: ${(politicsAnalyses as unknown[]).length})`);

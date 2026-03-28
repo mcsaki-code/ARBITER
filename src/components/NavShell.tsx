@@ -83,6 +83,7 @@ const NAV_ITEMS = [
   { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
   { href: '/politics', label: 'Politics', Icon: IconNews },
+  { href: '/sentiment', label: 'Sentiment', Icon: IconAnalytics },
   { href: '/arb', label: 'Arbitrage', Icon: IconArb },
   { href: '/tracker', label: 'Results', Icon: IconTracker },
   { href: '/analytics', label: 'Analytics', Icon: IconAnalytics },
