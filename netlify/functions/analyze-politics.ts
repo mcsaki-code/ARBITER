@@ -1,12 +1,13 @@
 // ============================================================
 // Netlify Scheduled Function: Analyze Politics Edge
-// Runs every 30 minutes — compares PredictIt + polling data
-// against Polymarket politics markets to find mispricings.
+// Runs every 30 minutes — cross-references multiple prediction
+// markets to find systematic mispricings.
 //
 // DATA SOURCES (all free, no auth):
-// - PredictIt public API (cross-reference prices)
-// - 538/Nate Silver polling aggregates
-// - Polymarket politics markets
+// - Manifold Markets API  — community prediction market prices
+// - Metaculus API         — superforecaster community estimates
+// - Kalshi DB cross-ref  — already ingested into kalshi_markets
+// - 9 news RSS feeds     — AP, Reuters, BBC, NYT, White House
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -44,20 +45,87 @@ async function fetchJson(url: string, timeoutMs = 8000): Promise<unknown> {
   } catch { return null; }
 }
 
-interface PredictItMarket {
-  id: number;
-  name: string;
-  shortName: string;
-  url: string;
-  contracts: Array<{
-    id: number;
-    name: string;
-    shortName: string;
-    lastTradePrice: number;
-    bestBuyYesCost: number;
-    bestBuyNoCost: number;
-    status: string;
-  }>;
+// ── Cross-market reference types ────────────────────────────
+interface CrossMarketRef {
+  source: string;
+  question: string;
+  probability: number;   // 0–1
+  url?: string;
+}
+
+// ── Manifold Markets cross-reference (free, no auth) ────────
+// Searches for markets matching the question and returns the
+// closest probability estimate as an external anchor.
+async function fetchManifoldRef(question: string): Promise<CrossMarketRef | null> {
+  try {
+    // Use top keywords from question for search
+    const keywords = question
+      .replace(/[^a-z0-9 ]/gi, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 4)
+      .slice(0, 5)
+      .join(' ');
+    const url = `https://api.manifold.markets/v0/search-markets?term=${encodeURIComponent(keywords)}&limit=3`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(5000),
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const markets = await res.json() as Array<{
+      question: string;
+      probability?: number;
+      url?: string;
+      isResolved?: boolean;
+    }>;
+    if (!Array.isArray(markets) || markets.length === 0) return null;
+    // Pick the open (unresolved) market with highest title similarity
+    const open = markets.filter(m => !m.isResolved && m.probability != null);
+    if (open.length === 0) return null;
+    const best = open[0];
+    return {
+      source: 'manifold',
+      question: best.question,
+      probability: best.probability!,
+      url: best.url,
+    };
+  } catch { return null; }
+}
+
+// ── Metaculus cross-reference (free, no auth) ────────────────
+// Returns the community median probability from superforecasters.
+async function fetchMetaculusRef(question: string): Promise<CrossMarketRef | null> {
+  try {
+    const keywords = question
+      .replace(/[^a-z0-9 ]/gi, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 4)
+      .slice(0, 4)
+      .join(' ');
+    const url = `https://www.metaculus.com/api2/questions/?search=${encodeURIComponent(keywords)}&status=open&limit=3`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: 'application/json', 'User-Agent': 'ARBITER/1.0' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      results?: Array<{
+        title?: string;
+        community_prediction?: { full?: { q2?: number } };
+        page_url?: string;
+      }>;
+    };
+    const results = data?.results;
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const best = results.find(r => r.community_prediction?.full?.q2 != null);
+    if (!best) return null;
+    const prob = best.community_prediction!.full!.q2!;
+    return {
+      source: 'metaculus',
+      question: best.title ?? '',
+      probability: prob,
+      url: best.page_url,
+    };
+  } catch { return null; }
 }
 
 interface GammaMarket {
@@ -259,13 +327,13 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // ── 2. Fetch PredictIt cross-reference prices ──────────────
-  const predictItData = await fetchJson('https://www.predictit.org/api/marketdata/all/') as {
-    markets: PredictItMarket[];
-  } | null;
-
-  const predictItMarkets = predictItData?.markets ?? [];
-  console.log(`[analyze-politics] ${predictItMarkets.length} PredictIt markets for cross-reference`);
+  // ── 2. Fetch Kalshi cross-reference prices (already in DB) ──
+  const { data: kalshiMarkets } = await supabase
+    .from('kalshi_markets')
+    .select('ticker, title, yes_ask, yes_bid, last_price, category')
+    .in('status', ['open', 'active'])
+    .limit(200);
+  console.log(`[analyze-politics] ${kalshiMarkets?.length ?? 0} Kalshi markets for cross-reference`);
 
   // ── 3. Fetch current political news headlines ──────────────
   // Run in parallel with DB queries — used to ground Claude's reasoning
@@ -308,8 +376,28 @@ export const handler = schedule('*/30 * * * *', async () => {
     return bLiq - aLiq;
   });
 
+  // Pre-fetch Manifold + Metaculus for the top N candidates IN PARALLEL
+  // before starting the Claude loop. This prevents serial 6s-per-market latency
+  // that would cut us from 8 analyses to ~3 within the 22s time budget.
+  const TOP_N_PRE_FETCH = MAX_ANALYSES_PER_RUN * 2; // fetch for 16 candidates, analyze top 8
+  const externalRefCache = new Map<string, { manifold: CrossMarketRef | null; metaculus: CrossMarketRef | null }>();
+
+  const preFetchStart = Date.now();
+  await Promise.allSettled(
+    sortedCandidates.slice(0, TOP_N_PRE_FETCH).map(async (market) => {
+      const q = (market as { question: string }).question;
+      const id = (market as { id?: string }).id ?? '';
+      const [manifold, metaculus] = await Promise.all([
+        fetchManifoldRef(q),
+        fetchMetaculusRef(q),
+      ]);
+      externalRefCache.set(id, { manifold, metaculus });
+    })
+  );
+  console.log(`[analyze-politics] Pre-fetched external refs for ${externalRefCache.size} markets in ${Date.now() - preFetchStart}ms`);
+
   for (const market of sortedCandidates) {
-    if (Date.now() - startTime > 22000) break;
+    if (Date.now() - startTime > 25000) break;  // 25s budget (pre-fetch already spent ~6s)
     if (analyzed >= MAX_ANALYSES_PER_RUN) break;
 
     const mktId = (market as { id?: string }).id;
@@ -347,18 +435,51 @@ export const handler = schedule('*/30 * * * *', async () => {
       })
       .join('\n');
 
-    // Find matching PredictIt market for cross-reference
-    const piMatch = predictItMarkets.find(pi =>
-      titleOverlap(question, pi.name) > 0.4 || titleOverlap(question, pi.shortName) > 0.4
+    // ── Use pre-fetched Manifold + Metaculus references ──────────
+    const cachedRefs = externalRefCache.get(mktId ?? '');
+    const manifoldRef  = cachedRefs?.manifold  ?? null;
+    const metaculusRef = cachedRefs?.metaculus ?? null;
+
+    // Find matching Kalshi market by title similarity
+    const kalshiMatch = (kalshiMarkets ?? []).find(k =>
+      titleOverlap(question, k.title ?? '') > 0.35
     );
 
-    const piSection = piMatch
-      ? `PREDICTIT CROSS-REFERENCE:
-- Market: ${piMatch.name}
-${piMatch.contracts.filter(c => c.status === 'Open').slice(0, 4).map(c =>
-  `- ${c.name}: YES=$${c.bestBuyYesCost} NO=$${c.bestBuyNoCost} (last=$${c.lastTradePrice})`
-).join('\n')}`
-      : 'PREDICTIT: No matching market found';
+    // Build cross-market section for Claude prompt
+    const crossMarketLines: string[] = [];
+    let crossMarketCount = 0;
+
+    if (manifoldRef) {
+      const divergence = Math.abs(manifoldRef.probability - (outcomePrices[0] ?? 0.5));
+      crossMarketLines.push(
+        `MANIFOLD MARKETS: "${manifoldRef.question.substring(0, 80)}" → probability=${(manifoldRef.probability * 100).toFixed(1)}%` +
+        (divergence > 0.10 ? ` ⚠️ DIVERGES from Polymarket by ${(divergence * 100).toFixed(1)}pp` : '')
+      );
+      crossMarketCount++;
+    }
+    if (metaculusRef) {
+      const divergence = Math.abs(metaculusRef.probability - (outcomePrices[0] ?? 0.5));
+      crossMarketLines.push(
+        `METACULUS COMMUNITY: "${metaculusRef.question.substring(0, 80)}" → probability=${(metaculusRef.probability * 100).toFixed(1)}%` +
+        (divergence > 0.10 ? ` ⚠️ DIVERGES from Polymarket by ${(divergence * 100).toFixed(1)}pp` : '')
+      );
+      crossMarketCount++;
+    }
+    if (kalshiMatch) {
+      const kalshiPrice = kalshiMatch.last_price ?? kalshiMatch.yes_ask ?? null;
+      if (kalshiPrice != null) {
+        const divergence = Math.abs(kalshiPrice - (outcomePrices[0] ?? 0.5));
+        crossMarketLines.push(
+          `KALSHI: "${(kalshiMatch.title ?? '').substring(0, 80)}" → YES=$${kalshiPrice.toFixed(3)}` +
+          (divergence > 0.10 ? ` ⚠️ DIVERGES from Polymarket by ${(divergence * 100).toFixed(1)}pp` : '')
+        );
+        crossMarketCount++;
+      }
+    }
+
+    const crossMarketSection = crossMarketCount > 0
+      ? `CROSS-MARKET REFERENCE (${crossMarketCount} external markets):\n${crossMarketLines.join('\n')}\n\nINTERPRETATION: If 2+ external markets agree and diverge >10pp from Polymarket, this is a strong CROSS_MARKET edge. Polymarket alone can be driven by retail momentum; external forecasters often have better calibration.`
+      : 'CROSS-MARKET REFERENCE: No matching external markets found (use NEWS/CALIBRATION edge types only)';
 
     // Filter news headlines relevant to this market
     const relevantHeadlines = filterRelevantHeadlines(newsHeadlines, question, 5);
@@ -384,27 +505,29 @@ RESOLVES IN: ${Math.round(hoursRemaining)} hours (~${daysRemaining.toFixed(1)} d
 POLYMARKET OUTCOMES (price = implied probability):
 ${outcomesList}
 
-${piSection}
+${crossMarketSection}
 ${newsSection}
 ${longShotGuidance}
 
 EDGE CATEGORIES — which type of edge might this market have?
 A) NEWS EDGE: Recent news has changed the outcome probability but market hasn't repriced yet
-B) CROSS-MARKET EDGE: PredictIt or Kalshi prices this differently (structural arbitrage)
-C) CALIBRATION EDGE: Market is systematically mispriced vs base rates (e.g., overreacting to unlikely scenario)
+B) CROSS_MARKET EDGE: Manifold/Metaculus/Kalshi diverges >10pp from Polymarket (strongest signal — use HIGH confidence)
+C) CALIBRATION EDGE: Market systematically mispriced vs base rates (e.g., overreacting to unlikely scenario)
 D) DATA EDGE: Official data release (CPI, jobs, Fed rate) makes outcome probability much clearer
 
 TASK:
 1. Identify which edge type applies (A/B/C/D), or NONE if efficiently priced
 2. Estimate true probability using the strongest available signal:
-   - If news headlines show a directly relevant development, weight it heavily
-   - If PredictIt aligns with Polymarket → sharp money says price is right → lower edge
-   - Use base rates for recurring event types (elections, rate decisions, etc.)
-3. Calculate edge = true_prob - market_price
-4. Set direction = PASS unless edge >= 0.05 AND you have a specific signal (not just vague priors)
-5. Set auto_eligible = true only for: confidence HIGH/MEDIUM + edge >= 0.06 + specific evidence + daysRemaining <= 30
-6. For markets > 45 days out: apply 40% discount to any edge (long-term efficient market)
+   - CROSS_MARKET (B): If Manifold AND Metaculus both diverge >10pp → strongest signal, use HIGH confidence
+   - ONE EXTERNAL: If only one external market diverges → MEDIUM confidence, discount edge 30%
+   - NEWS (A): If headlines directly change probability, weight heavily for near-term markets
+   - BASE RATES (C/D): Use historical frequencies for recurring event types
+3. Calculate edge = true_prob - market_price (YES price = outcome_prices[0])
+4. Set direction = PASS unless edge >= 0.05 AND you have a specific signal (not vague priors)
+5. Set auto_eligible = true for: confidence HIGH/MEDIUM + edge >= 0.06 + specific evidence + daysRemaining <= 45
+6. For markets > 45 days out: apply 40% discount to any edge (efficient long-term market)
 7. NEVER bet on "will X win 2028 election" type questions — too far, too noisy
+8. CROSS_MARKET with 2+ external sources agreeing → auto_eligible = true regardless of news
 
 Respond ONLY in valid JSON:
 {
@@ -490,9 +613,14 @@ Respond ONLY in valid JSON:
         kelly_fraction: kellyFraction,
         rec_bet_usd: recBetUsd,
         reasoning: analysis.best_bet?.reasoning ?? null,
-        predictit_aligns: analysis.predictit_aligns ?? false,
+        predictit_aligns: analysis.predictit_aligns ?? (crossMarketCount >= 2) ?? false,
         auto_eligible: analysis.auto_eligible ?? false,
-        flags: analysis.flags ?? [],
+        flags: [
+          ...(analysis.flags ?? []),
+          ...(manifoldRef ? [`manifold_${(manifoldRef.probability * 100).toFixed(0)}pct`] : []),
+          ...(metaculusRef ? [`metaculus_${(metaculusRef.probability * 100).toFixed(0)}pct`] : []),
+          ...(crossMarketCount >= 2 ? ['cross_market_confirmed'] : []),
+        ],
       });
 
       analyzed++;
