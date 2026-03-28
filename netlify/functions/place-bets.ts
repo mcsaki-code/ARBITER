@@ -33,8 +33,9 @@ const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
 const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
 const MAX_ANALYSIS_AGE_CRYPTO   = 4 * 3600000;  // 4h
 const MAX_ANALYSIS_AGE_POLITICS = 6 * 3600000;  // 6h
-const MAX_ANALYSIS_AGE_MS        = 6 * 3600000;  // default fallback
-const MAX_ANALYSIS_AGE_SENTIMENT = 2 * 3600000;  // 2h — sentiment signals stale fast
+const MAX_ANALYSIS_AGE_MS          = 6 * 3600000;  // default fallback
+const MAX_ANALYSIS_AGE_SENTIMENT   = 2 * 3600000;  // 2h — sentiment signals stale fast
+const MAX_ANALYSIS_AGE_OPPORTUNITY = 8 * 3600000;  // 8h — general opportunity scanner
 
 /** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
 function normalizeEdge(raw: number | null): number {
@@ -157,9 +158,10 @@ export const handler = schedule('*/15 * * * *', async () => {
   const cryptoCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_CRYPTO).toISOString();
   const politicsCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_POLITICS).toISOString();
 
-  const sentimentCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_SENTIMENT).toISOString();
+  const sentimentCutoff    = new Date(Date.now() - MAX_ANALYSIS_AGE_SENTIMENT).toISOString();
+  const opportunityCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_OPPORTUNITY).toISOString();
 
-  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses, sentimentAnalyses] = await Promise.all([
+  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses, sentimentAnalyses, opportunityAnalyses] = await Promise.all([
     supabase.from('weather_analyses').select('*')
       .gte('analyzed_at', weatherCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER)
       .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
@@ -173,22 +175,28 @@ export const handler = schedule('*/15 * * * *', async () => {
       .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
       .order('edge', { ascending: false }).limit(20)
       .then(r => r.data ?? [], () => [] as unknown[]),
-    // Sentiment analyses — Trump tweet + options flow correlated signals
+    // Sentiment analyses — macro news + options flow correlated signals
     supabase.from('sentiment_analyses').select('*')
       .gte('analyzed_at', sentimentCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
       .order('edge', { ascending: false }).limit(10)
       .then(r => r.data ?? [], () => [] as unknown[]),
+    // General opportunity scanner — covers all uncategorized markets
+    supabase.from('opportunity_analyses').select('*')
+      .gte('analyzed_at', opportunityCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
+      .order('edge', { ascending: false }).limit(15)
+      .then(r => r.data ?? [], () => [] as unknown[]),
   ]);
 
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
-    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',   source_table: 'weather_analyses'   })),
-    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',    source_table: 'sports_analyses'    })),
-    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',    source_table: 'crypto_analyses'    })),
-    ...(politicsAnalyses  as AnalysisRow[]).map(a => ({ ...a, category: 'politics',  source_table: 'politics_analyses'  })),
-    ...(sentimentAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'sentiment', source_table: 'sentiment_analyses' })),
+    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',     source_table: 'weather_analyses'     })),
+    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',      source_table: 'sports_analyses'      })),
+    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',      source_table: 'crypto_analyses'      })),
+    ...(politicsAnalyses    as AnalysisRow[]).map(a => ({ ...a, category: 'politics',    source_table: 'politics_analyses'    })),
+    ...(sentimentAnalyses   as AnalysisRow[]).map(a => ({ ...a, category: 'sentiment',   source_table: 'sentiment_analyses'   })),
+    ...(opportunityAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'opportunity', source_table: 'opportunity_analyses' })),
   ];
 
-  console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses.length}, sports: ${sportsAnalyses.length}, crypto: ${cryptoAnalyses.length}, politics: ${(politicsAnalyses as unknown[]).length})`);
+  console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses.length}, sports: ${sportsAnalyses.length}, crypto: ${cryptoAnalyses.length}, politics: ${(politicsAnalyses as unknown[]).length}, opportunity: ${(opportunityAnalyses as unknown[]).length})`);
 
   // Sort all candidates by edge descending (best opportunities first)
   candidates.sort((a, b) => (b.edge || 0) - (a.edge || 0));
@@ -335,6 +343,10 @@ export const handler = schedule('*/15 * * * *', async () => {
     } else if (analysis.category === 'politics') {
       // Politics analyses use best_outcome_label + market_price (same structure as weather)
       outcomeLabel = analysis.best_outcome_label || null;
+      entryPrice = analysis.market_price || null;
+    } else if (analysis.category === 'opportunity') {
+      // Opportunity analyses: direction determines YES/NO label
+      outcomeLabel = analysis.direction === 'BUY_YES' ? 'YES' : 'NO';
       entryPrice = analysis.market_price || null;
     }
 

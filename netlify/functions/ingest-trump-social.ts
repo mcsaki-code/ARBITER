@@ -1,17 +1,18 @@
 // ============================================================
-// Netlify Scheduled Function: Trump / Executive Social Monitor
+// Netlify Scheduled Function: Macro News Signal Ingestor
 // Runs every 5 minutes
 //
-// STRATEGY: Trump Truth Social posts frequently precede Polymarket
-// movements on tariff, crypto, trade, and macro markets. We monitor
-// the RSS feed, score each post for market relevance, and store
-// high-impact posts so analyze-sentiment-edge can correlate them
-// with options flow anomalies.
+// STRATEGY: High-impact macro news (tariffs, Fed, crypto regs)
+// frequently precedes Polymarket movements. We monitor Google News
+// RSS feeds across 6 financial categories, score articles for
+// market relevance, and store them in trump_posts so
+// analyze-sentiment-edge can correlate with options flow anomalies.
 //
-// RSS sources (tried in order):
-//   1. truthsocial.com/@realDonaldTrump.rss — official (often 403s on Lambda)
-//   2. rsshub.app/mastodon/user — open RSS proxy for Mastodon-compatible feeds
-//   3. politwoops.eu mirror — archived political posts RSS
+// Primary:  Google News RSS search (free, no auth, not Lambda-blocked)
+// Fallback: Reuters RSS, AP News RSS
+// Legacy:   Truth Social (still attempted — works if not blocked)
+//
+// Table: trump_posts (unchanged schema — no downstream changes needed)
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -22,110 +23,141 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const FETCH_TIMEOUT_MS = 9000;
-const MIN_IMPACT_SCORE = 0.15;  // Only store posts with some market relevance
+const FETCH_TIMEOUT_MS  = 8000;
+const MIN_IMPACT_SCORE  = 0.15;
 
-// RSS sources tried in order — fallbacks in case truthsocial.com blocks Lambda IPs
-const RSS_SOURCES: { url: string; name: string }[] = [
+// ── Google News RSS category feeds ────────────────────────────────────
+// Each feed targets a specific financial category. Results are fresh
+// (updated every ~15 min) and reliably accessible from Lambda.
+const GNEWS_FEEDS: { name: string; url: string; category: string }[] = [
   {
-    name: 'truthsocial-direct',
-    url: 'https://truthsocial.com/@realDonaldTrump.rss',
+    name: 'gnews-tariff',
+    category: 'tariff',
+    url: 'https://news.google.com/rss/search?q=tariff+trade+war+import+tax&hl=en-US&gl=US&ceid=US:en',
   },
   {
-    name: 'truthsocial-www',
-    url: 'https://www.truthsocial.com/@realDonaldTrump.rss',
+    name: 'gnews-fed',
+    category: 'fed',
+    url: 'https://news.google.com/rss/search?q=federal+reserve+interest+rate+powell+inflation&hl=en-US&gl=US&ceid=US:en',
   },
   {
-    name: 'rsshub-truthsocial',
-    url: 'https://rsshub.app/truthsocial/user/realDonaldTrump',
+    name: 'gnews-crypto',
+    category: 'crypto',
+    url: 'https://news.google.com/rss/search?q=bitcoin+crypto+regulation+BTC+SEC&hl=en-US&gl=US&ceid=US:en',
   },
   {
-    name: 'rssbridge-truthsocial',
-    url: 'https://rss-bridge.org/bridge01/?action=display&bridge=TruthSocialBridge&username=realDonaldTrump&format=Atom',
+    name: 'gnews-stocks',
+    category: 'stocks',
+    url: 'https://news.google.com/rss/search?q=stock+market+recession+S%26P+500+Dow+Jones&hl=en-US&gl=US&ceid=US:en',
   },
+  {
+    name: 'gnews-energy',
+    category: 'energy',
+    url: 'https://news.google.com/rss/search?q=oil+price+OPEC+energy+gas+price&hl=en-US&gl=US&ceid=US:en',
+  },
+  {
+    name: 'gnews-geopolitics',
+    category: 'geo',
+    url: 'https://news.google.com/rss/search?q=ukraine+russia+sanctions+NATO+geopolitics&hl=en-US&gl=US&ceid=US:en',
+  },
+];
+
+// ── Fallback RSS feeds (not Lambda-blocked) ───────────────────────────
+const FALLBACK_FEEDS: { name: string; url: string }[] = [
+  {
+    name: 'reuters-markets',
+    url: 'https://feeds.reuters.com/reuters/businessNews',
+  },
+  {
+    name: 'ap-business',
+    url: 'https://rsshub.app/apnews/topics/business',
+  },
+];
+
+// ── Legacy Truth Social (still tried — works if not blocked) ─────────
+const TRUTH_SOCIAL_FEEDS: { name: string; url: string }[] = [
+  { name: 'truthsocial-direct', url: 'https://truthsocial.com/@realDonaldTrump.rss' },
+  { name: 'truthsocial-www',    url: 'https://www.truthsocial.com/@realDonaldTrump.rss' },
+  { name: 'rsshub-truthsocial', url: 'https://rsshub.app/truthsocial/user/realDonaldTrump' },
 ];
 
 // ── Keyword scoring matrix ─────────────────────────────────────────────
-// Each keyword contributes to a category and impact score (0-1).
-// Multiple high-impact keywords compound the score.
-const KEYWORD_MAP: {
-  pattern: RegExp;
-  category: string;
-  weight: number;
-}[] = [
+const KEYWORD_MAP: { pattern: RegExp; category: string; weight: number }[] = [
   // Tariff / trade (highest impact — directly moves prediction markets)
-  { pattern: /tariff/i,                  category: 'tariff',   weight: 0.9 },
-  { pattern: /trade (war|deal|deficit)/i,category: 'tariff',   weight: 0.85 },
-  { pattern: /china|beijing|xi jinping/i,category: 'tariff',   weight: 0.7 },
-  { pattern: /import.{0,15}(tax|duty)/i, category: 'tariff',   weight: 0.8 },
-  { pattern: /reciprocal/i,              category: 'tariff',   weight: 0.75 },
-  { pattern: /\bWTO\b/i,                 category: 'tariff',   weight: 0.6 },
+  { pattern: /tariff/i,                   category: 'tariff',  weight: 0.9  },
+  { pattern: /trade (war|deal|deficit)/i, category: 'tariff',  weight: 0.85 },
+  { pattern: /china|beijing|xi jinping/i, category: 'tariff',  weight: 0.7  },
+  { pattern: /import.{0,15}(tax|duty)/i,  category: 'tariff',  weight: 0.8  },
+  { pattern: /reciprocal/i,               category: 'tariff',  weight: 0.75 },
+  { pattern: /\bWTO\b/i,                  category: 'tariff',  weight: 0.6  },
   { pattern: /canada|mexico|\bEU\b|europe/i, category: 'tariff', weight: 0.5 },
 
   // Crypto (moves crypto markets directly)
-  { pattern: /bitcoin|\bbtc\b/i,         category: 'crypto',   weight: 0.85 },
-  { pattern: /crypto(currency)?/i,       category: 'crypto',   weight: 0.8  },
+  { pattern: /bitcoin|\bbtc\b/i,          category: 'crypto',  weight: 0.85 },
+  { pattern: /crypto(currency)?/i,        category: 'crypto',  weight: 0.8  },
   { pattern: /digital (dollar|currency|asset)/i, category: 'crypto', weight: 0.7 },
-  { pattern: /ethereum|solana|\bxrp\b|ripple/i, category: 'crypto', weight: 0.75 },
-  { pattern: /blockchain/i,              category: 'crypto',   weight: 0.5  },
-  { pattern: /\bdefi\b|web3/i,           category: 'crypto',   weight: 0.45 },
+  { pattern: /ethereum|solana|\bxrp\b|ripple/i,  category: 'crypto', weight: 0.75 },
+  { pattern: /blockchain/i,               category: 'crypto',  weight: 0.5  },
+  { pattern: /\bdefi\b|web3/i,            category: 'crypto',  weight: 0.45 },
+  { pattern: /\bSEC\b.{0,30}crypto/i,     category: 'crypto',  weight: 0.8  },
+  { pattern: /crypto.{0,30}regulat/i,     category: 'crypto',  weight: 0.75 },
 
   // Federal Reserve / interest rates
-  { pattern: /\bFed\b|federal reserve/i, category: 'fed',      weight: 0.8  },
-  { pattern: /interest rate/i,           category: 'fed',      weight: 0.75 },
+  { pattern: /\bFed\b|federal reserve/i,  category: 'fed',     weight: 0.8  },
+  { pattern: /interest rate/i,            category: 'fed',     weight: 0.75 },
   { pattern: /(cut|raise|lower).{0,10}rate/i, category: 'fed', weight: 0.8  },
-  { pattern: /\bJerome Powell\b/i,       category: 'fed',      weight: 0.85 },
-  { pattern: /inflation/i,               category: 'fed',      weight: 0.6  },
-  { pattern: /quantitative/i,            category: 'fed',      weight: 0.55 },
+  { pattern: /\bJerome Powell\b/i,        category: 'fed',     weight: 0.85 },
+  { pattern: /inflation/i,                category: 'fed',     weight: 0.6  },
+  { pattern: /quantitative/i,             category: 'fed',     weight: 0.55 },
+  { pattern: /\bFOMC\b|\bCPI\b|\bPCE\b/i, category: 'fed',    weight: 0.7  },
 
   // Stock market
   { pattern: /\bstock market\b|\bwall street\b/i, category: 'stocks', weight: 0.7 },
-  { pattern: /\bDow\b|S&P|nasdaq/i,      category: 'stocks',   weight: 0.65 },
-  { pattern: /market (crash|rally|boom)/i, category: 'stocks', weight: 0.8  },
-  { pattern: /recession/i,               category: 'stocks',   weight: 0.75 },
-  { pattern: /\bGDP\b/i,                 category: 'stocks',   weight: 0.6  },
+  { pattern: /\bDow\b|S&P|nasdaq/i,       category: 'stocks',  weight: 0.65 },
+  { pattern: /market (crash|rally|boom|rout)/i,   category: 'stocks', weight: 0.8 },
+  { pattern: /recession/i,                category: 'stocks',  weight: 0.75 },
+  { pattern: /\bGDP\b/i,                  category: 'stocks',  weight: 0.6  },
 
   // Energy / oil
-  { pattern: /\boil\b|\bgas\b|\bopec\b/i, category: 'energy', weight: 0.65 },
-  { pattern: /energy (price|cost|bill)/i, category: 'energy',  weight: 0.6  },
+  { pattern: /\boil\b|\bgas\b|\bopec\b/i, category: 'energy',  weight: 0.65 },
+  { pattern: /energy (price|cost|bill)/i,  category: 'energy',  weight: 0.6  },
 
   // Ukraine / geopolitics (affects markets)
-  { pattern: /ukraine|russia|putin/i,    category: 'geo',      weight: 0.55 },
-  { pattern: /\bNATO\b/i,                category: 'geo',      weight: 0.4  },
-  { pattern: /sanctions/i,               category: 'geo',      weight: 0.6  },
+  { pattern: /ukraine|russia|putin/i,      category: 'geo',    weight: 0.55 },
+  { pattern: /\bNATO\b/i,                  category: 'geo',    weight: 0.4  },
+  { pattern: /sanctions/i,                 category: 'geo',    weight: 0.6  },
+  { pattern: /ceasefire|peace.{0,15}deal/i, category: 'geo',   weight: 0.65 },
 
   // Election / political (prediction market specific)
-  { pattern: /election|ballot|vote/i,    category: 'politics', weight: 0.4  },
-  { pattern: /democrat|republican/i,     category: 'politics', weight: 0.3  },
-  { pattern: /congress|senate|house/i,   category: 'politics', weight: 0.35 },
+  { pattern: /election|ballot|vote/i,      category: 'politics', weight: 0.4  },
+  { pattern: /democrat|republican/i,       category: 'politics', weight: 0.3  },
+  { pattern: /congress|senate|house/i,     category: 'politics', weight: 0.35 },
 ];
 
-interface ParsedPost {
-  postId: string;
+interface ParsedArticle {
+  postId:   string;
   postedAt: Date;
-  content: string;
-  url: string;
+  content:  string;
+  url:      string;
 }
 
-// ── Simple XML/RSS+Atom parser (no external deps) ──────────────────────
-function parseRssItems(xml: string, sourceName: string): ParsedPost[] {
-  const items: ParsedPost[] = [];
-
-  // Try RSS <item> format first, then Atom <entry> format
-  const itemPattern = xml.includes('<entry') ? /<entry>([\s\S]*?)<\/entry>/gi : /<item>([\s\S]*?)<\/item>/gi;
+// ── Simple RSS/Atom parser (no external deps) ─────────────────────────
+function parseRssItems(xml: string, sourceName: string): ParsedArticle[] {
+  const items: ParsedArticle[] = [];
+  const itemPattern = xml.includes('<entry')
+    ? /<entry>([\s\S]*?)<\/entry>/gi
+    : /<item>([\s\S]*?)<\/item>/gi;
   let match;
 
   while ((match = itemPattern.exec(xml)) !== null) {
     const item = match[1];
 
-    // RSS fields
     const guid    = (item.match(/<(guid|id)[^>]*>([\s\S]*?)<\/(guid|id)>/i)?.[2] ?? '').trim();
     const pubDate = (
       item.match(/<(pubDate|published|updated)[^>]*>([\s\S]*?)<\/(pubDate|published|updated)>/i)?.[2]
       ?? ''
     ).trim();
 
-    // Content: try CDATA title+description, then plain text, then summary
     const titleMatch = item.match(/<title[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i)
                     ?? item.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const descMatch  = item.match(/<(description|summary|content)[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/(description|summary|content)>/i)
@@ -133,27 +165,25 @@ function parseRssItems(xml: string, sourceName: string): ParsedPost[] {
     const linkMatch  = item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)
                     ?? item.match(/<link[^>]*href="([^"]+)"/i);
 
-    const title   = (titleMatch?.[titleMatch.length - 1] ?? '').trim();
-    const desc    = (descMatch?.[descMatch.length - 1] ?? '').trim();
-    const link    = (linkMatch?.[1] ?? '').trim();
+    const title = (titleMatch?.[titleMatch.length - 1] ?? '').trim();
+    const desc  = (descMatch?.[descMatch.length - 1] ?? '').trim();
+    const link  = (linkMatch?.[1] ?? '').trim();
 
     if (!guid && !link) continue;
 
-    // Strip HTML tags from content
+    // Strip HTML tags, decode entities
     const rawContent = (title + ' ' + desc)
       .replace(/<[^>]+>/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/\s+/g, ' ')
-      .trim();
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/\s+/g, ' ').trim();
 
     const postedAt = new Date(pubDate);
     if (isNaN(postedAt.getTime())) continue;
 
-    const postId = (guid || link).replace(/^https?:\/\/[^/]+\//, '').substring(0, 100);
+    // Prefix postId with source to guarantee uniqueness across feeds
+    const raw = (guid || link).replace(/^https?:\/\/[^/]+\//, '').substring(0, 80);
+    const postId = `${sourceName.substring(0, 15)}_${raw}`;
 
     items.push({
       postId,
@@ -163,130 +193,77 @@ function parseRssItems(xml: string, sourceName: string): ParsedPost[] {
     });
   }
 
-  console.log(`[trump-social] Parsed ${items.length} items from ${sourceName}`);
+  console.log(`[macro-news] Parsed ${items.length} items from ${sourceName}`);
   return items;
 }
 
-function scorePost(content: string): {
-  score: number;
-  keywords: string[];
-  categories: string[];
+// ── Keyword scoring ────────────────────────────────────────────────────
+function scoreContent(content: string): {
+  score: number; keywords: string[]; categories: string[];
 } {
-  const matchedKeywords: string[] = [];
+  const matchedKeywords: string[]   = [];
   const matchedCategories: Set<string> = new Set();
   let rawScore = 0;
 
   for (const { pattern, category, weight } of KEYWORD_MAP) {
     if (pattern.test(content)) {
-      const keyword = pattern.source.replace(/[\\/^$.*+?()[\]{}|]/g, '').toLowerCase().substring(0, 20);
-      matchedKeywords.push(keyword);
+      matchedKeywords.push(pattern.source.replace(/[\\\/^$.*+?()\[\]{}|]/g, '').toLowerCase().substring(0, 20));
       matchedCategories.add(category);
       rawScore += weight;
     }
   }
 
-  // Compound: multiple high-impact signals in same post = more interesting
-  // Normalize: ~2 weight units = score 1.0
-  const score = Math.min(rawScore / 2.0, 1.0);
   return {
-    score,
-    keywords: [...new Set(matchedKeywords)],
+    score:      Math.min(rawScore / 2.0, 1.0),
+    keywords:   [...new Set(matchedKeywords)],
     categories: [...matchedCategories],
   };
 }
 
-export const handler = schedule('*/5 * * * *', async () => {
-  console.log('[trump-social] Checking Truth Social RSS');
-  const startTime = Date.now();
-
-  let rssText: string | null = null;
-  let successSource = '';
-
-  for (const source of RSS_SOURCES) {
-    try {
-      const res = await fetch(source.url, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache',
-        },
-      });
-
-      if (!res.ok) {
-        console.log(`[trump-social] ${source.name}: HTTP ${res.status}`);
-        continue;
-      }
-
-      const text = await res.text();
-      if (text.length < 200) {
-        console.log(`[trump-social] ${source.name}: response too short (${text.length} chars)`);
-        continue;
-      }
-
-      // Check it's actually XML
-      if (!text.includes('<') || (!text.includes('<item') && !text.includes('<entry'))) {
-        console.log(`[trump-social] ${source.name}: response doesn't look like RSS/Atom (length=${text.length})`);
-        continue;
-      }
-
-      rssText = text;
-      successSource = source.name;
-      console.log(`[trump-social] Fetched RSS from ${source.name} (${rssText.length} chars)`);
-      break;
-    } catch (e) {
-      console.log(`[trump-social] ${source.name}: fetch error — ${e}`);
+// ── Fetch one RSS feed ─────────────────────────────────────────────────
+async function fetchFeed(
+  url: string,
+  name: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    if (!res.ok) { console.log(`[macro-news] ${name}: HTTP ${res.status}`); return null; }
+    const text = await res.text();
+    if (text.length < 100 || (!text.includes('<item') && !text.includes('<entry'))) {
+      console.log(`[macro-news] ${name}: no RSS/Atom items (len=${text.length})`);
+      return null;
     }
+    return text;
+  } catch (e) {
+    console.log(`[macro-news] ${name}: fetch error — ${e}`);
+    return null;
   }
+}
 
-  if (!rssText) {
-    // All sources failed — log diagnostic but don't fail the function
-    console.log('[trump-social] All RSS sources failed — recording diagnostic ping');
-    await supabase.from('system_config').upsert([
-      { key: 'trump_social_last_failure', value: new Date().toISOString() },
-      { key: 'trump_social_status', value: 'all_sources_blocked' },
-    ], { onConflict: 'key' });
-    return { statusCode: 200 };
-  }
-
-  const posts = parseRssItems(rssText, successSource);
-
-  if (posts.length === 0) {
-    console.log('[trump-social] No posts parsed from RSS');
-    return { statusCode: 200 };
-  }
-
-  // Only process posts from last 24 hours
+// ── Upsert articles to trump_posts (shared sentiment table) ──────────
+async function upsertArticles(
+  articles: ParsedArticle[],
+): Promise<{ stored: number; highImpact: number }> {
+  let stored = 0, highImpact = 0;
   const cutoff24h = new Date(Date.now() - 24 * 3600000);
-  const recentPosts = posts.filter(p => p.postedAt > cutoff24h);
-  console.log(`[trump-social] ${recentPosts.length} posts from last 24h (of ${posts.length} total)`);
+  const recent = articles.filter(a => a.postedAt > cutoff24h);
 
-  // Update status
-  await supabase.from('system_config').upsert([
-    { key: 'trump_social_last_success', value: new Date().toISOString() },
-    { key: 'trump_social_status', value: `ok_${successSource}` },
-    { key: 'trump_social_source', value: successSource },
-  ], { onConflict: 'key' });
+  for (const article of recent) {
+    const { score, keywords, categories } = scoreContent(article.content);
+    if (score < MIN_IMPACT_SCORE && keywords.length === 0) continue;
 
-  let stored = 0;
-  let highImpact = 0;
-  let skippedLowScore = 0;
-
-  for (const post of recentPosts) {
-    const { score, keywords, categories } = scorePost(post.content);
-
-    if (score < MIN_IMPACT_SCORE && keywords.length === 0) {
-      skippedLowScore++;
-      continue;
-    }
-
-    // Upsert to avoid duplicates (post_id is UNIQUE)
     const { error } = await supabase.from('trump_posts').upsert({
-      post_id:             post.postId,
-      posted_at:           post.postedAt.toISOString(),
-      content:             post.content,
-      url:                 post.url,
+      post_id:             article.postId,
+      posted_at:           article.postedAt.toISOString(),
+      content:             article.content,
+      url:                 article.url,
       keywords,
       market_impact_score: score,
       categories,
@@ -296,13 +273,68 @@ export const handler = schedule('*/5 * * * *', async () => {
       stored++;
       if (score >= 0.4) highImpact++;
     } else {
-      console.error(`[trump-social] Insert error: ${error.message}`);
+      console.error(`[macro-news] Insert error: ${error.message}`);
+    }
+  }
+  return { stored, highImpact };
+}
+
+export const handler = schedule('*/5 * * * *', async () => {
+  console.log('[macro-news] Starting macro news ingest');
+  const startTime = Date.now();
+  let totalStored = 0, totalHighImpact = 0;
+
+  // ── 1. Google News RSS feeds (primary — parallel fetch) ──────────
+  const gnewsResults = await Promise.allSettled(
+    GNEWS_FEEDS.map(feed => fetchFeed(feed.url, feed.name))
+  );
+
+  let gnewsSucceeded = 0;
+  for (let i = 0; i < GNEWS_FEEDS.length; i++) {
+    const result = gnewsResults[i];
+    if (result.status !== 'fulfilled' || !result.value) continue;
+    gnewsSucceeded++;
+    const articles = parseRssItems(result.value, GNEWS_FEEDS[i].name);
+    const { stored, highImpact } = await upsertArticles(articles);
+    totalStored += stored; totalHighImpact += highImpact;
+  }
+  console.log(`[macro-news] Google News: ${gnewsSucceeded}/${GNEWS_FEEDS.length} feeds OK, stored ${totalStored}`);
+
+  // ── 2. Fallback feeds (if Google News got nothing useful) ────────
+  if (totalStored < 3) {
+    console.log('[macro-news] Low yield from Google News — trying fallback feeds');
+    for (const feed of FALLBACK_FEEDS) {
+      const xml = await fetchFeed(feed.url, feed.name);
+      if (!xml) continue;
+      const articles = parseRssItems(xml, feed.name);
+      const { stored, highImpact } = await upsertArticles(articles);
+      totalStored += stored; totalHighImpact += highImpact;
+      if (stored > 0) console.log(`[macro-news] ${feed.name}: stored ${stored}`);
     }
   }
 
-  console.log(`[trump-social] Done in ${Date.now() - startTime}ms. stored=${stored} high-impact=${highImpact} skipped-low-score=${skippedLowScore}`);
+  // ── 3. Truth Social (legacy — try quietly, don't fail if blocked) ─
+  for (const feed of TRUTH_SOCIAL_FEEDS) {
+    const xml = await fetchFeed(feed.url, feed.name);
+    if (!xml) continue;
+    const articles = parseRssItems(xml, feed.name);
+    const { stored, highImpact } = await upsertArticles(articles);
+    if (stored > 0) {
+      totalStored += stored; totalHighImpact += highImpact;
+      console.log(`[macro-news] Truth Social (${feed.name}): stored ${stored}`);
+    }
+    break; // Only need one Truth Social source
+  }
 
-  // Log any high-impact posts for visibility
+  // ── 4. Write status ───────────────────────────────────────────────
+  const status = totalStored > 0 ? `ok_gnews_${totalStored}` : 'no_new_articles';
+  await supabase.from('system_config').upsert([
+    { key: 'trump_social_last_success', value: new Date().toISOString() },
+    { key: 'trump_social_status',       value: status },
+    { key: 'trump_social_source',       value: gnewsSucceeded > 0 ? 'gnews' : 'fallback' },
+  ], { onConflict: 'key' });
+
+  // ── 5. Log high-impact articles ───────────────────────────────────
   const { data: recent } = await supabase
     .from('trump_posts')
     .select('posted_at, market_impact_score, categories, content')
@@ -313,9 +345,10 @@ export const handler = schedule('*/5 * * * *', async () => {
 
   if (recent?.length) {
     for (const p of recent) {
-      console.log(`[trump-social] 🔴 HIGH IMPACT (${p.market_impact_score.toFixed(2)}) [${(p.categories ?? []).join(',')}]: "${p.content.substring(0, 100)}..."`);
+      console.log(`[macro-news] 🔴 HIGH IMPACT (${p.market_impact_score.toFixed(2)}) [${(p.categories ?? []).join(',')}]: "${p.content.substring(0, 100)}..."`);
     }
   }
 
+  console.log(`[macro-news] Done in ${Date.now() - startTime}ms. stored=${totalStored} high-impact=${totalHighImpact}`);
   return { statusCode: 200 };
 });
