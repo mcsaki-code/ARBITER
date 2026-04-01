@@ -146,9 +146,16 @@ export default function PerformancePage() {
     <div className="max-w-7xl mx-auto px-4 md:px-6 py-6">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-xl font-semibold mb-1">Performance Analysis</h1>
+        <div className="flex items-center gap-3 mb-1">
+          <h1 className="text-xl font-semibold">Performance Analysis</h1>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-arbiter-amber/15 text-arbiter-amber border border-arbiter-amber/30 tracking-wider">
+            V2
+          </span>
+        </div>
         <p className="text-sm text-arbiter-text-2">
-          Live performance metrics, bet history, and strategy analysis
+          {config.v2_start_date
+            ? `Tracking since ${new Date(config.v2_start_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} — fresh start with updated risk rules`
+            : 'Live performance metrics, bet history, and strategy analysis'}
         </p>
       </div>
 

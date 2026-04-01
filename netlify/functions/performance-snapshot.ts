@@ -14,10 +14,25 @@ const supabase = createClient(
 export const handler = schedule('0 0 * * *', async () => {
   console.log('[performance-snapshot] Running nightly snapshot');
 
-  // Get ALL bets (paper and live) — no is_paper filter so we count everything
-  const { data: bets } = await supabase
+  // Fetch v2_start_date to only count bets under current risk rules
+  const { data: v2Row } = await supabase
+    .from('system_config')
+    .select('value')
+    .eq('key', 'v2_start_date')
+    .single();
+
+  const v2StartDate = v2Row?.value || null;
+
+  // Get bets — filtered to v2 period if set
+  let betsQuery = supabase
     .from('bets')
     .select('status, pnl, amount_usd, category, confidence, predicted_prob, brier_score, entry_price, direction, edge');
+
+  if (v2StartDate) {
+    betsQuery = betsQuery.gte('placed_at', v2StartDate);
+  }
+
+  const { data: bets } = await betsQuery;
 
   if (!bets) return { statusCode: 200 };
 
@@ -34,7 +49,7 @@ export const handler = schedule('0 0 * * *', async () => {
   const { data: configRows } = await supabase
     .from('system_config')
     .select('key, value')
-    .in('key', ['paper_bankroll', 'real_bankroll']);
+    .in('key', ['paper_bankroll', 'real_bankroll', 'v2_bankroll']);
 
   const config: Record<string, string> = {};
   configRows?.forEach((r: { key: string; value: string }) => {

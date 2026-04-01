@@ -270,7 +270,7 @@ export default function HomePage() {
   const losses = resolvedBets.filter((b) => b.status === 'LOST').length;
   const totalPnl = resolvedBets.reduce((sum, b) => sum + (b.pnl || 0), 0);
   const winRate = resolvedBets.length > 0 ? wins / resolvedBets.length : 0;
-  const bankroll = parseFloat(config.paper_bankroll || '500');
+  const bankroll = parseFloat(config.paper_bankroll || '5000');
   const openExposure = openBets.reduce((sum, b) => sum + b.amount_usd, 0);
   const edgeSignals = signals.filter((s) => s.signal_type === 'edge');
   const allOpportunities = [...edgeSignals, ...arbs];

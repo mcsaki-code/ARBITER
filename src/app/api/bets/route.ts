@@ -7,12 +7,28 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   const supabase = getSupabaseAdmin();
 
+  // Fetch v2_start_date to filter out legacy bets
+  const { data: v2Config } = await supabase
+    .from('system_config')
+    .select('value')
+    .eq('key', 'v2_start_date')
+    .single();
+
+  const v2StartDate = v2Config?.value || null;
+
   // Fetch bets joined with markets for the question text
-  const { data: bets, error } = await supabase
+  let betsQuery = supabase
     .from('bets')
     .select('*, markets(question, outcomes, outcome_prices, resolution_date, is_resolved)')
     .order('placed_at', { ascending: false })
     .limit(100);
+
+  // Only show bets placed after v2 start date (filters out legacy pre-rule-change bets)
+  if (v2StartDate) {
+    betsQuery = betsQuery.gte('placed_at', v2StartDate);
+  }
+
+  const { data: bets, error } = await betsQuery;
 
   if (error) {
     return NextResponse.json({ error: 'Failed to fetch bets' }, { status: 500 });
@@ -97,6 +113,8 @@ export async function GET() {
       'paper_win_rate',
       'paper_trade_start_date',
       'paper_days_required',
+      'v2_start_date',
+      'v2_bankroll',
     ]);
 
   const configMap: Record<string, string> = {};
@@ -104,12 +122,18 @@ export async function GET() {
     configMap[r.key] = r.value;
   });
 
-  // Get snapshots for chart
-  const { data: snapshots } = await supabase
+  // Get snapshots for chart (only v2 period)
+  let snapshotsQuery = supabase
     .from('performance_snapshots')
     .select('*')
     .order('snapshot_date', { ascending: true })
     .limit(90);
+
+  if (v2StartDate) {
+    snapshotsQuery = snapshotsQuery.gte('snapshot_date', v2StartDate.split('T')[0]);
+  }
+
+  const { data: snapshots } = await snapshotsQuery;
 
   return NextResponse.json({
     bets: enrichedBets,
