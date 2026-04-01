@@ -10,6 +10,7 @@ import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
 import { notifyBetPlaced } from '../../src/lib/notify';
+import { shouldTrade } from '../../src/lib/circuit-breaker';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -98,6 +99,17 @@ export const handler = schedule('*/15 * * * *', async () => {
   const bankroll = parseFloat(config.paper_bankroll || '5000');
   const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
   const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
+
+  // ── Circuit Breaker Check ─────────────────────────────────
+  // Halt trading on consecutive losses, daily/weekly drawdown, or peak drawdown.
+  // This prevents catastrophic loss spirals — one trader lost $2.36M in 8 days
+  // from lack of automated shutdowns.
+  const cbState = await shouldTrade(supabase);
+  if (!cbState.canTrade) {
+    console.log(`[place-bets] CIRCUIT BREAKER ACTIVE: ${cbState.reason}`);
+    return { statusCode: 200, body: JSON.stringify({ circuitBreaker: cbState.reason }) };
+  }
+  console.log(`[place-bets] Circuit breaker OK — streak: ${cbState.consecutiveLosses} losses, daily P&L: $${cbState.dailyPnl.toFixed(2)}, drawdown: ${(cbState.currentDrawdown * 100).toFixed(1)}%`);
 
   // Check today's existing bets to enforce daily limits
   const todayStart = new Date();

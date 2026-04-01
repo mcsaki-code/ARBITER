@@ -24,6 +24,8 @@ const CYCLE_INTERVAL_MS = 5 * 60 * 1000;  // 5 min between full cycles
 const WEATHER_CHECK_MS = 2 * 60 * 1000;   // 2 min between weather checks
 const RESOLVE_INTERVAL_MS = 15 * 60 * 1000; // 15 min between resolve runs
 const MARKET_REFRESH_MS = 10 * 60 * 1000;   // 10 min between market refreshes
+const NEWS_SCAN_MS = 5 * 60 * 1000;         // 5 min between news scans
+const KALSHI_SCAN_MS = 15 * 60 * 1000;      // 15 min between Kalshi arb scans
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MIN_EDGE = 0.05;
@@ -403,15 +405,209 @@ async function resolveBets(): Promise<void> {
   log('resolve', `Resolved ${resolved}/${openBets.length} bets`);
 }
 
+// ── News feed scanner (inline) ────────────────────────────
+async function scanNewsFeed(): Promise<number> {
+  log('news', 'Scanning news feeds...');
+
+  const finnhubKey = process.env.FINNHUB_API_KEY;
+  if (!finnhubKey) {
+    log('news', 'FINNHUB_API_KEY not set — skipping (CryptoCompare still active)');
+  }
+
+  let articles = 0;
+  let signals = 0;
+
+  try {
+    // Fetch crypto news (always available, no key needed)
+    const cryptoRes = await fetch(
+      'https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest',
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (cryptoRes.ok) {
+      const cryptoData = await cryptoRes.json();
+      const cryptoArticles = (cryptoData?.Data || []).slice(0, 10);
+      articles += cryptoArticles.length;
+
+      // Match to active crypto markets
+      const { data: cryptoMarkets } = await supabase
+        .from('markets')
+        .select('id, question, outcome_prices')
+        .eq('is_active', true)
+        .eq('category', 'crypto');
+
+      for (const article of cryptoArticles) {
+        const headline = (article.title || '').toLowerCase();
+        const published = new Date((article.published_on || 0) * 1000);
+
+        // Only process recent news (last 2h)
+        if (Date.now() - published.getTime() > 2 * 3600000) continue;
+
+        // Check if already processed
+        const { data: existing } = await supabase
+          .from('news_signals')
+          .select('id')
+          .eq('news_id', `crypto-${article.id}`)
+          .limit(1);
+        if (existing?.length) continue;
+
+        // Match: does headline mention any crypto market keywords?
+        const matched = (cryptoMarkets || []).filter(m => {
+          const q = m.question.toLowerCase();
+          return (headline.includes('bitcoin') && q.includes('bitcoin')) ||
+                 (headline.includes('ethereum') && q.includes('ethereum')) ||
+                 (headline.includes('btc') && q.includes('btc')) ||
+                 (headline.includes('eth') && q.includes('eth'));
+        });
+
+        if (matched.length === 0) continue;
+
+        // Score with Claude
+        const scorePrompt = `Breaking crypto news: "${article.title}"
+Summary: ${(article.body || '').substring(0, 200)}
+Matched markets: ${matched.map(m => m.question).join('; ')}
+Is this HIGH, MEDIUM, or LOW impact on these markets? Direction: BUY_YES, BUY_NO, or NEUTRAL?
+Respond JSON: {"impact":"HIGH"|"MEDIUM"|"LOW","direction":"BUY_YES"|"BUY_NO"|"NEUTRAL","confidence":0.0-1.0,"reasoning":"brief"}`;
+
+        const claudeResult = await callClaude(scorePrompt);
+        const parsed = parseJson(claudeResult);
+
+        if (parsed && (parsed.impact === 'HIGH' || parsed.impact === 'MEDIUM')) {
+          await supabase.from('news_signals').insert({
+            news_id: `crypto-${article.id}`,
+            headline: (article.title || '').substring(0, 500),
+            source: article.source || 'CryptoCompare',
+            category: 'crypto',
+            impact: parsed.impact,
+            direction: parsed.direction || 'NEUTRAL',
+            confidence: parsed.confidence || 0.5,
+            reasoning: parsed.reasoning || '',
+            matched_market_ids: matched.map(m => m.id),
+            published_at: published.toISOString(),
+          }).then(() => {}, () => {});
+
+          signals++;
+          log('news', `${parsed.impact} signal: "${(article.title || '').substring(0, 50)}..." → ${parsed.direction}`);
+        }
+      }
+    }
+
+    // Fetch Finnhub news if key available
+    if (finnhubKey) {
+      const finnRes = await fetch(
+        `https://finnhub.io/api/v1/news?category=general&token=${finnhubKey}`,
+        { signal: AbortSignal.timeout(8000) }
+      );
+      if (finnRes.ok) {
+        const finnData = await finnRes.json();
+        articles += (finnData || []).length;
+        // Similar matching logic — store for analysis
+        // (Full matching is in src/lib/news-feed.ts for Netlify functions)
+      }
+    }
+  } catch (err) {
+    log('news', `Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  log('news', `Scanned ${articles} articles, generated ${signals} signals`);
+  return signals;
+}
+
+// ── Kalshi cross-platform price scanner ───────────────────
+async function scanKalshiArbs(): Promise<number> {
+  log('kalshi', 'Scanning Kalshi for cross-platform pricing gaps...');
+
+  try {
+    // Fetch Kalshi weather markets
+    const kalshiRes = await fetch(
+      'https://api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXHIGH&status=open&limit=100',
+      { signal: AbortSignal.timeout(10000), headers: { 'Accept': 'application/json' } }
+    );
+
+    if (!kalshiRes.ok) {
+      log('kalshi', `API returned ${kalshiRes.status} — Kalshi may require auth`);
+      return 0;
+    }
+
+    const kalshiData = await kalshiRes.json();
+    const kalshiMarkets = (kalshiData?.markets || []) as Array<{
+      ticker: string; title: string; yes_bid: number; yes_ask: number;
+      last_price: number; volume: number; status: string;
+    }>;
+
+    if (kalshiMarkets.length === 0) {
+      log('kalshi', 'No open Kalshi weather markets');
+      return 0;
+    }
+
+    // Get our Polymarket weather markets
+    const { data: polyMarkets } = await supabase
+      .from('markets')
+      .select('id, question, outcome_prices, category')
+      .eq('is_active', true)
+      .eq('category', 'weather');
+
+    if (!polyMarkets?.length) return 0;
+
+    let gaps = 0;
+
+    for (const km of kalshiMarkets) {
+      const kalshiTitle = (km.title || '').toLowerCase();
+      const kalshiMid = ((km.yes_bid || 0) + (km.yes_ask || 0)) / 200 || (km.last_price || 0) / 100;
+
+      for (const pm of polyMarkets) {
+        const polyQ = pm.question.toLowerCase();
+
+        // Quick match: same city + similar temperature
+        const cityMatch = ['los angeles', 'new york', 'chicago', 'london', 'miami', 'seattle', 'houston', 'phoenix', 'denver', 'atlanta']
+          .some(city => kalshiTitle.includes(city) && polyQ.includes(city));
+
+        if (!cityMatch) continue;
+
+        const polyYes = pm.outcome_prices?.[0] || 0.5;
+        const priceGap = Math.abs(polyYes - kalshiMid);
+
+        if (priceGap > 0.05) {
+          gaps++;
+          const direction = polyYes < kalshiMid ? 'POLY_CHEAP' : 'KALSHI_CHEAP';
+          log('kalshi', `GAP: ${direction} | Poly=${(polyYes * 100).toFixed(1)}¢ vs Kalshi=${(kalshiMid * 100).toFixed(1)}¢ | Gap=${(priceGap * 100).toFixed(1)}¢ | "${pm.question.substring(0, 50)}"`);
+
+          // Store arb opportunity
+          await supabase.from('arb_opportunities').insert({
+            platform_a: 'polymarket',
+            platform_b: 'kalshi',
+            market_a_id: pm.id,
+            market_b_ref: km.ticker,
+            price_a: polyYes,
+            price_b: kalshiMid,
+            spread: priceGap,
+            category: 'weather',
+            detected_at: new Date().toISOString(),
+          }).then(() => {}, () => {});
+        }
+      }
+    }
+
+    log('kalshi', `Found ${gaps} cross-platform pricing gaps`);
+    return gaps;
+  } catch (err) {
+    log('kalshi', `Error: ${err instanceof Error ? err.message : String(err)}`);
+    return 0;
+  }
+}
+
 // ── Main loop ──────────────────────────────────────────────
 async function main() {
   log('main', '=== ARBITER Railway Worker Starting ===');
   log('main', `Multi-model: ${process.env.OPENAI_API_KEY ? 'ENABLED (Claude + GPT-4o)' : 'Claude only'}`);
   log('main', `Supabase: ${process.env.NEXT_PUBLIC_SUPABASE_URL ? 'connected' : 'MISSING'}`);
+  log('main', `News feed: ${process.env.FINNHUB_API_KEY ? 'Finnhub + CryptoCompare' : 'CryptoCompare only'}`);
+  log('main', `Kalshi: ENABLED (cross-platform arb scanning)`);
 
   let lastMarketRefresh = 0;
   let lastWeatherScan = 0;
   let lastResolve = 0;
+  let lastNewsScan = 0;
+  let lastKalshiScan = 0;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -429,6 +625,20 @@ async function main() {
         const found = await scanWeatherTailBets();
         if (found > 0) log('main', `Found ${found} weather tail bet opportunities`);
         lastWeatherScan = now;
+      }
+
+      // News feed scan every 5 min (speed trading signals)
+      if (now - lastNewsScan > NEWS_SCAN_MS) {
+        const signals = await scanNewsFeed();
+        if (signals > 0) log('main', `Generated ${signals} news-based trading signals`);
+        lastNewsScan = now;
+      }
+
+      // Kalshi cross-platform scan every 15 min
+      if (now - lastKalshiScan > KALSHI_SCAN_MS) {
+        const gaps = await scanKalshiArbs();
+        if (gaps > 0) log('main', `Found ${gaps} Kalshi cross-platform arbs`);
+        lastKalshiScan = now;
       }
 
       // Resolve every 15 min

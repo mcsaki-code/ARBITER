@@ -5,6 +5,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { recordOutcome } from '../../src/lib/circuit-breaker';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -259,8 +260,15 @@ export const handler = schedule('0 * * * *', async () => {
 
     resolved++;
     totalPnl += pnl;
+
+    // Record outcome for circuit breaker (tracks consecutive losses)
+    const cbResult = await recordOutcome(supabase, betWon);
+    const cbNote = cbResult.paused
+      ? ` | CIRCUIT BREAKER: ${cbResult.consecutiveLosses} consecutive losses → paused ${cbResult.pauseDuration}`
+      : '';
+
     console.log(
-      `[resolve-bets] ${betWon ? 'WON' : 'LOST'} bet ${bet.id.substring(0, 8)}: $${pnl.toFixed(2)}`
+      `[resolve-bets] ${betWon ? 'WON' : 'LOST'} bet ${bet.id.substring(0, 8)}: $${pnl.toFixed(2)}${cbNote}`
     );
   }
 
