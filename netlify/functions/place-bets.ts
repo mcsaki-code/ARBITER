@@ -89,6 +89,7 @@ export const handler = schedule('*/15 * * * *', async () => {
       'live_kill_switch',
       'live_max_single_bet_usd',
       'live_max_daily_usd',
+      'v2_start_date',
     ]);
 
   const config: Record<string, string> = {};
@@ -111,14 +112,19 @@ export const handler = schedule('*/15 * * * *', async () => {
   }
   console.log(`[place-bets] Circuit breaker OK — streak: ${cbState.consecutiveLosses} losses, daily P&L: $${cbState.dailyPnl.toFixed(2)}, drawdown: ${(cbState.currentDrawdown * 100).toFixed(1)}%`);
 
-  // Check today's existing bets to enforce daily limits
+  // Check today's existing bets to enforce daily limits.
+  // Use v2_start_date as a floor so pre-v2 bets (placed before the reset)
+  // don't count against today's limits. On subsequent days todayStart > v2Start
+  // and the floor has no effect.
   const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const v2Start = config.v2_start_date ? new Date(config.v2_start_date) : null;
+  const effectiveTodayStart = v2Start && v2Start > todayStart ? v2Start : todayStart;
 
   const { data: todaysBets } = await supabase
     .from('bets')
     .select('id, amount_usd, market_id, category')
-    .gte('placed_at', todayStart.toISOString());
+    .gte('placed_at', effectiveTodayStart.toISOString());
 
   const todayBetCount = todaysBets?.length || 0;
   const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;

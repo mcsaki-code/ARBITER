@@ -22,7 +22,7 @@ export const maxDuration = 60; // Allow up to 60s for analysis + placement
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_SINGLE_BET_PCT = 0.03;     // 3% max per bet (down from 5%)
 const MAX_DAILY_EXPOSURE_PCT = 0.20;  // 20% max daily (down from 25%)
-const MAX_DAILY_BETS = 15;
+const MAX_DAILY_BETS = 20;            // synced with place-bets.ts (was 15)
 const MIN_EDGE = 0.05;               // 5% minimum edge (up from 2% — the #1 fix)
 const MIN_EDGE_WEATHER = 0.08;       // 8% for weather (matching successful bots)
 const MIN_LIQUIDITY = 5000;          // Skip thin markets
@@ -59,7 +59,7 @@ export async function GET() {
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value')
-      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd']);
+      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v2_start_date']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -68,14 +68,17 @@ export async function GET() {
     const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
     const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
-    // Today's existing bets
+    // Today's existing bets — use v2_start_date as floor so pre-v2 bets
+    // don't count against today's limits (only matters on day 1 of v2)
     const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const v2Start = config.v2_start_date ? new Date(config.v2_start_date) : null;
+    const effectiveTodayStart = v2Start && v2Start > todayStart ? v2Start : todayStart;
 
     const { data: todaysBets } = await supabase
       .from('bets')
       .select('id, amount_usd, market_id')
-      .gte('placed_at', todayStart.toISOString());
+      .gte('placed_at', effectiveTodayStart.toISOString());
 
     const todayBetCount = todaysBets?.length || 0;
     const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
@@ -278,8 +281,10 @@ export async function GET() {
         continue;
       }
 
-      if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
-        log.push(`Skip ${analysis.market_id.substring(0, 8)} — liquidity $${currentMarket.liquidity_usd} < $${MIN_LIQUIDITY}`);
+      // Weather temperature markets have $400-$2K liquidity — allow a lower floor
+      const liquidityFloor = analysis.category === 'weather' ? 400 : MIN_LIQUIDITY;
+      if (currentMarket.liquidity_usd < liquidityFloor) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — liquidity $${currentMarket.liquidity_usd} < $${liquidityFloor}`);
         continue;
       }
 
@@ -329,9 +334,16 @@ export async function GET() {
         entryPrice = 1 - entryPrice;
       }
 
-      // Validate entry price (0.1% to 99.9% — allow extreme-priced markets)
-      if (!entryPrice || entryPrice <= 0.001 || entryPrice >= 0.999) {
-        log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice} out of range`);
+      // Validate entry price: floor at 2%, cap at 40% (matching place-bets.ts risk rules)
+      // ALL historical bets with entry > 40% have lost; low-entry tail bets are where the edge is
+      const MIN_ENTRY_PRICE = 0.02;
+      const MAX_ENTRY_PRICE = 0.40;
+      if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
+        continue;
+      }
+      if (entryPrice > MAX_ENTRY_PRICE) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap`);
         continue;
       }
 
