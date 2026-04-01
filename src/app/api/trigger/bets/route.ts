@@ -63,7 +63,7 @@ export async function GET() {
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
 
-    const bankroll = parseFloat(config.paper_bankroll || '500');
+    const bankroll = parseFloat(config.paper_bankroll || '5000');
     const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
     const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
