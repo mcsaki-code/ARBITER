@@ -302,7 +302,7 @@ export const handler = schedule('*/30 * * * *', async () => {
           volume_usd: parseFloat(m.volume) || 0,
           liquidity_usd: parseFloat(m.liquidity) || 0,
           resolution_date: m.endDate,
-          is_active: m.active && !m.closed,
+          is_active: m.active && !m.closed && new Date(m.endDate) > new Date(),
           updated_at: new Date().toISOString(),
         },
         { onConflict: 'condition_id' }
@@ -315,12 +315,21 @@ export const handler = schedule('*/30 * * * *', async () => {
     }
   }
 
-  // Mark old markets as inactive (not updated in last 2 hours)
+  // Mark expired markets as inactive based on resolution_date (primary check)
+  await supabase
+    .from('markets')
+    .update({ is_active: false })
+    .lt('resolution_date', new Date().toISOString())
+    .eq('is_active', true);
+
+  // Also mark old weather markets as inactive if not refreshed in 2 hours
+  // (catches markets removed from Polymarket's API before resolution)
   await supabase
     .from('markets')
     .update({ is_active: false })
     .lt('updated_at', new Date(Date.now() - 7200000).toISOString())
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .not('city_id', 'is', null);  // weather markets only
 
   console.log(`[refresh-markets] Done. Upserted ${upserted} weather markets`);
   return { statusCode: 200 };

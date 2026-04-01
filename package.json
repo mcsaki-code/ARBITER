@@ -6,17 +6,23 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:validation": "node --experimental-strip-types --test tests/validation.test.ts",
+    "test:kelly": "node --experimental-strip-types --test tests/kelly-math.test.ts",
+    "test:schema": "node --experimental-strip-types --test tests/schema-integrity.test.ts",
+    "test:lifecycle": "node --experimental-strip-types --test tests/bet-lifecycle.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@netlify/plugin-nextjs": "^5.0.0",
     "@polymarket/clob-client": "^5.8.0",
     "@supabase/supabase-js": "^2.39.0",
-    "viem": "^2.21.0",
     "next": "14.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "recharts": "^2.10.0"
+    "recharts": "^2.10.0",
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "@netlify/functions": "^2.4.0",
@@ -28,6 +34,6 @@
     "eslint-config-next": "14.1.0",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.4.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.9.3"
   }
 }

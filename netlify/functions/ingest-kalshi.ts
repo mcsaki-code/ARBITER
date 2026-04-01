@@ -15,21 +15,28 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-const KALSHI_BASE = 'https://api.elections.kalshi.com/trade-api/v2';
+// Kalshi v2 trading API — public endpoints don't require auth for market data.
+// Primary base — production API
+const KALSHI_BASE = 'https://trading-api.kalshi.com/trade-api/v2';
 
-async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
+async function fetchJson(url: string, timeoutMs = 12000): Promise<unknown> {
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { Accept: 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'ARBITER/1.0 (+https://arbit3r.netlify.app)',
+      },
     });
     if (!res.ok) {
-      console.warn(`[ingest-kalshi] HTTP ${res.status}: ${url.split('?')[0]}`);
+      const body = await res.text().catch(() => '');
+      console.warn(`[ingest-kalshi] HTTP ${res.status}: ${url.split('?')[0]} — ${body.slice(0, 200)}`);
       return null;
     }
     return await res.json();
   } catch (err) {
-    console.warn(`[ingest-kalshi] Error: ${err instanceof Error ? err.message : err}`);
+    console.warn(`[ingest-kalshi] Fetch error: ${err instanceof Error ? err.message : err}`);
     return null;
   }
 }
@@ -39,15 +46,16 @@ interface KalshiMarket {
   event_ticker: string;
   title: string;
   subtitle?: string;
-  yes_ask: number;   // cents (0-99)
-  no_ask: number;
-  yes_bid: number;
-  no_bid: number;
-  last_price: number;
-  volume: number;
-  open_interest: number;
+  // Kalshi v2 API returns dollar-denominated string fields
+  yes_ask_dollars: string;
+  no_ask_dollars: string;
+  yes_bid_dollars: string;
+  no_bid_dollars: string;
+  last_price_dollars: string;
+  volume_fp: string | number;
+  open_interest_fp: string | number;
   close_time: string;
-  status: string;
+  status: string;  // 'active' in response body, but query uses 'open'
   category?: string;
 }
 
@@ -72,17 +80,22 @@ export const handler = schedule('*/15 * * * *', async () => {
   console.log('[ingest-kalshi] Starting Kalshi market ingestion');
   const startTime = Date.now();
 
-  // Fetch markets in parallel across key categories
-  const categories = ['Politics', 'Sports', 'Financials', 'Economics', 'Climate'];
+  // Kalshi API category names are case-sensitive lowercase strings.
+  // Fetch in parallel across key categories and also with no filter as fallback.
+  const categories = ['politics', 'sports', 'financials', 'economics', 'climate', 'health', 'crypto'];
 
   const fetches = categories.map(cat =>
     fetchJson(`${KALSHI_BASE}/markets?status=open&limit=200&category=${cat}`)
-      .then(r => ((r as KalshiResponse | null)?.markets ?? []))
+      .then(r => {
+        const markets = (r as KalshiResponse | null)?.markets ?? [];
+        if (markets.length > 0) console.log(`[ingest-kalshi] ${cat}: ${markets.length} markets`);
+        return markets;
+      })
   );
 
-  // Also fetch with no category filter for uncategorized markets
+  // No-filter fetch — catches anything not in the above categories
   fetches.push(
-    fetchJson(`${KALSHI_BASE}/markets?status=open&limit=200`)
+    fetchJson(`${KALSHI_BASE}/markets?status=open&limit=500`)
       .then(r => ((r as KalshiResponse | null)?.markets ?? []))
   );
 
@@ -107,22 +120,36 @@ export const handler = schedule('*/15 * * * *', async () => {
   }
 
   // Upsert to kalshi_markets table
+  // NOTE: Kalshi v2 API response uses 'active' for open markets (not 'open')
+  // Prices are in decimal strings e.g. "0.5000" (already 0-1 range)
+  //
+  // FILTER: Exclude auto-generated parlay/combo markets (KXMVE* prefix).
+  // These are multi-leg parlays with no equivalent Polymarket question —
+  // they only clutter the DB and make cross-arb matching impossible.
+  // Variants: KXMVECROSSCATEGORY, KXMVESPORTSMULTIGAMEEXTENDED, etc.
+  // Use startsWith('KXMVE') to catch ALL variants — includes() on 'MVEC' missed KXMVES*.
+  // Single-event markets have tickers like KXBTCD-*, KXINXD-*, KXFEDRATE-*, etc.
   const rows = allMarkets
-    .filter(m => m.status === 'open' && m.yes_ask > 0 && m.no_ask > 0)
+    .filter(m => (m.status === 'active' || m.status === 'open') &&
+      parseFloat(m.yes_ask_dollars ?? '0') > 0 &&
+      parseFloat(m.no_ask_dollars ?? '0') > 0 &&
+      !m.ticker.startsWith('KXMVE') &&       // exclude ALL multi-variable event combos (KXMVEC, KXMVES, etc.)
+      !m.ticker.includes('MULTIGAME')        // exclude multi-game extended parlays
+    )
     .map(m => ({
       ticker: m.ticker,
       event_ticker: m.event_ticker,
       title: m.title,
       subtitle: m.subtitle ?? null,
-      yes_ask: m.yes_ask / 100,   // convert cents to decimal
-      no_ask: m.no_ask / 100,
-      yes_bid: m.yes_bid / 100,
-      no_bid: m.no_bid / 100,
-      last_price: m.last_price / 100,
-      volume: m.volume,
-      open_interest: m.open_interest,
+      yes_ask: parseFloat(m.yes_ask_dollars ?? '0'),   // already decimal 0-1
+      no_ask: parseFloat(m.no_ask_dollars ?? '0'),
+      yes_bid: parseFloat(m.yes_bid_dollars ?? '0'),
+      no_bid: parseFloat(m.no_bid_dollars ?? '0'),
+      last_price: parseFloat(m.last_price_dollars ?? '0'),
+      volume: parseFloat(String(m.volume_fp ?? '0')),
+      open_interest: parseFloat(String(m.open_interest_fp ?? '0')),
       close_time: m.close_time,
-      status: m.status,
+      status: 'open',   // normalize to 'open' in our DB
       category: m.category ?? 'other',
       updated_at: new Date().toISOString(),
     }));

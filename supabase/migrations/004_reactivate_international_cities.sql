@@ -6,8 +6,9 @@
 -- ============================================================
 
 -- Step 1: Re-activate existing international cities
+-- NOTE: Tel Aviv intentionally excluded — replaced by Oklahoma City in migration 002
 UPDATE weather_cities SET is_active = TRUE
-WHERE name IN ('London', 'Tel Aviv', 'Tokyo', 'Paris');
+WHERE name IN ('London', 'Tokyo', 'Paris');
 
 -- Step 2: Add Toronto and Seoul (idempotent)
 INSERT INTO weather_cities (name, lat, lon, timezone, is_active) VALUES

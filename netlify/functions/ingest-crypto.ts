@@ -54,23 +54,32 @@ function calculateBB(closes: number[], period = 20) {
   return { upper: mid + 2 * std, lower: mid - 2 * std, mid };
 }
 
-// ── CoinCap API ────────────────────────────────────────────
-// Free, no key, no US restrictions. Returns clean JSON.
+// ── CoinGecko API ──────────────────────────────────────────
+// Free simple price API — no key, no US restrictions.
+// Returns USD price, 24h change, 24h volume in one call.
 
-interface CoinCapAsset {
-  data: {
-    priceUsd: string;
-    changePercent24Hr: string;
-    volumeUsd24Hr: string;
-    vwap24Hr: string;
+interface CoinGeckoSimplePrice {
+  [coinId: string]: {
+    usd: number;
+    usd_24h_change: number;
+    usd_24h_vol: number;
   };
 }
 
-const COINCAP_IDS: Record<string, string> = {
+const COINGECKO_IDS: Record<string, string> = {
   BTC: 'bitcoin',
   ETH: 'ethereum',
   SOL: 'solana',
 };
+
+// Fetch all three prices in a single API call
+async function fetchCoinGeckoPrices(): Promise<CoinGeckoSimplePrice | null> {
+  const ids = Object.values(COINGECKO_IDS).join(',');
+  const data = await fetchJson(
+    `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`
+  );
+  return (data as CoinGeckoSimplePrice | null);
+}
 
 // ── CryptoCompare API ──────────────────────────────────────
 // Free public endpoints, no key required for basic use.
@@ -131,22 +140,20 @@ export const handler = schedule('*/10 * * * *', async () => {
   // ── 1. Fetch spot prices and candles in parallel ───────────
   const ASSETS = ['BTC', 'ETH', 'SOL'];
 
-  const [btcAsset, ethAsset, solAsset, btcCandles, ethCandles, solCandles, btcMinutes] =
+  const [geckoData, btcCandles, ethCandles, solCandles, btcMinutes] =
     await Promise.all([
-      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.BTC}`) as Promise<CoinCapAsset | null>,
-      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.ETH}`) as Promise<CoinCapAsset | null>,
-      fetchJson(`https://api.coincap.io/v2/assets/${COINCAP_IDS.SOL}`) as Promise<CoinCapAsset | null>,
+      fetchCoinGeckoPrices(),
       fetchHourlyCandles('BTC', 50),
       fetchHourlyCandles('ETH', 50),
       fetchHourlyCandles('SOL', 50),
       fetchMinuteCandles('BTC', 15),
     ]);
 
-  const assetData: Record<string, CoinCapAsset | null> = {
-    BTC: btcAsset,
-    ETH: ethAsset,
-    SOL: solAsset,
-  };
+  if (!geckoData) {
+    console.error('[ingest-crypto] CoinGecko API returned null — connectivity issue');
+    return { statusCode: 200 };
+  }
+
   const candleData: Record<string, CCCandle[]> = {
     BTC: btcCandles,
     ETH: ethCandles,
@@ -175,16 +182,17 @@ export const handler = schedule('*/10 * * * *', async () => {
   }[] = [];
 
   for (const asset of ASSETS) {
-    const assetInfo = assetData[asset];
-    if (!assetInfo?.data) {
-      console.log(`[ingest-crypto] No CoinCap data for ${asset}, skipping`);
+    const geckoId = COINGECKO_IDS[asset];
+    const assetInfo = geckoData[geckoId];
+    if (!assetInfo?.usd) {
+      console.log(`[ingest-crypto] No CoinGecko data for ${asset}, skipping`);
       continue;
     }
 
-    const spotPrice = parseFloat(assetInfo.data.priceUsd);
-    const change24h = parseFloat(assetInfo.data.changePercent24Hr);
-    const volume24h = parseFloat(assetInfo.data.volumeUsd24Hr);
-    const price24hAgo = spotPrice / (1 + change24h / 100);
+    const spotPrice = assetInfo.usd;
+    const change24h = assetInfo.usd_24h_change ?? 0;
+    const volume24h = assetInfo.usd_24h_vol ?? null;
+    const price24hAgo = change24h !== 0 ? spotPrice / (1 + change24h / 100) : spotPrice;
 
     const candles = candleData[asset];
     let rsi14: number | null = null;

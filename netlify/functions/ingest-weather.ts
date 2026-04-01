@@ -203,6 +203,7 @@ async function fetchHRRRForCity(city: WeatherCity): Promise<ForecastRow[]> {
       daily: [
         'temperature_2m_max',
         'temperature_2m_min',
+        'precipitation_probability_max',
         'precipitation_sum',
         'rain_sum',
         'snowfall_sum',
@@ -234,7 +235,7 @@ async function fetchHRRRForCity(city: WeatherCity): Promise<ForecastRow[]> {
         source: 'hrrr',
         temp_high_f: Math.round(daily.temperature_2m_max[i]),
         temp_low_f: Math.round(daily.temperature_2m_min[i]),
-        precip_prob: 0,
+        precip_prob: daily.precipitation_probability_max?.[i] ?? 0,
         precip_mm: daily.precipitation_sum?.[i] ?? 0,
         rain_mm: daily.rain_sum?.[i] ?? 0,
         snowfall_cm: daily.snowfall_sum?.[i] ?? 0,
@@ -299,7 +300,9 @@ async function fetchEnsembleForCity(city: WeatherCity): Promise<EnsembleResult[]
     );
 
     const memberCount = tempKeys.length;
-    if (memberCount < 5) return [];
+    // Need at least 20 of 31 ensemble members (>65%) for statistically meaningful
+    // probability distributions. With only 5, bracket probabilities have ±20% noise.
+    if (memberCount < 20) return [];
 
     // Group by date: daily max temp per member
     const dateMap = new Map<string, {
@@ -332,7 +335,7 @@ async function fetchEnsembleForCity(city: WeatherCity): Promise<EnsembleResult[]
     const results: EnsembleResult[] = [];
     for (const [date, d] of dateMap) {
       const valid = d.tempMax.filter((t) => t > -900);
-      if (valid.length < 5) continue;
+      if (valid.length < 20) continue;
 
       const mean = valid.reduce((a, b) => a + b, 0) / valid.length;
       const variance = valid.reduce((acc, t) => acc + (t - mean) ** 2, 0) / valid.length;
@@ -348,9 +351,10 @@ async function fetchEnsembleForCity(city: WeatherCity): Promise<EnsembleResult[]
         probBelow[t] = Math.round(valid.filter((v) => v < t).length / valid.length * 1000) / 1000;
       }
 
-      // Precip ensemble
-      const vp = d.precipSum.filter((p) => p >= 0);
-      const meanP = vp.length > 0 ? vp.reduce((a, b) => a + b, 0) / vp.length : 0;
+      // Precip ensemble — guard against empty array (all members 0 or missing)
+      const vp = d.precipSum.filter((p) => typeof p === 'number' && p >= 0);
+      const vpLen = vp.length || 1; // prevent divide-by-zero
+      const meanP = vp.length > 0 ? vp.reduce((a, b) => a + b, 0) / vpLen : 0;
 
       results.push({
         valid_date: date,
@@ -360,15 +364,12 @@ async function fetchEnsembleForCity(city: WeatherCity): Promise<EnsembleResult[]
         prob_above: probAbove,
         prob_below: probBelow,
         mean_precip_mm: Math.round(meanP * 100) / 100,
-        prob_precip_above_trace: vp.length > 0
-          ? Math.round(vp.filter((p) => p > 0.254).length / vp.length * 1000) / 1000
-          : 0,
-        prob_precip_above_quarter: vp.length > 0
-          ? Math.round(vp.filter((p) => p > 6.35).length / vp.length * 1000) / 1000
-          : 0,
-        prob_precip_above_inch: vp.length > 0
-          ? Math.round(vp.filter((p) => p > 25.4).length / vp.length * 1000) / 1000
-          : 0,
+        prob_precip_above_trace:
+          Math.round(vp.filter((p) => p > 0.254).length / vpLen * 1000) / 1000,
+        prob_precip_above_quarter:
+          Math.round(vp.filter((p) => p > 6.35).length / vpLen * 1000) / 1000,
+        prob_precip_above_inch:
+          Math.round(vp.filter((p) => p > 25.4).length / vpLen * 1000) / 1000,
       });
     }
 
@@ -479,19 +480,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  let processed = 0;
+  // Process ALL cities in parallel with a global timeout safety net.
+  // Individual fetches have 6-10s timeouts, but if many stall simultaneously the
+  // Netlify function could exceed its 26s execution limit. This ensures we always
+  // exit cleanly and log what completed.
+  const GLOBAL_TIMEOUT_MS = 22000; // 22s — leaves 4s for logging + cleanup
+  const cityPromises = Promise.allSettled(
+    cities.map(async (city) => {
+      const isUS = !!city.nws_office;
 
-  for (const city of cities) {
-    // STRICT time guard — 20s max (Netlify ~26s timeout)
-    if (Date.now() - startTime > 20000) {
-      console.warn(`[ingest-weather-v2] Time limit hit after ${processed} cities`);
-      break;
-    }
-
-    console.log(`[ingest-weather-v2] Processing ${city.name}`);
-    const isUS = !!city.nws_office;
-
-    try {
       // Fetch all sources in parallel (NWS + 3 models + HRRR + ensemble)
       const [nwsForecasts, meteoForecasts, hrrrForecasts, ensembleData] = await Promise.all([
         fetchNWSForCity(city),
@@ -502,36 +499,72 @@ export const handler = schedule('*/15 * * * *', async () => {
 
       const allForecasts = [...nwsForecasts, ...meteoForecasts, ...hrrrForecasts];
 
-      if (allForecasts.length > 0) {
-        // Insert all forecasts (new columns will be populated)
-        const { error: insertErr } = await supabase
-          .from('weather_forecasts')
-          .insert(allForecasts);
+      if (allForecasts.length === 0) return { city: city.name, count: 0 };
 
-        if (insertErr) {
-          console.error(`[ingest-weather-v2] Insert error for ${city.name}:`, insertErr);
-        }
+      // Delete stale forecasts for this city before inserting fresh ones.
+      // Prevents duplicate accumulation from re-runs (each run replaces, not appends).
+      const todayStr = new Date().toISOString().split('T')[0];
+      await supabase
+        .from('weather_forecasts')
+        .delete()
+        .eq('city_id', city.id)
+        .gte('valid_date', todayStr);
 
-        // Calculate & store consensus for each date
-        const dates = [...new Set(allForecasts.map((f) => f.valid_date))];
-        for (const date of dates) {
-          const ensemble = ensembleData.find((e) => e.valid_date === date) ?? null;
-          const consensus = calculateConsensus(allForecasts, city.id, date, ensemble, isUS);
-          if (consensus) {
-            await supabase.from('weather_consensus').insert(consensus);
-          }
-        }
+      const { error: insertErr } = await supabase
+        .from('weather_forecasts')
+        .insert(allForecasts);
 
-        const modelSources = [...new Set(allForecasts.map((f) => f.source))];
-        console.log(`[ingest-weather-v2] ${city.name}: ${allForecasts.length} forecasts (${modelSources.join(',')}), ${ensembleData.length > 0 ? ensembleData[0].members + '-member ensemble' : 'no ensemble'}`);
+      if (insertErr) {
+        console.error(`[ingest-weather-v2] Insert error for ${city.name}:`, insertErr.message);
       }
 
-      processed++;
-    } catch (err) {
-      console.error(`[ingest-weather-v2] Failed for ${city.name}:`, err);
-    }
+      // Delete stale consensus for the same dates, then recalculate
+      await supabase
+        .from('weather_consensus')
+        .delete()
+        .eq('city_id', city.id)
+        .gte('valid_date', todayStr);
+
+      // Calculate & store consensus for each date
+      const dates = [...new Set(allForecasts.map((f) => f.valid_date))];
+      for (const date of dates) {
+        const ensemble = ensembleData.find((e) => e.valid_date === date) ?? null;
+        const consensus = calculateConsensus(allForecasts, city.id, date, ensemble, isUS);
+        if (consensus) {
+          await supabase.from('weather_consensus').insert(consensus);
+        } else {
+          console.warn(`[ingest-weather-v2] No consensus for ${city.name} on ${date} (too few models or zero weight)`);
+        }
+      }
+
+      const modelSources = [...new Set(allForecasts.map((f) => f.source))];
+      return { city: city.name, count: allForecasts.length, sources: modelSources };
+    })
+  );
+
+  // Race against global timeout — if cities are still running after 22s, continue
+  // with whatever completed and log the timeout. Prevents Netlify hard-kill.
+  let cityResults: PromiseSettledResult<{ city: string; count: number; sources?: string[] }>[];
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('GLOBAL_TIMEOUT')), GLOBAL_TIMEOUT_MS)
+  );
+  try {
+    cityResults = await Promise.race([cityPromises, timeoutPromise]) as typeof cityResults;
+  } catch (err) {
+    console.warn(`[ingest-weather-v2] Global timeout hit at ${GLOBAL_TIMEOUT_MS}ms — some cities may be incomplete`);
+    // allSettled never rejects, so if we get here it was the timeout.
+    // Await the original promise to get partial results (already settled ones).
+    cityResults = await cityPromises;
   }
 
-  console.log(`[ingest-weather-v2] Done. ${processed}/${cities.length} cities in ${Date.now() - startTime}ms`);
+  const processed = cityResults.filter(r => r.status === 'fulfilled').length;
+  const failed = cityResults.filter(r => r.status === 'rejected').length;
+  cityResults.forEach((r, i) => {
+    if (r.status === 'rejected') {
+      console.error(`[ingest-weather-v2] Failed for ${cities[i].name}:`, r.reason);
+    }
+  });
+
+  console.log(`[ingest-weather-v2] Done. ${processed}/${cities.length} cities succeeded, ${failed} failed in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });

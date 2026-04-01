@@ -90,6 +90,8 @@ export const handler = schedule('*/15 * * * *', async () => {
       .select('ticker, title, yes_ask, no_ask, yes_bid, no_bid, volume, close_time, category')
       .eq('status', 'open')
       .gt('volume', 100)
+      .not('ticker', 'like', 'KXMVE%')        // exclude ALL KXMVE* parlay combos (KXMVEC, KXMVES, etc.)
+      .not('ticker', 'like', '%MULTIGAME%')   // exclude multi-game extended
       .limit(500),
   ]);
 

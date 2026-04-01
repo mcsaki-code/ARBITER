@@ -193,9 +193,15 @@ export const handler = schedule('0 * * * *', async () => {
     const DIRECTION_BASED_CATEGORIES = ['crypto_momentum', 'whale_copy', 'politics', 'arb'];
     const isDirectionBased = DIRECTION_BASED_CATEGORIES.includes(bet.category ?? '');
 
+    // Guard: if outcome_label is null/undefined AND direction is not simple, skip with warning
+    if (!bet.outcome_label && !isDirectionBased && bet.direction !== 'BUY_YES') {
+      console.log(`[resolve-bets] SKIP ${bet.id.substring(0, 8)}: outcome_label null/undefined but category requires it (direction=${bet.direction})`);
+      continue;
+    }
+
     let betWon: boolean;
     if (isDirectionBased) {
-      // Use direction as ground truth
+      // Use direction as ground truth — case-insensitive comparison
       betWon = bet.direction === 'BUY_YES' ? (winner === 'yes') : (winner === 'no');
     } else if (bet.direction === 'BUY_NO') {
       // For BUY_NO: we win when our named outcome does NOT win
@@ -203,13 +209,38 @@ export const handler = schedule('0 * * * *', async () => {
       const isLiteralNo = betLabel === 'no';
       betWon = isLiteralNo ? winner === 'no' : winner !== betLabel;
     } else {
-      // For BUY_YES: we win if our outcome matches the winner
+      // For BUY_YES: we win if our outcome matches the winner (case-insensitive)
       betWon = betLabel === winner;
     }
     // entryPrice already computed above for safety check
     const pnl = betWon
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;
+
+    // Brier score = (predicted_prob - actual_outcome)^2
+    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality over time.
+    const predictedProb = bet.direction === 'BUY_YES'
+      ? (bet.entry_price ?? 0.5)
+      : 1 - (bet.entry_price ?? 0.5);
+    const actualOutcome = betWon ? 1.0 : 0.0;
+    const brierScore = Math.pow(predictedProb - actualOutcome, 2);
+
+    // Pull edge and confidence from the associated analysis if available
+    let analysisEdge: number | null = null;
+    let analysisConfidence: string | null = null;
+
+    if (bet.analysis_id) {
+      // Try to get from weather_analyses (most common)
+      const { data: weatherAnalysis } = await supabase
+        .from('weather_analyses')
+        .select('edge, confidence')
+        .eq('id', bet.analysis_id)
+        .single();
+      if (weatherAnalysis) {
+        analysisEdge = weatherAnalysis.edge;
+        analysisConfidence = weatherAnalysis.confidence;
+      }
+    }
 
     await supabase
       .from('bets')
@@ -219,6 +250,10 @@ export const handler = schedule('0 * * * *', async () => {
         pnl,
         resolved_at: new Date().toISOString(),
         notes: `Auto-resolved: winner "${winningOutcome}" | ${betWon ? 'WIN' : 'LOSS'}`,
+        predicted_prob: predictedProb,
+        brier_score: Math.round(brierScore * 10000) / 10000,
+        edge: analysisEdge,
+        confidence: analysisConfidence,
       })
       .eq('id', bet.id);
 
@@ -237,7 +272,7 @@ export const handler = schedule('0 * * * *', async () => {
       .eq('key', 'paper_bankroll')
       .single();
 
-    const bankroll = parseFloat(bankrollRow?.value || '500');
+    const bankroll = parseFloat(bankrollRow?.value || '5000');
     const newBankroll = Math.round((bankroll + totalPnl) * 100) / 100;
 
     await supabase

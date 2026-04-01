@@ -25,25 +25,44 @@ export const handler = schedule('*/20 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get ALL active weather markets with city data
+  // Get active weather markets with city data — only those with 2+ hours remaining
+  // (prevents already-resolved today's markets from blocking future market analysis)
+  const minResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
   const { data: markets } = await supabase
     .from('markets')
     .select('*, weather_cities(*)')
     .eq('is_active', true)
-    .not('city_id', 'is', null);
+    .not('city_id', 'is', null)
+    .neq('category', 'temperature')   // temperature markets handled by Phase 2 statistical analysis
+    .gt('resolution_date', minResolutionDate);
 
   if (!markets || markets.length === 0) {
     console.log('[analyze-weather-v2] No active markets with city matches');
     return { statusCode: 200 };
   }
 
-  // Sort markets: prioritize higher liquidity and those not recently analyzed
-  const sortedMarkets = [...markets].sort((a, b) => (b.liquidity_usd || 0) - (a.liquidity_usd || 0));
+  // Pre-load recently analyzed market IDs to avoid re-analyzing same markets every run.
+  // Use 6h window so we cycle through ALL active markets rather than repeatedly hitting
+  // the same top-liquidity one (e.g., Tokyo). This lets the queue rotate properly.
+  const weatherRecentCutoff = new Date(Date.now() - 6 * 3600000).toISOString();
+  const { data: recentWeatherRows } = await supabase
+    .from('weather_analyses')
+    .select('market_id')
+    .gte('analyzed_at', weatherRecentCutoff);
+  const recentWeatherIds = new Set((recentWeatherRows ?? []).map((r: { market_id: string }) => r.market_id?.toString()));
+
+  // Sort: unanalyzed first, then by liquidity DESC
+  const sortedMarkets = [...markets].sort((a, b) => {
+    const aRecent = recentWeatherIds.has(a.id?.toString() ?? '') ? 1 : 0;
+    const bRecent = recentWeatherIds.has(b.id?.toString() ?? '') ? 1 : 0;
+    if (aRecent !== bRecent) return aRecent - bRecent;
+    return (b.liquidity_usd || 0) - (a.liquidity_usd || 0);
+  });
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 5)) {
-    // STRICT time guard: 22s (slightly more room for 5 markets)
-    if (Date.now() - startTime > 22000) break;
+  for (const market of sortedMarkets.slice(0, 8)) {
+    // Time guard: 26s — Phase 2 statistical analysis now runs in its own function
+    if (Date.now() - startTime > 26000) break;
 
     const city = market.weather_cities;
     if (!city) continue;
@@ -141,7 +160,32 @@ export const handler = schedule('*/20 * * * *', async () => {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (!jsonMatch) continue;
 
-      const analysis = JSON.parse(jsonMatch[0]);
+      let analysis: any;
+      try {
+        analysis = JSON.parse(jsonMatch[0]);
+      } catch {
+        console.error(`[analyze-weather] JSON parse error for market ${market.id}`);
+        continue;
+      }
+
+      // Runtime validation — reject malformed Claude responses
+      const { validateWeatherAnalysis } = await import('../../src/lib/validate-analysis');
+      const validation = validateWeatherAnalysis(analysis);
+      if (!validation.valid) {
+        console.error(`[analyze-weather] VALIDATION FAILED for ${market.id}:`, validation.errors.join('; '));
+        continue;
+      }
+      // Overwrite raw values with validated + normalized ones
+      if (analysis.best_bet && typeof analysis.best_bet === 'object') {
+        const bb = analysis.best_bet as Record<string, unknown>;
+        bb.model_prob = validation.data.best_bet.model_prob;
+        bb.market_price = validation.data.best_bet.market_price;
+        bb.edge = validation.data.best_bet.edge;
+        bb.direction = validation.data.best_bet.direction;
+        bb.confidence = validation.data.best_bet.confidence;
+      }
+      analysis.auto_eligible = validation.data.auto_eligible;
+      analysis.flags = validation.data.flags;
 
       // Calculate Kelly bet size
       let kellyFraction = 0;
@@ -156,31 +200,33 @@ export const handler = schedule('*/20 * * * *', async () => {
         configRows?.forEach((r: { key: string; value: string }) => {
           config[r.key] = r.value;
         });
-        const bankroll = parseFloat(config.paper_bankroll || '500');
+        const bankroll = parseFloat(config.paper_bankroll || '5000');
 
-        const p = analysis.best_bet.true_prob;
-        const c = analysis.best_bet.market_price;
-        const edge = p - c;
-        if (edge >= 0.05) { // 5% minimum edge (up from 2%)
-          const b = (1 - c) / c;
-          const fullKelly = (p * b - (1 - p)) / b;
-          if (fullKelly > 0) {
-            const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[
-              analysis.best_bet.confidence as string
-            ] || 0.2;
+        // Look up latest calibration for this category + confidence tier
+        const { data: calData } = await supabase
+          .from('calibration_snapshots')
+          .select('total_bets, predicted_win_rate, actual_win_rate')
+          .eq('category', 'weather')
+          .eq('confidence_tier', analysis.best_bet.confidence || 'LOW')
+          .order('snapshot_date', { ascending: false })
+          .limit(1)
+          .single();
 
-            // Lower Kelly fraction for precip/snowfall (less predictable)
-            const typeMult = marketType === 'precipitation' ? 0.6
-              : marketType === 'snowfall' ? 0.5
-              : 1.0;
-
-            // 1/8th Kelly (professional standard) instead of 1/4
-            const adjusted = fullKelly * 0.125 * (confMult as number) * typeMult;
-            const liquidityCap = (market.liquidity_usd * 0.02) / bankroll;
-            kellyFraction = Math.min(adjusted, 0.03, liquidityCap);
-            recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
-          }
-        }
+        const { computeKelly, getCalibrationDiscount } = await import('../../src/lib/trading-math');
+        const calDiscount = getCalibrationDiscount(calData);
+        const kelly = computeKelly({
+          trueProb: analysis.best_bet.true_prob,
+          marketPrice: analysis.best_bet.market_price,
+          direction: analysis.best_bet.direction,
+          confidence: analysis.best_bet.confidence,
+          category: 'weather',
+          weatherSubtype: marketType,
+          liquidityUsd: market.liquidity_usd,
+          bankroll,
+          calibrationDiscount: calDiscount,
+        });
+        kellyFraction = kelly.kellyFraction;
+        recBetUsd = kelly.recBetUsd;
       }
 
       // Normalize edge value — Claude sometimes returns edge as percentage (e.g. 84.9)
@@ -191,6 +237,15 @@ export const handler = schedule('*/20 * * * *', async () => {
         // If > 100, likely edge * 1000; if 1-100, likely percentage
         rawEdge = rawEdge > 100 ? rawEdge / 1000 : rawEdge / 100;
       }
+      // For BUY_NO bets, edge = true_prob - market_price (negative when YES is overpriced).
+      // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
+      if (rawEdge !== null && analysis.best_bet?.direction === 'BUY_NO' && rawEdge < 0) {
+        rawEdge = -rawEdge;
+      }
+      // Sanity cap: weather edges above 35% are almost certainly Claude overconfidence.
+      // Real forecasting edges are rarely > 20-25%. Cap prevents DB avg inflation
+      // and ensures calibration metrics stay meaningful.
+      if (rawEdge !== null && rawEdge > 0.35) rawEdge = 0.35;
 
       // Also normalize market_price and true_prob if they look like percentages
       let mktPrice = analysis.best_bet?.market_price ?? null;
@@ -233,7 +288,8 @@ export const handler = schedule('*/20 * * * *', async () => {
     }
   }
 
-  console.log(`[analyze-weather-v2] Done. Processed ${processed} markets in ${Date.now() - startTime}ms`);
+  console.log(`[analyze-weather-v2] Processed ${processed} weather markets in ${Date.now() - startTime}ms`);
+  // Phase 2 (temperature_statistical) now runs in analyze-temperature.ts (its own scheduled function)
   return { statusCode: 200 };
 });
 
