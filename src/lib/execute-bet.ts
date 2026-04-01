@@ -37,6 +37,8 @@ interface BetInsertParams {
   entry_price: number;
   amount_usd: number;
   condition_id?: string; // Polymarket condition_id (from markets table)
+  edge?: number | null; // Edge from analysis
+  confidence?: string | null; // Confidence level from analysis
 }
 
 interface ExecutionResult {
@@ -102,9 +104,41 @@ export async function executeBet(
   }
 
   // ========================================
-  // Paper bet path (unchanged behavior)
+  // Paper bet path
   // ========================================
   if (!goLive) {
+    // ── Race condition guard ──────────────────────────────────────────
+    // Two concurrent place-bets invocations can both pass the in-memory
+    // "existingMarketIds" check and try to insert a bet on the same market.
+    // This DB-level check catches the second one. We limit to 1 open bet
+    // per market (MAX_BETS_PER_MARKET=1).
+    const { count: existingOpen } = await supabase
+      .from('bets')
+      .select('*', { count: 'exact', head: true })
+      .eq('market_id', params.market_id)
+      .eq('status', 'OPEN');
+
+    if (existingOpen && existingOpen > 0) {
+      addLog(`[paper] Duplicate guard: already have ${existingOpen} open bet(s) on ${params.market_id.substring(0, 8)}`);
+      return { success: false, is_paper: true, error: 'Duplicate open bet on this market' };
+    }
+
+    // Look up condition_id so resolve-bets can match this bet to a Polymarket market.
+    // CRITICAL: without condition_id, bets can never be resolved and P&L tracking breaks.
+    let conditionId = params.condition_id;
+    if (!conditionId) {
+      const { data: mktRow, error: mktError } = await supabase
+        .from('markets')
+        .select('condition_id')
+        .eq('id', params.market_id)
+        .single();
+      if (mktError) {
+        // Log the error explicitly but continue — repair-bets.ts will backfill
+        addLog(`[paper] WARNING: condition_id lookup failed: ${mktError.message} — proceeding without it`);
+      }
+      conditionId = mktRow?.condition_id ?? undefined;
+    }
+
     const { data, error } = await supabase.from('bets').insert({
       market_id: params.market_id,
       analysis_id: params.analysis_id,
@@ -116,6 +150,9 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      condition_id: conditionId ?? null,
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
     }).select('id').single();
 
@@ -159,6 +196,8 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
       notes: 'Live order attempted but condition_id missing — placed as paper',
     }).select('id').single();
@@ -202,6 +241,8 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order failed: ${msg}`,
     }).select('id').single();
@@ -223,6 +264,8 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order rejected: ${orderResult.errorMessage}`,
     }).select('id').single();
@@ -244,6 +287,8 @@ export async function executeBet(
     is_paper: false,
     status: 'OPEN',
     condition_id: conditionId,
+    edge: params.edge ?? null,
+    confidence: params.confidence ?? null,
     clob_order_id: orderResult.orderId || null,
     order_status: orderResult.status || 'PENDING',
     placed_at: new Date().toISOString(),
