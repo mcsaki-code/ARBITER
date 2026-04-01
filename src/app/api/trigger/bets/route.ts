@@ -309,8 +309,9 @@ export async function GET() {
         entryPrice = entryPrice / 100;
       }
 
-      // For BUY_NO bets, entry price is what we pay for the NO side = 1 - YES price
-      if (analysis.direction === 'BUY_NO' && entryPrice !== null && entryPrice < 0.5) {
+      // For BUY_NO bets, market_price = YES price. Our cost = 1 - YES price.
+      // Always flip for BUY_NO (old code only flipped when < 0.5, blocking most NO bets)
+      if (analysis.direction === 'BUY_NO' && entryPrice !== null) {
         entryPrice = 1 - entryPrice;
       }
 

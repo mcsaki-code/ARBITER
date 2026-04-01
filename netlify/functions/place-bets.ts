@@ -366,9 +366,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     }
 
     // Entry price is already normalized above via normalizeProb
-    // For BUY_NO bets, entry price is what we pay for the NO side = 1 - YES price
-    // If the YES price is near 0, the NO price is near 1 (cheap to bet against)
-    if (analysis.direction === 'BUY_NO' && entryPrice !== null && entryPrice < 0.5) {
+    // For BUY_NO bets, market_price stores the YES price of the target bracket.
+    // Our actual cost = 1 - YES_price (the NO share price).
+    // Example: YES = 66¢ → NO costs 34¢. YES = 38¢ → NO costs 62¢.
+    //
+    // BUG FIX: The old code only flipped when market_price < 0.5, which meant
+    // when YES > 50¢ (our most common BUY_NO case — betting against likely outcomes),
+    // it used the raw YES price as entry, which then got blocked by the 40¢ cap.
+    // This was blocking ALL high-value BUY_NO bets (440+ per day).
+    if (analysis.direction === 'BUY_NO' && entryPrice !== null) {
       entryPrice = 1 - entryPrice;
     }
 
