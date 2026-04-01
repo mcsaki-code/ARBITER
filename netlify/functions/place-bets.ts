@@ -279,14 +279,25 @@ export const handler = schedule('*/15 * * * *', async () => {
     }
 
     // Spread-aware edge filter: edge must be 2x estimated spread
+    // Weather markets get a pass on spread requirements — they have
+    // natural liquidity from the bracket structure and our edge comes
+    // from ensemble forecast data, not market-making dynamics.
     const estimatedSpread = currentMarket.liquidity_usd > 50000 ? 0.005 :
       currentMarket.liquidity_usd > 20000 ? 0.01 :
       currentMarket.liquidity_usd > 10000 ? 0.015 : 0.025;
 
-    if (edgeNorm < estimatedSpread * 2) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — edge < 2x spread`);
+    const spreadMultiplier = analysis.category === 'weather' ? 1.0 : 2.0;  // relaxed for weather
+    if (edgeNorm < estimatedSpread * spreadMultiplier) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — edge < ${spreadMultiplier}x spread`);
       continue;
     }
+
+    // ── Tail Bet Detection ─────────────────────────────────────
+    // Weather tail bets (entry < 15¢) are the #1 edge on Polymarket.
+    // One trader made $2M+ mostly from these. The math: if true prob
+    // is 12% but market says 4%, you get 25x payout with 3x edge.
+    const isTailBet = analysis.category === 'weather' &&
+      (analysis.market_price ?? 0) > 0 && (analysis.market_price ?? 0) < 0.15;
 
     // Calculate bet size using 1/8th Kelly (professional standard).
     // Cap kelly_fraction at 0.03 before applying confidence multiplier to prevent
@@ -295,16 +306,23 @@ export const handler = schedule('*/15 * * * *', async () => {
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
       const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
+      // Tail bets get a sizing boost — the asymmetric payout justifies slightly
+      // larger positions when model consensus is strong
+      const tailBoost = isTailBet ? 1.5 : 1.0;
       // Cap kelly_fraction at what a realistic 35% edge would produce before multiplying.
       // Analyses already store kelly at 1/8 scale, so no further Kelly reduction needed here.
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
-      const adjustedKelly = Math.min(cappedKelly * confMult, 0.03);
+      const adjustedKelly = Math.min(cappedKelly * confMult * tailBoost, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 
     // Fallback: 0.2% of bankroll (e.g. $10 on $5K bankroll) when kelly_fraction unavailable.
-    // The old $3 hardcoded minimum was left over from $500 bankroll assumptions.
-    if (betAmount <= 0) betAmount = Math.max(5, Math.round(bankroll * 0.002));
+    // Weather tail bets get a slightly higher floor to ensure meaningful positions.
+    if (betAmount <= 0) {
+      betAmount = isTailBet
+        ? Math.max(5, Math.round(bankroll * 0.003))  // 0.3% for tail bets ($15 on $5K)
+        : Math.max(5, Math.round(bankroll * 0.002));  // 0.2% standard
+    }
 
     // Politics bets: enforce $5 minimum to prevent micro-bet clutter.
     // Very low entry prices (0.5–1.5%) produce tiny kelly sizes — floor at $5.

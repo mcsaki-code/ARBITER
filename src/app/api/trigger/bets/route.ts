@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { executeBet } from '@/lib/execute-bet';
+import { getMultiModelConsensus, isMultiModelEnabled } from '@/lib/multi-model';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow up to 60s for analysis + placement
@@ -403,6 +404,9 @@ async function runInlineSportsAnalysis(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return [];
 
+  const multiModel = isMultiModelEnabled();
+  log.push(`Sports analysis: ${multiModel ? 'MULTI-MODEL (Claude + GPT-4o)' : 'single-model (Claude)'}`);
+
   const results: AnalysisCandidate[] = [];
 
   for (const market of markets) {
@@ -411,7 +415,7 @@ async function runInlineSportsAnalysis(
         .map((o: string, i: number) => `${o} → YES price: $${(market.outcome_prices[i] || 0).toFixed(3)}`)
         .join('\n');
 
-      const prompt = `You are ARBITER's sports analyst. Analyze this Polymarket sports market for mispricings.
+      const prompt = `You are a quantitative sports prediction market analyst. Analyze this Polymarket sports market for mispricings.
 
 MARKET: ${market.question}
 
@@ -439,41 +443,85 @@ Respond ONLY in JSON:
   "auto_eligible": boolean
 }`;
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 800,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
+      // Use multi-model consensus if available, otherwise fall back to Claude-only
+      let direction: string;
+      let confidence: string;
+      let edge: number;
+      let estimatedProb: number;
+      let reasoning: string;
+      let autoEligible: boolean;
+      let eventDescription: string;
+      let sport: string;
+      let polymarketPrice: number;
 
-      if (!res.ok) {
-        log.push(`Claude API error: ${res.status}`);
-        continue;
+      if (multiModel) {
+        const verdict = await getMultiModelConsensus(prompt, log);
+
+        if (!verdict.consensus || verdict.direction === 'PASS') {
+          log.push(`Skip sports "${market.question.substring(0, 40)}" — ${verdict.skip_reason || 'no consensus'}`);
+          continue;
+        }
+
+        direction = verdict.direction;
+        confidence = verdict.confidence;
+        edge = verdict.avg_edge;
+        estimatedProb = verdict.avg_prob;
+        reasoning = `[CONSENSUS] ${verdict.consensus_reasoning}`;
+        autoEligible = confidence === 'HIGH' && edge >= MIN_EDGE;
+        // Extract event details from first model's raw data
+        const firstModel = verdict.models[0];
+        eventDescription = market.question;
+        sport = 'sports';
+        polymarketPrice = market.outcome_prices[0] || 0.5;
+      } else {
+        // Original single-model Claude path
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 800,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (!res.ok) {
+          log.push(`Claude API error: ${res.status}`);
+          continue;
+        }
+
+        const data = await res.json();
+        const text = data.content?.[0]?.text;
+        if (!text) continue;
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+
+        const analysis = JSON.parse(jsonMatch[0]);
+
+        if (analysis.direction === 'PASS' || !analysis.edge || analysis.edge < MIN_EDGE) continue;
+
+        direction = analysis.direction;
+        confidence = analysis.confidence || 'LOW';
+        edge = Math.abs((analysis.estimated_prob || 0.5) - (analysis.polymarket_price || 0.5));
+        estimatedProb = analysis.estimated_prob || 0.5;
+        reasoning = analysis.reasoning || '';
+        autoEligible = analysis.auto_eligible || false;
+        eventDescription = analysis.event_description || market.question;
+        sport = analysis.sport || 'unknown';
+        polymarketPrice = analysis.polymarket_price || 0.5;
       }
 
-      const data = await res.json();
-      const text = data.content?.[0]?.text;
-      if (!text) continue;
+      if (edge < MIN_EDGE) continue;
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
-
-      const analysis = JSON.parse(jsonMatch[0]);
-
-      if (analysis.direction === 'PASS' || !analysis.edge || analysis.edge < MIN_EDGE) continue;
-
-      // Calculate Kelly — use 1/8th Kelly (professional standard for uncertain estimates)
-      const p = analysis.estimated_prob || 0.5;
-      const c = analysis.polymarket_price || 0.5;
-      const edge = Math.abs(p - c);
+      // Calculate Kelly — use 1/8th Kelly
+      const p = estimatedProb;
+      const c = polymarketPrice;
       let kellyFraction = 0;
       let recBetUsd = 0;
 
@@ -481,7 +529,7 @@ Respond ONLY in JSON:
         const b = (1 - c) / c;
         const fullKelly = (p * b - (1 - p)) / b;
         if (fullKelly > 0) {
-          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[analysis.confidence as string] || 0.2;
+          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[confidence] || 0.2;
           kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
           recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
         }
@@ -492,17 +540,17 @@ Respond ONLY in JSON:
         .from('sports_analyses')
         .insert({
           market_id: market.id,
-          event_description: analysis.event_description || market.question,
-          sport: analysis.sport || 'unknown',
-          sportsbook_consensus: analysis.estimated_prob || 0,
-          polymarket_price: analysis.polymarket_price || c,
+          event_description: eventDescription,
+          sport: sport,
+          sportsbook_consensus: estimatedProb,
+          polymarket_price: polymarketPrice,
           edge: edge,
-          direction: analysis.direction,
-          confidence: analysis.confidence || 'LOW',
+          direction: direction,
+          confidence: confidence,
           kelly_fraction: kellyFraction,
           rec_bet_usd: recBetUsd,
-          reasoning: analysis.reasoning || '',
-          auto_eligible: analysis.auto_eligible || false,
+          reasoning: reasoning,
+          auto_eligible: autoEligible,
           analyzed_at: new Date().toISOString(),
         })
         .select()
@@ -518,7 +566,7 @@ Respond ONLY in JSON:
           ...inserted,
           category: 'sports',
         });
-        log.push(`Analyzed sports: "${market.question.substring(0, 50)}" edge=${(edge * 100).toFixed(1)}%`);
+        log.push(`${multiModel ? '✓ CONSENSUS' : 'Analyzed'} sports: "${market.question.substring(0, 50)}" edge=${(edge * 100).toFixed(1)}%`);
       }
     } catch (err) {
       log.push(`Sports analysis error: ${err instanceof Error ? err.message : 'unknown'}`);
@@ -581,37 +629,76 @@ Respond ONLY in JSON:
   "auto_eligible": boolean
 }`;
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 800,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
+      // Use multi-model consensus if available
+      const multiModel = isMultiModelEnabled();
+      let direction: string;
+      let confidence: string;
+      let edge: number;
+      let bracketProb: number;
+      let marketPrice: number;
+      let reasoning: string;
+      let autoEligible: boolean;
+      let targetBracket: string;
+      let assetName: string;
 
-      if (!res.ok) continue;
+      if (multiModel) {
+        const verdict = await getMultiModelConsensus(prompt, log);
+        if (!verdict.consensus || verdict.direction === 'PASS') {
+          log.push(`Skip crypto "${market.question.substring(0, 40)}" — ${verdict.skip_reason || 'no consensus'}`);
+          continue;
+        }
+        direction = verdict.direction;
+        confidence = verdict.confidence;
+        edge = verdict.avg_edge;
+        bracketProb = verdict.avg_prob;
+        marketPrice = market.outcome_prices[0] || 0.5;
+        reasoning = `[CONSENSUS] ${verdict.consensus_reasoning}`;
+        autoEligible = confidence === 'HIGH' && edge >= MIN_EDGE;
+        targetBracket = market.outcomes[0] || '';
+        assetName = asset || 'unknown';
+      } else {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 800,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
 
-      const data = await res.json();
-      const text = data.content?.[0]?.text;
-      if (!text) continue;
+        if (!res.ok) continue;
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
+        const data = await res.json();
+        const text = data.content?.[0]?.text;
+        if (!text) continue;
 
-      const analysis = JSON.parse(jsonMatch[0]);
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
 
-      if (analysis.direction === 'PASS' || !analysis.edge || analysis.edge < MIN_EDGE) continue;
+        const analysis = JSON.parse(jsonMatch[0]);
+        if (analysis.direction === 'PASS' || !analysis.edge || analysis.edge < MIN_EDGE) continue;
 
-      const p = analysis.bracket_prob || 0.5;
-      const c = analysis.market_price || 0.5;
-      const edge = Math.abs(p - c);
+        direction = analysis.direction;
+        confidence = analysis.confidence || 'LOW';
+        bracketProb = analysis.bracket_prob || 0.5;
+        marketPrice = analysis.market_price || 0.5;
+        edge = Math.abs(bracketProb - marketPrice);
+        reasoning = analysis.reasoning || '';
+        autoEligible = analysis.auto_eligible || false;
+        targetBracket = analysis.target_bracket || '';
+        assetName = analysis.asset || asset || 'unknown';
+      }
+
+      if (edge < MIN_EDGE) continue;
+
+      const p = bracketProb;
+      const c = marketPrice;
       let kellyFraction = 0;
       let recBetUsd = 0;
 
@@ -619,7 +706,7 @@ Respond ONLY in JSON:
         const b = (1 - c) / c;
         const fullKelly = (p * b - (1 - p)) / b;
         if (fullKelly > 0) {
-          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[analysis.confidence as string] || 0.2;
+          const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[confidence] || 0.2;
           kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
           recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
         }
@@ -629,18 +716,18 @@ Respond ONLY in JSON:
         .from('crypto_analyses')
         .insert({
           market_id: market.id,
-          asset: analysis.asset || asset || 'unknown',
+          asset: assetName,
           spot_at_analysis: signal?.spot_price || 0,
-          target_bracket: analysis.target_bracket || '',
+          target_bracket: targetBracket,
           bracket_prob: p,
           market_price: c,
           edge: edge,
-          direction: analysis.direction,
-          confidence: analysis.confidence || 'LOW',
+          direction: direction,
+          confidence: confidence,
           kelly_fraction: kellyFraction,
           rec_bet_usd: recBetUsd,
-          reasoning: analysis.reasoning || '',
-          auto_eligible: analysis.auto_eligible || false,
+          reasoning: reasoning,
+          auto_eligible: autoEligible,
           analyzed_at: new Date().toISOString(),
         })
         .select()
@@ -653,7 +740,7 @@ Respond ONLY in JSON:
 
       if (inserted) {
         results.push({ ...inserted, category: 'crypto' });
-        log.push(`Analyzed crypto: "${market.question.substring(0, 50)}" edge=${(edge * 100).toFixed(1)}%`);
+        log.push(`${multiModel ? '✓ CONSENSUS' : 'Analyzed'} crypto: "${market.question.substring(0, 50)}" edge=${(edge * 100).toFixed(1)}%`);
       }
     } catch (err) {
       log.push(`Crypto analysis error: ${err instanceof Error ? err.message : 'unknown'}`);
