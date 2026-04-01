@@ -157,31 +157,55 @@ export const handler = schedule('*/15 * * * *', async () => {
   const sentimentCutoff    = new Date(Date.now() - MAX_ANALYSIS_AGE_SENTIMENT).toISOString();
   const opportunityCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_OPPORTUNITY).toISOString();
 
-  const [weatherAnalyses, sportsAnalyses, cryptoAnalyses, politicsAnalyses, sentimentAnalyses, opportunityAnalyses] = await Promise.all([
+  // Fetch more rows than needed (limit 50) then deduplicate client-side.
+  // The analyze cron creates a new row every ~6 min per market, so a 2h window
+  // can produce 20+ rows for ONE market, crowding out other markets entirely.
+  const [weatherAnalysesRaw, sportsAnalysesRaw, cryptoAnalysesRaw, politicsAnalysesRaw, sentimentAnalysesRaw, opportunityAnalysesRaw] = await Promise.all([
     supabase.from('weather_analyses').select('*')
       .gte('analyzed_at', weatherCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER)
-      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
     supabase.from('sports_analyses').select('*')
       .gte('analyzed_at', sportsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
     supabase.from('crypto_analyses').select('*')
       .gte('analyzed_at', cryptoCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(20).then(r => r.data ?? []),
+      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
     supabase.from('politics_analyses').select('*')
       .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(20)
+      .order('edge', { ascending: false }).limit(50)
       .then(r => r.data ?? [], () => [] as unknown[]),
     // Sentiment analyses — macro news + options flow correlated signals
     supabase.from('sentiment_analyses').select('*')
       .gte('analyzed_at', sentimentCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(10)
+      .order('edge', { ascending: false }).limit(30)
       .then(r => r.data ?? [], () => [] as unknown[]),
     // General opportunity scanner — covers all uncategorized markets
     supabase.from('opportunity_analyses').select('*')
       .gte('analyzed_at', opportunityCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(15)
+      .order('edge', { ascending: false }).limit(30)
       .then(r => r.data ?? [], () => [] as unknown[]),
   ]);
+
+  // Deduplicate: keep only the latest analysis per market_id.
+  // The analyze cron writes a new row every cycle, so without dedup
+  // one hot market can fill all 20 candidate slots with identical picks.
+  function dedup(rows: AnalysisRow[]): AnalysisRow[] {
+    const seen = new Map<string, AnalysisRow>();
+    for (const row of rows) {
+      const existing = seen.get(row.market_id);
+      if (!existing || new Date(row.analyzed_at) > new Date(existing.analyzed_at)) {
+        seen.set(row.market_id, row);
+      }
+    }
+    return Array.from(seen.values());
+  }
+
+  const weatherAnalyses  = dedup(weatherAnalysesRaw);
+  const sportsAnalyses   = dedup(sportsAnalysesRaw);
+  const cryptoAnalyses   = dedup(cryptoAnalysesRaw);
+  const politicsAnalyses = dedup(politicsAnalysesRaw as AnalysisRow[]);
+  const sentimentAnalyses = dedup(sentimentAnalysesRaw as AnalysisRow[]);
+  const opportunityAnalyses = dedup(opportunityAnalysesRaw as AnalysisRow[]);
 
   const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
     ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',     source_table: 'weather_analyses'     })),

@@ -105,13 +105,27 @@ export async function GET() {
       supabase.from('crypto_analyses').select('*').gte('analyzed_at', cutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE).order('edge', { ascending: false }),
     ]);
 
-    let candidates: AnalysisCandidate[] = [
+    // Deduplicate: keep only the latest analysis per market_id.
+    // The analyze cron writes a new row every cycle (~6 min), so a 2h window
+    // can produce 20+ rows for ONE market, crowding out other markets entirely.
+    function dedup(rows: AnalysisCandidate[]): AnalysisCandidate[] {
+      const seen = new Map<string, AnalysisCandidate>();
+      for (const row of rows) {
+        const existing = seen.get(row.market_id);
+        if (!existing || row.id > existing.id) {
+          seen.set(row.market_id, row);
+        }
+      }
+      return Array.from(seen.values());
+    }
+
+    let candidates: AnalysisCandidate[] = dedup([
       ...(weatherRes.data || []).map((a) => ({ ...a, category: 'weather' as const })),
       ...(sportsRes.data || []).map((a) => ({ ...a, category: 'sports' as const })),
       ...(cryptoRes.data || []).map((a) => ({ ...a, category: 'crypto' as const })),
-    ];
+    ]);
 
-    log.push(`Existing analyses: ${weatherRes.data?.length || 0} weather, ${sportsRes.data?.length || 0} sports, ${cryptoRes.data?.length || 0} crypto`);
+    log.push(`Existing analyses: ${weatherRes.data?.length || 0} weather, ${sportsRes.data?.length || 0} sports, ${cryptoRes.data?.length || 0} crypto (${candidates.length} unique markets after dedup)`);
 
     // ============================================================
     // STEP 2: If no analyses exist, run inline Claude analysis
