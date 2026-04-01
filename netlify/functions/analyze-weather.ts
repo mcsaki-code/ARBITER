@@ -25,44 +25,25 @@ export const handler = schedule('*/20 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get active weather markets with city data — only those with 2+ hours remaining
-  // (prevents already-resolved today's markets from blocking future market analysis)
-  const minResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
+  // Get ALL active weather markets with city data
   const { data: markets } = await supabase
     .from('markets')
     .select('*, weather_cities(*)')
     .eq('is_active', true)
-    .not('city_id', 'is', null)
-    .neq('category', 'temperature')   // temperature markets handled by Phase 2 statistical analysis
-    .gt('resolution_date', minResolutionDate);
+    .not('city_id', 'is', null);
 
   if (!markets || markets.length === 0) {
     console.log('[analyze-weather-v2] No active markets with city matches');
     return { statusCode: 200 };
   }
 
-  // Pre-load recently analyzed market IDs to avoid re-analyzing same markets every run.
-  // Use 6h window so we cycle through ALL active markets rather than repeatedly hitting
-  // the same top-liquidity one (e.g., Tokyo). This lets the queue rotate properly.
-  const weatherRecentCutoff = new Date(Date.now() - 6 * 3600000).toISOString();
-  const { data: recentWeatherRows } = await supabase
-    .from('weather_analyses')
-    .select('market_id')
-    .gte('analyzed_at', weatherRecentCutoff);
-  const recentWeatherIds = new Set((recentWeatherRows ?? []).map((r: { market_id: string }) => r.market_id?.toString()));
-
-  // Sort: unanalyzed first, then by liquidity DESC
-  const sortedMarkets = [...markets].sort((a, b) => {
-    const aRecent = recentWeatherIds.has(a.id?.toString() ?? '') ? 1 : 0;
-    const bRecent = recentWeatherIds.has(b.id?.toString() ?? '') ? 1 : 0;
-    if (aRecent !== bRecent) return aRecent - bRecent;
-    return (b.liquidity_usd || 0) - (a.liquidity_usd || 0);
-  });
+  // Sort markets: prioritize higher liquidity and those not recently analyzed
+  const sortedMarkets = [...markets].sort((a, b) => (b.liquidity_usd || 0) - (a.liquidity_usd || 0));
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 8)) {
-    // Time guard: 26s — Phase 2 statistical analysis now runs in its own function
-    if (Date.now() - startTime > 26000) break;
+  for (const market of sortedMarkets.slice(0, 5)) {
+    // STRICT time guard: 22s (slightly more room for 5 markets)
+    if (Date.now() - startTime > 22000) break;
 
     const city = market.weather_cities;
     if (!city) continue;
@@ -175,7 +156,7 @@ export const handler = schedule('*/20 * * * *', async () => {
         configRows?.forEach((r: { key: string; value: string }) => {
           config[r.key] = r.value;
         });
-        const bankroll = parseFloat(config.paper_bankroll || '5000');
+        const bankroll = parseFloat(config.paper_bankroll || '500');
 
         const p = analysis.best_bet.true_prob;
         const c = analysis.best_bet.market_price;
@@ -210,15 +191,6 @@ export const handler = schedule('*/20 * * * *', async () => {
         // If > 100, likely edge * 1000; if 1-100, likely percentage
         rawEdge = rawEdge > 100 ? rawEdge / 1000 : rawEdge / 100;
       }
-      // For BUY_NO bets, edge = true_prob - market_price (negative when YES is overpriced).
-      // Store the absolute magnitude so place-bets' edge > MIN_EDGE filter works correctly.
-      if (rawEdge !== null && analysis.best_bet?.direction === 'BUY_NO' && rawEdge < 0) {
-        rawEdge = -rawEdge;
-      }
-      // Sanity cap: weather edges above 35% are almost certainly Claude overconfidence.
-      // Real forecasting edges are rarely > 20-25%. Cap prevents DB avg inflation
-      // and ensures calibration metrics stay meaningful.
-      if (rawEdge !== null && rawEdge > 0.35) rawEdge = 0.35;
 
       // Also normalize market_price and true_prob if they look like percentages
       let mktPrice = analysis.best_bet?.market_price ?? null;
@@ -261,8 +233,7 @@ export const handler = schedule('*/20 * * * *', async () => {
     }
   }
 
-  console.log(`[analyze-weather-v2] Processed ${processed} weather markets in ${Date.now() - startTime}ms`);
-  // Phase 2 (temperature_statistical) now runs in analyze-temperature.ts (its own scheduled function)
+  console.log(`[analyze-weather-v2] Done. Processed ${processed} markets in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });
 

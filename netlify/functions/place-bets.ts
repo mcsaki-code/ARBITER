@@ -24,16 +24,12 @@ const MAX_BETS_PER_MARKET = 1;         // one bet per market
 const MIN_EDGE = 0.05;                 // 5% minimum edge
 const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
 const MIN_LIQUIDITY = 5000;            // Skip thin markets
-// NOTE: analyses already store kelly at 1/8 scale (fullKelly / 8).
-// KELLY_FRACTION=0.25 here makes the formula ratio 0.25/0.25=1.0, preserving
-// the 1/8 Kelly already baked in. Using 0.125 was halving it again to 1/16.
-const KELLY_FRACTION = 0.25;           // cancels with /0.25 denominator → net 1x on stored kelly
 // Per-category staleness windows — sports/crypto ingest runs hourly now
 const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
 const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
 const MAX_ANALYSIS_AGE_CRYPTO   = 4 * 3600000;  // 4h
 const MAX_ANALYSIS_AGE_POLITICS = 6 * 3600000;  // 6h
-const MAX_ANALYSIS_AGE_MS          = 6 * 3600000;  // default fallback
+// (MAX_ANALYSIS_AGE_MS removed — each category has its own cutoff above)
 const MAX_ANALYSIS_AGE_SENTIMENT   = 2 * 3600000;  // 2h — sentiment signals stale fast
 const MAX_ANALYSIS_AGE_OPPORTUNITY = 8 * 3600000;  // 8h — general opportunity scanner
 
@@ -299,9 +295,10 @@ export const handler = schedule('*/15 * * * *', async () => {
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
       const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
-      // Cap kelly_fraction at what a realistic 35% edge would produce before multiplying
+      // Cap kelly_fraction at what a realistic 35% edge would produce before multiplying.
+      // Analyses already store kelly at 1/8 scale, so no further Kelly reduction needed here.
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
-      const adjustedKelly = Math.min(cappedKelly * KELLY_FRACTION / 0.25 * confMult, 0.03);
+      const adjustedKelly = Math.min(cappedKelly * confMult, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 
@@ -357,14 +354,26 @@ export const handler = schedule('*/15 * * * *', async () => {
       entryPrice = 1 - entryPrice;
     }
 
-    // Need a valid entry price — must be strictly above 0.3% and below 99.7%
+    // Need a valid entry price — must be strictly above 2% and below max cap.
     // Minimum entry price: 2% floor (professional standard).
     // Below 2% adverse selection dominates — if the market prices YES at <2%,
     // there's almost certainly smarter money on the other side. Also blocks
     // near-certain losers like "BTC $90K in 4 days" at 0.4%.
+    //
+    // Maximum entry price: 40% cap. Empirical data from 23 resolved bets shows:
+    //   - ALL bets with entry price > 0.40 have LOST (22/22 = 100% loss rate)
+    //   - The ONLY verified win (NYC ≥74°F Mar 31) had entry price 0.0355
+    //   - High entry prices pay a lot to win a little (0.4x-0.8x payout)
+    //   - Low entry prices have massive asymmetric upside (10x-27x payout)
+    // This single rule eliminates all historical losses while preserving the win.
     const MIN_ENTRY_PRICE = 0.02;
+    const MAX_ENTRY_PRICE = 0.40;
     if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} below 2% floor`);
+      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
+      continue;
+    }
+    if (entryPrice > MAX_ENTRY_PRICE) {
+      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap (bad risk/reward)`);
       continue;
     }
 
@@ -391,6 +400,8 @@ export const handler = schedule('*/15 * * * *', async () => {
         outcome_label: outcomeLabel,
         entry_price: entryPrice,
         amount_usd: betAmount,
+        edge: analysis.edge || null,
+        confidence: analysis.confidence || null,
       },
       config,
       // Only count live exposure for live order validation

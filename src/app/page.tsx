@@ -137,25 +137,18 @@ export default function HomePage() {
   useEffect(() => {
     async function load() {
       try {
-        const [betsRes, signalsRes, arbRes, sportsRes, cryptoRes, configRes] = await Promise.all([
+        const [betsRes, signalsRes, arbRes, sportsRes, cryptoRes] = await Promise.all([
           fetch('/api/bets'),
           fetch('/api/signals'),
           fetch('/api/arb'),
           fetch('/api/sports'),
           fetch('/api/crypto'),
-          fetch('/api/config'),
         ]);
 
         if (betsRes.ok) {
           const bData = await betsRes.json();
           setConfig(bData.config || {});
           setBets(bData.bets || []);
-        }
-
-        // Merge full config (includes Railway worker keys)
-        if (configRes.ok) {
-          const cfgData = await configRes.json();
-          setConfig(prev => ({ ...prev, ...(cfgData.config || {}) }));
         }
 
         if (signalsRes.ok) {
@@ -764,70 +757,6 @@ export default function HomePage() {
               <StatusDot label="Resolved bets" count={resolvedBets.length} active={resolvedBets.length > 0} />
             </div>
           </div>
-
-          {/* Railway Worker Status */}
-          {(() => {
-            const heartbeat = config.railway_worker_last_heartbeat;
-            const uptimeHours = config.railway_worker_uptime_hours;
-            const tempAnalyzed = config.railway_worker_temp_analyzed;
-            const priceShifts = config.railway_worker_price_shifts;
-            const workerVersion = config.railway_worker_version;
-            const minutesAgo = heartbeat
-              ? Math.round((Date.now() - new Date(heartbeat).getTime()) / 60000)
-              : null;
-            const isAlive = minutesAgo !== null && minutesAgo < 20;
-            return (
-              <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
-                <div className="border-b border-arbiter-border px-5 py-3 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-arbiter-text">Railway Worker</h3>
-                  <div className={`flex items-center gap-1.5 text-xs font-semibold ${isAlive ? 'text-arbiter-green' : heartbeat ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
-                    <div className={`w-2 h-2 rounded-full ${isAlive ? 'bg-arbiter-green animate-pulse' : heartbeat ? 'bg-arbiter-red' : 'bg-arbiter-text-3'}`} />
-                    {isAlive ? 'LIVE' : heartbeat ? 'OFFLINE' : 'NOT DEPLOYED'}
-                  </div>
-                </div>
-                <div className="p-4 space-y-2 text-xs">
-                  {heartbeat ? (
-                    <>
-                      <div className="flex justify-between">
-                        <span className="text-arbiter-text-3">Last heartbeat</span>
-                        <span className={`font-mono ${isAlive ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                          {minutesAgo === 0 ? 'just now' : `${minutesAgo}m ago`}
-                        </span>
-                      </div>
-                      {uptimeHours && (
-                        <div className="flex justify-between">
-                          <span className="text-arbiter-text-3">Uptime</span>
-                          <span className="font-mono text-arbiter-text">{parseFloat(uptimeHours).toFixed(1)}h</span>
-                        </div>
-                      )}
-                      {tempAnalyzed && (
-                        <div className="flex justify-between">
-                          <span className="text-arbiter-text-3">Temps analyzed</span>
-                          <span className="font-mono text-arbiter-text">{tempAnalyzed}</span>
-                        </div>
-                      )}
-                      {priceShifts && (
-                        <div className="flex justify-between">
-                          <span className="text-arbiter-text-3">Price shifts detected</span>
-                          <span className={`font-mono ${parseInt(priceShifts) > 0 ? 'text-arbiter-amber' : 'text-arbiter-text'}`}>{priceShifts}</span>
-                        </div>
-                      )}
-                      {workerVersion && (
-                        <div className="flex justify-between">
-                          <span className="text-arbiter-text-3">Version</span>
-                          <span className="font-mono text-arbiter-text-3">v{workerVersion}</span>
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-arbiter-text-3 text-center py-2">
-                      No worker data — deploy Railway worker to enable 24/7 monitoring
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* Quick Links */}
           <div className="space-y-3">

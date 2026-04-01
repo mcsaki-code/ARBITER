@@ -16,62 +16,6 @@ const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 8;   // increased from 3
 const MIN_EDGE_PCT = 0.02;
 
-// ── Threshold extraction ───────────────────────────────────
-// Parse a crypto market question to find the price target and
-// compute how far the asset needs to move to hit it.
-interface ThresholdContext {
-  target: number;
-  direction: 'up' | 'down';
-  pctMove: number;       // % move needed (positive = need to go up, negative = need to go down)
-  absPctMove: number;    // absolute % magnitude
-  requiredDailyPct: number;  // daily % needed to just reach threshold
-  daysRemaining: number;
-  feasibilityNote: string;
-}
-
-function extractThresholdContext(
-  question: string,
-  spotPrice: number,
-  hoursRemaining: number
-): ThresholdContext | null {
-  // Match patterns like $90,000 / $90k / $250,000
-  const priceMatch = question.match(/\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)/);
-  if (!priceMatch) return null;
-
-  const target = parseFloat(priceMatch[1].replace(/,/g, ''));
-  if (isNaN(target) || target <= 0 || spotPrice <= 0) return null;
-
-  const q = question.toLowerCase();
-  const direction: 'up' | 'down' =
-    q.includes('reach') || q.includes('hit') || q.includes('above') || q.includes('exceed')
-      ? 'up'
-      : q.includes('dip') || q.includes('drop') || q.includes('below') || q.includes('fall')
-      ? 'down'
-      : target > spotPrice ? 'up' : 'down';
-
-  const pctMove = ((target - spotPrice) / spotPrice) * 100;
-  const absPctMove = Math.abs(pctMove);
-  const daysRemaining = hoursRemaining / 24;
-  const requiredDailyPct = daysRemaining > 0 ? absPctMove / daysRemaining : Infinity;
-
-  let feasibilityNote: string;
-  if (absPctMove < 5) {
-    feasibilityNote = 'CLOSE — target is within 5% of current price, technically feasible';
-  } else if (absPctMove < 15 && daysRemaining > 7) {
-    feasibilityNote = 'PLAUSIBLE — moderate move over extended timeframe';
-  } else if (absPctMove < 20 && daysRemaining > 30) {
-    feasibilityNote = 'PLAUSIBLE — moderate move over long timeframe';
-  } else if (requiredDailyPct > 5) {
-    feasibilityNote = `VERY DIFFICULT — requires ${requiredDailyPct.toFixed(1)}%/day sustained move`;
-  } else if (requiredDailyPct > 2) {
-    feasibilityNote = `DIFFICULT — requires ${requiredDailyPct.toFixed(1)}%/day sustained move`;
-  } else {
-    feasibilityNote = `MODERATE — requires ${requiredDailyPct.toFixed(1)}%/day`;
-  }
-
-  return { target, direction, pctMove, absPctMove, requiredDailyPct, daysRemaining, feasibilityNote };
-}
-
 // ── Edge/Prob normalization (fixes Claude returning 849 instead of 0.849) ──
 function normalizeEdge(raw: number | null | undefined): number | null {
   if (raw == null) return null;
@@ -145,15 +89,13 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // Get active crypto markets with 2+ hours remaining
-  const minResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
+  // Get active crypto markets from Polymarket
   const { data: cryptoMarkets } = await supabase
     .from('markets')
     .select('*')
     .eq('is_active', true)
     .eq('category', 'crypto')
     .gt('liquidity_usd', 5000)
-    .gt('resolution_date', minResolutionDate)
     .order('volume_usd', { ascending: false })
     .limit(30);
 
@@ -187,32 +129,10 @@ export const handler = schedule('*/30 * * * *', async () => {
 
   console.log(`[analyze-crypto] ${candidates.length} markets matched to signal data`);
 
-  // Get recently analyzed market IDs to avoid re-analyzing every 30 min
-  const recentCutoff = new Date(Date.now() - 3 * 3600000).toISOString(); // 3h
-  const { data: recentRows } = await supabase
-    .from('crypto_analyses')
-    .select('market_id')
-    .gte('analyzed_at', recentCutoff);
-  const recentlyAnalyzed = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
-
-  // Skip markets where we already have an open bet — we can't add to the position
-  // and burning API credits on them generates contradictory signals (e.g. BUY_YES on a BUY_NO position).
-  const { data: openBetRows } = await supabase
-    .from('bets')
-    .select('market_id')
-    .eq('status', 'OPEN');
-  const openBetMarketIds = new Set((openBetRows ?? []).map((b: { market_id: string }) => b.market_id));
-
-  const freshCandidates = candidates.filter(c =>
-    !recentlyAnalyzed.has(c.market.id) && !openBetMarketIds.has(c.market.id)
-  );
-  const skippedOpen = candidates.filter(c => openBetMarketIds.has(c.market.id)).length;
-  console.log(`[analyze-crypto] ${freshCandidates.length} fresh candidates (${candidates.length - freshCandidates.length} skipped: ${recentlyAnalyzed.size} recently analyzed, ${skippedOpen} have open bets)`);
-
-  // Analyze top fresh candidates with Claude
+  // Analyze top candidates with Claude
   let analyzed = 0;
 
-  for (const candidate of freshCandidates.slice(0, MAX_ANALYSES_PER_RUN)) {
+  for (const candidate of candidates.slice(0, MAX_ANALYSES_PER_RUN)) {
     if (Date.now() - startTime > 20000) break;
 
     const { market, signal, asset } = candidate;
@@ -231,70 +151,36 @@ export const handler = schedule('*/30 * * * *', async () => {
       .map((o: string, i: number) => `${o} → $${market.outcome_prices[i]?.toFixed(3) || '?'}`)
       .join('\n');
 
-    // Compute threshold context for explicit feasibility analysis
-    const tc = extractThresholdContext(market.question, signal.spot_price, hoursRemaining);
-    const thresholdSection = tc ? `
-THRESHOLD ANALYSIS:
-- Price target:       $${tc.target.toLocaleString()}
-- Required move:      ${tc.pctMove > 0 ? '+' : ''}${tc.pctMove.toFixed(1)}% (${tc.direction.toUpperCase()})
-- Days remaining:     ${tc.daysRemaining.toFixed(1)} days
-- Required daily %:   ${tc.requiredDailyPct === Infinity ? 'N/A' : tc.requiredDailyPct.toFixed(2) + '%/day'}
-- Feasibility:        ${tc.feasibilityNote}` : '';
-
-    // Hard calibration rules derived from feasibility
-    const hardRules: string[] = [];
-    if (tc) {
-      if (tc.requiredDailyPct > 5 && tc.daysRemaining < 7) {
-        hardRules.push(`EXTREME MOVE REQUIRED: >5%/day for <7 days — bracket_prob MUST be <3% for BUY_YES. Auto_eligible MUST be false.`);
-      }
-      if (tc.requiredDailyPct > 3 && tc.daysRemaining < 3) {
-        hardRules.push(`VERY SHORT WINDOW: required move is ${tc.absPctMove.toFixed(0)}% in ${tc.daysRemaining.toFixed(1)} days — bracket_prob MUST be <1%.`);
-      }
-      if (tc.absPctMove > 50) {
-        hardRules.push(`CATASTROPHIC MOVE: target is ${tc.absPctMove.toFixed(0)}% from current — this is a black-swan bet. Treat market maker's price as much more reliable than your estimate.`);
-      }
-    }
-    // Extra rule: very cheap YES markets (<1%) need substantial estimated probability
-    const minPriceOutcome = Math.min(...market.outcome_prices.filter(p => p > 0));
-    if (minPriceOutcome < 0.01) {
-      hardRules.push(`MICRO-PRICED MARKET: some outcomes priced below 1%. Market makers price these very efficiently. Only BUY_YES if bracket_prob >= 5% with HIGH confidence.`);
-    }
-    const hardRulesSection = hardRules.length > 0
-      ? `\nCALIBRATION RULES (MANDATORY — follow these exactly):\n${hardRules.map(r => `⚠️  ${r}`).join('\n')}`
-      : '';
-
-    const prompt = `You are ARBITER's crypto analyst. Compare technical signals against Polymarket price bracket markets to find genuine mispricings. You must be well-calibrated — not just finding mathematical edge, but ensuring the probabilities are realistic.
+    const prompt = `You are ARBITER's crypto analyst. Compare technical and on-chain signals against Polymarket price bracket markets to find mispricings.
 
 ASSET: ${asset}
-CURRENT SPOT: $${signal.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 })} (LIVE — fresh from data feed, fetched ${Math.round((Date.now() - new Date(signal.fetched_at).getTime()) / 60000)} min ago)
+CURRENT SPOT: $${signal.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}
 1H AGO: $${signal.price_1h_ago?.toLocaleString(undefined, { maximumFractionDigits: 2 }) || 'N/A'}
 24H AGO: $${signal.price_24h_ago?.toLocaleString(undefined, { maximumFractionDigits: 2 }) || 'N/A'}
 
 TECHNICAL INDICATORS:
-- RSI(14):         ${signal.rsi_14?.toFixed(1) ?? 'N/A'}${signal.rsi_14 ? (signal.rsi_14 > 70 ? ' (OVERBOUGHT)' : signal.rsi_14 < 30 ? ' (OVERSOLD — potential bounce, but downtrend can continue for days)' : ' (NEUTRAL)') : ''}
+- RSI(14):         ${signal.rsi_14?.toFixed(1) ?? 'N/A'}${signal.rsi_14 ? (signal.rsi_14 > 70 ? ' (OVERBOUGHT)' : signal.rsi_14 < 30 ? ' (OVERSOLD)' : ' (NEUTRAL)') : ''}
 - Bollinger Upper: $${signal.bb_upper?.toFixed(0) ?? 'N/A'}
 - Bollinger Lower: $${signal.bb_lower?.toFixed(0) ?? 'N/A'}
-- Spot vs BB:      ${signal.bb_upper && signal.bb_lower ? (signal.spot_price > signal.bb_upper ? 'ABOVE UPPER BAND (overextended)' : signal.spot_price < signal.bb_lower ? 'BELOW LOWER BAND (oversold extension)' : 'WITHIN BANDS') : 'N/A'}
+- Spot vs BB:      ${signal.bb_upper && signal.bb_lower ? (signal.spot_price > signal.bb_upper ? 'ABOVE UPPER BAND' : signal.spot_price < signal.bb_lower ? 'BELOW LOWER BAND' : 'WITHIN BANDS') : 'N/A'}
+- Funding Rate:    ${signal.funding_rate?.toFixed(6) ?? 'N/A'}
 - 24H Volume:      $${signal.volume_24h ? (signal.volume_24h / 1e9).toFixed(2) + 'B' : 'N/A'}
-- Momentum:        ${JSON.stringify(signalDetails)}
-${thresholdSection}${hardRulesSection}
+
+SIGNAL SUMMARY: ${JSON.stringify(signalDetails)}
 
 POLYMARKET BRACKET MARKET:
 Question: ${market.question}
 ${outcomesList}
 - Volume: $${market.volume_usd.toLocaleString()}
 - Liquidity: $${market.liquidity_usd.toLocaleString()}
-- Resolves: ${Math.round(hoursRemaining)} hours from now (${(hoursRemaining / 24).toFixed(1)} days)
+- Resolves: ${Math.round(hoursRemaining)} hours from now
 
 TASK:
-1. Use the CURRENT SPOT price above — this is live data, not a guess
-2. Estimate the true probability for each outcome using realistic analysis of feasibility
-3. If calibration rules above apply, ENFORCE them — do not rationalize around them
-4. Compare your estimates to market prices; identify the best bet
-5. Long-dated markets (>30 days) are more eligible for bets than near-term extreme moves
-6. Polymarket market makers have real-time data — treat very cheap (<2%) prices with extreme skepticism
-
-IMPORTANT: The market price for a YES outcome priced at 0.3% means professional traders with full information give this only 0.3% probability. Your edge should come from genuine insight, not just "crypto is volatile."
+1. Based on current price, momentum, and technical indicators, estimate the probability distribution across brackets
+2. Compare your estimated probabilities to market prices
+3. Identify the bracket(s) with the largest mispricing
+4. Select the single best bet (highest edge)
+5. Be conservative — crypto is volatile. Only flag high-confidence edges.
 
 Respond ONLY in JSON:
 {
@@ -308,7 +194,7 @@ Respond ONLY in JSON:
   "confidence": "HIGH"|"MEDIUM"|"LOW",
   "kelly_fraction": number,
   "rec_bet_usd": number,
-  "reasoning": string (must explicitly address feasibility and the current spot price distance to threshold),
+  "reasoning": string,
   "auto_eligible": boolean,
   "flags": string[]
 }`;
@@ -343,54 +229,20 @@ Respond ONLY in JSON:
 
       const analysis = JSON.parse(jsonMatch[0]);
 
-      // ── POST-PROCESSING HARD GATE ──────────────────────────────────
-      // Claude's prompt rules are advisory — LLMs can rationalize around them.
-      // These code-level overrides are non-negotiable and cannot be ignored.
-      if (tc && analysis.direction === 'BUY_YES') {
-        // Gate 1: >5%/day required move within 7 days → physically impossible to sustain
-        if (tc.requiredDailyPct > 5 && tc.daysRemaining < 7) {
-          console.log(`[analyze-crypto] HARD GATE: ${tc.requiredDailyPct.toFixed(1)}%/day required in ${tc.daysRemaining.toFixed(1)} days — forcing PASS on BUY_YES`);
-          analysis.direction = 'PASS';
-          analysis.auto_eligible = false;
-          if (!analysis.flags) analysis.flags = [];
-          analysis.flags.push('HARD_GATE_DAILY_MOVE_EXCEEDED');
-        }
-        // Gate 2: >30% move required within 30 days for long-shot YES bets priced under 3%
-        if (tc.absPctMove > 30 && tc.daysRemaining < 30 && (analysis.market_price ?? 1) < 0.03) {
-          console.log(`[analyze-crypto] HARD GATE: ${tc.absPctMove.toFixed(0)}% move in ${tc.daysRemaining.toFixed(1)} days with <3% market price — forcing PASS`);
-          analysis.direction = 'PASS';
-          analysis.auto_eligible = false;
-          if (!analysis.flags) analysis.flags = [];
-          analysis.flags.push('HARD_GATE_EXTREME_MOVE_SHORT_WINDOW');
-        }
-      }
-
       // Calculate Kelly bet size
       let kellyFraction = 0;
       let recBetUsd = 0;
 
-      const absEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0 ? -analysis.edge : analysis.edge;
-      if (analysis.direction !== 'PASS' && absEdge >= MIN_EDGE_PCT) {
+      if (analysis.direction !== 'PASS' && analysis.edge >= MIN_EDGE_PCT) {
         const { data: configRows } = await supabase
           .from('system_config')
           .select('key, value')
           .in('key', ['paper_bankroll']);
 
-        const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '5000');
+        const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value || '500');
 
-        // BUY_NO Kelly: Claude sometimes reports YES-side probs (bracket_prob < market_price,
-        // meaning YES is overpriced) and sometimes NO-side probs (bracket_prob > market_price,
-        // meaning NO is underpriced). Detect which side was reported and flip only when needed.
-        // Always-flip was wrong: e.g. bracket_prob=0.99, market_price=0.917 (NO side already)
-        // would flip to p=0.01, c=0.083 → fullKelly < 0.
-        const isBuyNo = analysis.direction === 'BUY_NO';
-        let p = analysis.bracket_prob;
-        let c = analysis.market_price;
-        if (isBuyNo && p < c) {
-          // YES side reported (YES is overpriced) → flip to compute Kelly on NO side
-          p = 1 - p;
-          c = 1 - c;
-        }
+        const p = analysis.bracket_prob;
+        const c = analysis.market_price;
         if (p > 0 && c > 0 && c < 1) {
           const b = (1 - c) / c;
           const fullKelly = (p * b - (1 - p)) / b;
@@ -405,14 +257,7 @@ Respond ONLY in JSON:
       }
 
       // ── Normalize before storing (fixes the 849 bug at source) ──
-      // For BUY_NO bets, edge = bracket_prob - market_price is negative (YES is overpriced).
-      // Store the absolute magnitude so place-bets' `edge > MIN_EDGE` filter works correctly.
-      const rawEdge = analysis.direction === 'BUY_NO' && analysis.edge < 0
-        ? -analysis.edge
-        : analysis.edge;
-      // Cap at 0.50: Claude sometimes returns edge=0.998 for near-certain NO bets
-      // (e.g., "BTC won't hit $150k this month") — uncapped, Kelly would over-bet massively.
-      const edgeNorm      = Math.min(normalizeEdge(rawEdge) ?? 0, 0.50) || null;
+      const edgeNorm      = normalizeEdge(analysis.edge);
       const bracketNorm   = normalizeProb(analysis.bracket_prob);
       const mktPriceNorm  = normalizeProb(analysis.market_price);
 

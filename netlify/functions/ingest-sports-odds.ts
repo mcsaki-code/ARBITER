@@ -33,106 +33,6 @@ const PINNACLE_SPORTS: { id: number; name: string; league: string }[] = [
   { id: 33,  name: 'tennis',           league: 'Tennis' },
 ];
 
-// ── ESPN Public API (fallback when Pinnacle blocked) ──────
-// Completely free, no auth required, Netlify IPs always allowed.
-// Returns DraftKings moneyline odds embedded in scoreboard data.
-const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports';
-
-const ESPN_SPORTS: { path: string; sport: string; league: string }[] = [
-  { path: 'basketball/nba',                        sport: 'basketball', league: 'NBA' },
-  { path: 'basketball/mens-college-basketball',    sport: 'basketball', league: 'NCAAB' }, // March Madness!
-  { path: 'baseball/mlb',                          sport: 'baseball',   league: 'MLB' },
-  { path: 'hockey/nhl',                            sport: 'hockey',     league: 'NHL' },
-  { path: 'football/nfl',                          sport: 'football',   league: 'NFL' },
-];
-
-function parseAmericanOddsStr(odds: string): number | null {
-  if (!odds || odds === '?') return null;
-  const n = parseInt(odds.replace('+', ''), 10);
-  if (isNaN(n)) return null;
-  if (n > 0) return (n / 100) + 1;
-  return (100 / Math.abs(n)) + 1;
-}
-
-async function fetchEspnOdds(startTime: number): Promise<OddsRow[]> {
-  const rows: OddsRow[] = [];
-  const now = new Date();
-  const month = now.getMonth();
-
-  const inSeason = ESPN_SPORTS.filter(s => {
-    if (s.league === 'NBA')   return month >= 9 || month <= 5;   // Oct-Jun
-    if (s.league === 'NCAAB') return month >= 1 && month <= 4;   // Feb-May (tournament)
-    if (s.league === 'MLB')   return month >= 2 && month <= 9;   // Mar-Oct
-    if (s.league === 'NHL')   return month >= 9 || month <= 5;   // Oct-Jun
-    if (s.league === 'NFL')   return month >= 8 || month <= 1;   // Sep-Feb
-    return true;
-  });
-
-  for (const s of inSeason) {
-    if (Date.now() - startTime > 20000) break;
-
-    const data = await fetchJson(`${ESPN_BASE}/${s.path}/scoreboard`) as {
-      events?: Array<{
-        id: string;
-        date: string;
-        competitions?: Array<{
-          competitors?: Array<{
-            homeAway: string;
-            team: { displayName: string };
-          }>;
-          odds?: Array<{
-            moneyline?: {
-              home?: { close?: { odds: string } };
-              away?: { close?: { odds: string } };
-            };
-          }>;
-        }>;
-      }>;
-    } | null;
-
-    const events = data?.events ?? [];
-    for (const event of events) {
-      const comp = event.competitions?.[0];
-      if (!comp) continue;
-
-      const homeComp = comp.competitors?.find(c => c.homeAway === 'home');
-      const awayComp = comp.competitors?.find(c => c.homeAway === 'away');
-      if (!homeComp || !awayComp) continue;
-
-      const homeTeam = homeComp.team.displayName;
-      const awayTeam = awayComp.team.displayName;
-
-      const odds = comp.odds?.[0];
-      if (!odds?.moneyline) continue;
-
-      const homeOddsStr = odds.moneyline.home?.close?.odds;
-      const awayOddsStr = odds.moneyline.away?.close?.odds;
-
-      const homeDecimal = homeOddsStr ? parseAmericanOddsStr(homeOddsStr) : null;
-      const awayDecimal = awayOddsStr ? parseAmericanOddsStr(awayOddsStr) : null;
-
-      if (!homeDecimal || !awayDecimal) continue;
-
-      const [homeImplied, awayImplied] = removeVig([
-        1 / homeDecimal,
-        1 / awayDecimal,
-      ]);
-
-      const eventId = `espn_${event.id}`;
-      const commence = event.date;
-
-      rows.push(
-        { event_id: eventId, sport: s.sport, league: s.league, home_team: homeTeam, away_team: awayTeam, commence_time: commence, sportsbook: 'draftkings_via_espn', market_type: 'h2h', outcome_name: homeTeam, price_decimal: homeDecimal, implied_prob: homeImplied, point_spread: null },
-        { event_id: eventId, sport: s.sport, league: s.league, home_team: homeTeam, away_team: awayTeam, commence_time: commence, sportsbook: 'draftkings_via_espn', market_type: 'h2h', outcome_name: awayTeam, price_decimal: awayDecimal, implied_prob: awayImplied, point_spread: null }
-      );
-    }
-
-    console.log(`[ingest-sports] ESPN ${s.league}: ${events.length} games, ${rows.filter(r => r.league === s.league).length} odds rows`);
-  }
-
-  return rows;
-}
-
 // ── The Odds API (fallback) ────────────────────────────────
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '';
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
@@ -141,7 +41,6 @@ const BOOKMAKERS = 'draftkings,fanduel,betmgm,pinnacle';
 // In-season sport filter
 const TRACKED_ODDS_API: { sport: string; league: string }[] = [
   { sport: 'basketball_nba',          league: 'NBA' },
-  { sport: 'basketball_ncaab',        league: 'NCAAB' },   // ← March Madness!
   { sport: 'baseball_mlb',            league: 'MLB' },
   { sport: 'icehockey_nhl',           league: 'NHL' },
   { sport: 'soccer_epl',              league: 'Premier League' },
@@ -151,20 +50,11 @@ const TRACKED_ODDS_API: { sport: string; league: string }[] = [
 
 // ── Shared helpers ─────────────────────────────────────────
 
-// Browser-like headers for Pinnacle — Netlify IPs get blocked without these
-const PINNACLE_HEADERS: Record<string, string> = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Origin': 'https://www.pinnacle.com',
-  'Referer': 'https://www.pinnacle.com/',
-};
-
-async function fetchJson(url: string, timeoutMs = 10000, extraHeaders: Record<string, string> = {}): Promise<unknown> {
+async function fetchJson(url: string, timeoutMs = 10000): Promise<unknown> {
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
-      headers: { Accept: 'application/json', ...extraHeaders },
+      headers: { Accept: 'application/json' },
     });
     if (!res.ok) {
       console.warn(`[ingest-sports] HTTP ${res.status}: ${url.split('?')[0]}`);
@@ -251,8 +141,7 @@ async function fetchPinnacleOdds(startTime: number): Promise<OddsRow[]> {
 
     // Get leagues for this sport
     const leagues = await fetchJson(
-      `${PINNACLE_BASE}/leagues?sportId=${sport.id}&hasOfferings=true&allowedOnly=true`,
-      10000, PINNACLE_HEADERS
+      `${PINNACLE_BASE}/leagues?sportId=${sport.id}&hasOfferings=true&allowedOnly=true`
     ) as PinnacleLeague[] | null;
 
     if (!leagues?.length) continue;
@@ -263,11 +152,8 @@ async function fetchPinnacleOdds(startTime: number): Promise<OddsRow[]> {
     for (const league of topLeagues) {
       if (Date.now() - startTime > 18000) break;
 
-      // Removed handicapType=asian — that filter strips out moneyline prices, leaving only
-      // asian handicap markets with a different price structure. We want straight h2h moneylines.
       const matchups = await fetchJson(
-        `${PINNACLE_BASE}/matchups?leagueIds=${league.id}&withSpecials=false`,
-        10000, PINNACLE_HEADERS
+        `${PINNACLE_BASE}/matchups?leagueIds=${league.id}&withSpecials=false&handicapType=asian`
       ) as PinnacleMatchup[] | null;
 
       if (!matchups?.length) continue;
@@ -280,18 +166,10 @@ async function fetchPinnacleOdds(startTime: number): Promise<OddsRow[]> {
         const homeTeam = matchup.teams?.find(t => t.type === 'home')?.name ?? matchup.teams?.[0]?.name ?? 'Home';
         const awayTeam = matchup.teams?.find(t => t.type === 'away')?.name ?? matchup.teams?.[1]?.name ?? 'Away';
 
-        // Extract moneyline prices — try matchup.prices first, then matchup.sides as fallback
+        // Extract moneyline prices
         const prices = matchup.prices ?? [];
-        let homePrice = prices.find(p => p.designation === 'home');
-        let awayPrice = prices.find(p => p.designation === 'away');
-
-        // Fallback: Pinnacle sometimes puts prices inside matchup.sides[].odds
-        if ((!homePrice || !awayPrice) && matchup.sides?.length) {
-          const homeSide = matchup.sides.find(s => s.label === 'home' || s.label === 'Home');
-          const awaySide = matchup.sides.find(s => s.label === 'away' || s.label === 'Away');
-          if (homeSide?.odds?.[0]) homePrice = { designation: 'home', price: homeSide.odds[0].price };
-          if (awaySide?.odds?.[0]) awayPrice = { designation: 'away', price: awaySide.odds[0].price };
-        }
+        const homePrice = prices.find(p => p.designation === 'home');
+        const awayPrice = prices.find(p => p.designation === 'away');
 
         if (!homePrice || !awayPrice) continue;
 
@@ -444,54 +322,33 @@ export const handler = schedule('0 * * * *', async () => {  // Every hour (was e
     else console.log(`[ingest-sports] Upserted ${sportMarketRows.length} sports markets`);
   }
 
-  // ── Step 2: Fetch odds — Pinnacle + NCAA in parallel ──────────
-  // CRITICAL: Run NCAA fetch in parallel with Pinnacle so it never gets
-  // blocked by Pinnacle's many sequential HTTP calls. NCAA Tournament
-  // ($6-7M markets) is the highest-value opportunity in March/April.
-  const nowMonth = new Date().getMonth(); // 0-indexed
-  const isTournamentSeason = nowMonth >= 2 && nowMonth <= 4; // Mar-May
-  const shouldFetchNcaa = !!ODDS_API_KEY && isTournamentSeason;
+  // ── Step 2: Fetch odds — Pinnacle first, Odds API fallback ────
+  let allOddsRows: OddsRow[] = [];
 
-  console.log('[ingest-sports] Fetching Pinnacle + NCAA odds in parallel...');
-  const [pinnacleRows, ncaaRows] = await Promise.all([
-    fetchPinnacleOdds(startTime),
-    shouldFetchNcaa ? fetchOddsApiOdds('basketball_ncaab') : Promise.resolve([]),
-  ]);
-
+  console.log('[ingest-sports] Fetching Pinnacle public odds...');
+  const pinnacleRows = await fetchPinnacleOdds(startTime);
   console.log(`[ingest-sports] Pinnacle returned ${pinnacleRows.length} odds rows`);
-  if (shouldFetchNcaa) console.log(`[ingest-sports] NCAA returned ${ncaaRows.length} odds rows`);
+  allOddsRows = pinnacleRows;
 
-  let allOddsRows: OddsRow[] = [...pinnacleRows, ...ncaaRows];
+  // If Pinnacle returned nothing (API changed?), fall back to The Odds API
+  if (allOddsRows.length === 0 && ODDS_API_KEY) {
+    console.log('[ingest-sports] Pinnacle returned 0 rows — falling back to The Odds API');
+    const now = new Date();
+    const month = now.getMonth();
+    const inSeasonSports = TRACKED_ODDS_API.filter(s => {
+      if (s.sport.includes('nba')) return month >= 9 || month <= 5;
+      if (s.sport.includes('mlb')) return month >= 2 && month <= 9;
+      if (s.sport.includes('nhl')) return month >= 9 || month <= 5;
+      if (s.sport.includes('nfl')) return month >= 8 || month <= 1;
+      return true;
+    });
 
-  // If Pinnacle returned nothing (blocked on serverless IPs), fall back to ESPN then Odds API
-  if (pinnacleRows.length === 0) {
-    // ESPN first: free, no auth, no IP blocking — always try this
-    console.log('[ingest-sports] Pinnacle returned 0 rows — trying ESPN fallback (free, no auth)');
-    const espnRows = await fetchEspnOdds(startTime);
-    allOddsRows = [...espnRows, ...ncaaRows]; // combine with NCAA rows already fetched
-    console.log(`[ingest-sports] ESPN fallback returned ${espnRows.length} rows`);
-
-    // Additionally use Odds API if key present and ESPN coverage was thin
-    if (ODDS_API_KEY && allOddsRows.length < 20) {
-      console.log('[ingest-sports] ESPN coverage thin — also trying The Odds API');
-      const now = new Date();
-      const month = now.getMonth();
-      const inSeasonSports = TRACKED_ODDS_API.filter(s => {
-        if (s.sport.includes('ncaab')) return false; // already fetched above
-        if (s.sport.includes('nba')) return month >= 9 || month <= 5;
-        if (s.sport.includes('mlb')) return month >= 2 && month <= 9;
-        if (s.sport.includes('nhl')) return month >= 9 || month <= 5;
-        if (s.sport.includes('nfl')) return month >= 8 || month <= 1;
-        return true;
-      });
-
-      for (const s of inSeasonSports.slice(0, 3)) { // Max 3 to conserve quota
-        if (Date.now() - startTime > 20000) break;
-        const rows = await fetchOddsApiOdds(s.sport);
-        allOddsRows.push(...rows);
-      }
-      console.log(`[ingest-sports] After Odds API supplement: ${allOddsRows.length} total rows`);
+    for (const s of inSeasonSports.slice(0, 3)) { // Max 3 to conserve quota
+      if (Date.now() - startTime > 20000) break;
+      const rows = await fetchOddsApiOdds(s.sport);
+      allOddsRows.push(...rows);
     }
+    console.log(`[ingest-sports] Odds API fallback returned ${allOddsRows.length} rows`);
   }
 
   // ── Step 3: Insert odds to DB ───────────────────────────────
@@ -506,7 +363,7 @@ export const handler = schedule('0 * * * *', async () => {  // Every hour (was e
     }
     console.log(`[ingest-sports] Inserted ${inserted} odds rows`);
   } else {
-    console.warn('[ingest-sports] No odds data from any source — ESPN/Pinnacle both returned 0 rows');
+    console.warn('[ingest-sports] No odds data from any source — check Pinnacle API and ODDS_API_KEY');
   }
 
   // ── Step 4: Quick edge scan (log only) ─────────────────────
