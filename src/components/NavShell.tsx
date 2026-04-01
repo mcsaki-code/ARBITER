@@ -83,9 +83,8 @@ const NAV_ITEMS = [
   { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
   { href: '/arb', label: 'Arbitrage', Icon: IconArb },
-  { href: '/tracker', label: 'Results', Icon: IconTracker },
-  { href: '/analytics', label: 'Analytics', Icon: IconAnalytics },
-  { href: '/markets', label: 'All Markets', Icon: IconMarkets },
+  { href: '/performance', label: 'Performance', Icon: IconTracker },
+  { href: '/markets', label: 'Markets', Icon: IconMarkets },
 ];
 
 export function NavShell({ children }: { children: React.ReactNode }) {

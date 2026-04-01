@@ -137,18 +137,25 @@ export default function HomePage() {
   useEffect(() => {
     async function load() {
       try {
-        const [betsRes, signalsRes, arbRes, sportsRes, cryptoRes] = await Promise.all([
+        const [betsRes, signalsRes, arbRes, sportsRes, cryptoRes, configRes] = await Promise.all([
           fetch('/api/bets'),
           fetch('/api/signals'),
           fetch('/api/arb'),
           fetch('/api/sports'),
           fetch('/api/crypto'),
+          fetch('/api/config'),
         ]);
 
         if (betsRes.ok) {
           const bData = await betsRes.json();
           setConfig(bData.config || {});
           setBets(bData.bets || []);
+        }
+
+        // Merge full config (includes Railway worker keys)
+        if (configRes.ok) {
+          const cfgData = await configRes.json();
+          setConfig(prev => ({ ...prev, ...(cfgData.config || {}) }));
         }
 
         if (signalsRes.ok) {
@@ -360,78 +367,100 @@ export default function HomePage() {
         {/* Key Metrics - 5 cards */}
         <div className="lg:col-span-2">
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
-            {/* Bankroll */}
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
-              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Bankroll</div>
-              <div className="text-2xl font-bold text-arbiter-text">
-                ${formatNumber(bankroll, 0)}
-              </div>
-              {totalPnl !== 0 && (
-                <div className={`text-xs font-semibold mt-1 ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                  {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)} from trading
+            {loading ? (
+              /* Skeleton placeholders while loading */
+              <>
+                {[...Array(5)].map((_, i) => (
+                  <div key={i} className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                    <div className="h-3 w-16 bg-arbiter-border rounded animate-pulse mb-3" />
+                    <div className="h-7 w-20 bg-arbiter-border rounded animate-pulse" />
+                  </div>
+                ))}
+              </>
+            ) : (
+              <>
+                {/* Bankroll */}
+                <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                  <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Bankroll</div>
+                  <div className="text-2xl font-bold text-arbiter-text">
+                    ${formatNumber(bankroll, 0)}
+                  </div>
+                  {totalPnl !== 0 && (
+                    <div className={`text-xs font-semibold mt-1 ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
+                      {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)} from trading
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Open Bets */}
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
-              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Active Bets</div>
-              <div className="text-2xl font-bold text-arbiter-text">
-                {openBets.length}
-              </div>
-              {openBets.length > 0 && (
-                <div className="text-xs text-arbiter-text-3 mt-1">
-                  ${formatNumber(openExposure)} at risk
+                {/* Open Bets */}
+                <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                  <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Active Bets</div>
+                  <div className="text-2xl font-bold text-arbiter-text">
+                    {openBets.length}
+                  </div>
+                  {openBets.length > 0 && (
+                    <div className="text-xs text-arbiter-text-3 mt-1">
+                      ${formatNumber(openExposure)} at risk
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Win Rate */}
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
-              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Win Rate</div>
-              <div className={`text-2xl font-bold ${winRate > 0.55 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
-                {resolvedBets.length > 0 ? `${Math.round(winRate * 100)}%` : '—'}
-              </div>
-              {resolvedBets.length > 0 && (
-                <div className="text-xs text-arbiter-text-3 mt-1">
-                  {wins}W/{losses}L
+                {/* Win Rate */}
+                <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                  <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Win Rate</div>
+                  <div className={`text-2xl font-bold ${winRate > 0.55 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
+                    {resolvedBets.length > 0 ? `${Math.round(winRate * 100)}%` : '—'}
+                  </div>
+                  {resolvedBets.length > 0 && (
+                    <div className="text-xs text-arbiter-text-3 mt-1">
+                      {wins}W/{losses}L
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
 
-            {/* Total P&L */}
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
-              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Profit</div>
-              <div className={`text-2xl font-bold ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
-                {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)}
-              </div>
-            </div>
-
-            {/* Pipeline / Potential Winnings */}
-            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
-              <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Pipeline</div>
-              <div className={`text-2xl font-bold ${potentialWinnings >= 0 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
-                {potentialWinnings >= 0 ? '+' : ''}{formatNumber(potentialWinnings, 0)}
-              </div>
-              {potentialWinnings > 0 && (
-                <div className="text-xs text-arbiter-text-3 mt-1">
-                  potential profit
+                {/* Total P&L */}
+                <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                  <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Profit</div>
+                  <div className={`text-2xl font-bold ${totalPnl >= 0 ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
+                    {totalPnl >= 0 ? '+' : ''}{formatNumber(totalPnl, 0)}
+                  </div>
                 </div>
-              )}
-            </div>
+
+                {/* Pipeline / Potential Winnings */}
+                <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+                  <div className="text-xs text-arbiter-text-3 uppercase tracking-wide mb-2">Pipeline</div>
+                  <div className={`text-2xl font-bold ${potentialWinnings >= 0 ? 'text-arbiter-green' : 'text-arbiter-text'}`}>
+                    {potentialWinnings >= 0 ? '+' : ''}{formatNumber(potentialWinnings, 0)}
+                  </div>
+                  {potentialWinnings > 0 && (
+                    <div className="text-xs text-arbiter-text-3 mt-1">
+                      potential profit
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
         {/* Bankroll Card */}
         <div>
-          <BankrollCard
-            bankroll={bankroll}
-            pnl={totalPnl}
-            winRate={winRate}
-            totalBets={resolvedBets.length}
-            wins={wins}
-            losses={losses}
-          />
+          {loading ? (
+            <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-5">
+              <div className="h-3 w-24 bg-arbiter-border rounded animate-pulse mb-3" />
+              <div className="h-8 w-28 bg-arbiter-border rounded animate-pulse mb-2" />
+              <div className="h-3 w-32 bg-arbiter-border rounded animate-pulse" />
+            </div>
+          ) : (
+            <BankrollCard
+              bankroll={bankroll}
+              pnl={totalPnl}
+              winRate={winRate}
+              totalBets={resolvedBets.length}
+              wins={wins}
+              losses={losses}
+            />
+          )}
         </div>
       </div>
 
@@ -757,6 +786,70 @@ export default function HomePage() {
               <StatusDot label="Resolved bets" count={resolvedBets.length} active={resolvedBets.length > 0} />
             </div>
           </div>
+
+          {/* Railway Worker Status */}
+          {(() => {
+            const heartbeat = config.railway_worker_last_heartbeat;
+            const uptimeHours = config.railway_worker_uptime_hours;
+            const tempAnalyzed = config.railway_worker_temp_analyzed;
+            const priceShifts = config.railway_worker_price_shifts;
+            const workerVersion = config.railway_worker_version;
+            const minutesAgo = heartbeat
+              ? Math.round((Date.now() - new Date(heartbeat).getTime()) / 60000)
+              : null;
+            const isAlive = minutesAgo !== null && minutesAgo < 20;
+            return (
+              <div className="bg-arbiter-card border border-arbiter-border rounded-lg overflow-hidden">
+                <div className="border-b border-arbiter-border px-5 py-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-arbiter-text">Railway Worker</h3>
+                  <div className={`flex items-center gap-1.5 text-xs font-semibold ${isAlive ? 'text-arbiter-green' : heartbeat ? 'text-arbiter-red' : 'text-arbiter-text-3'}`}>
+                    <div className={`w-2 h-2 rounded-full ${isAlive ? 'bg-arbiter-green animate-pulse' : heartbeat ? 'bg-arbiter-red' : 'bg-arbiter-text-3'}`} />
+                    {isAlive ? 'LIVE' : heartbeat ? 'OFFLINE' : 'NOT DEPLOYED'}
+                  </div>
+                </div>
+                <div className="p-4 space-y-2 text-xs">
+                  {heartbeat ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-arbiter-text-3">Last heartbeat</span>
+                        <span className={`font-mono ${isAlive ? 'text-arbiter-green' : 'text-arbiter-red'}`}>
+                          {minutesAgo === 0 ? 'just now' : `${minutesAgo}m ago`}
+                        </span>
+                      </div>
+                      {uptimeHours && (
+                        <div className="flex justify-between">
+                          <span className="text-arbiter-text-3">Uptime</span>
+                          <span className="font-mono text-arbiter-text">{parseFloat(uptimeHours).toFixed(1)}h</span>
+                        </div>
+                      )}
+                      {tempAnalyzed && (
+                        <div className="flex justify-between">
+                          <span className="text-arbiter-text-3">Temps analyzed</span>
+                          <span className="font-mono text-arbiter-text">{tempAnalyzed}</span>
+                        </div>
+                      )}
+                      {priceShifts && (
+                        <div className="flex justify-between">
+                          <span className="text-arbiter-text-3">Price shifts detected</span>
+                          <span className={`font-mono ${parseInt(priceShifts) > 0 ? 'text-arbiter-amber' : 'text-arbiter-text'}`}>{priceShifts}</span>
+                        </div>
+                      )}
+                      {workerVersion && (
+                        <div className="flex justify-between">
+                          <span className="text-arbiter-text-3">Version</span>
+                          <span className="font-mono text-arbiter-text-3">v{workerVersion}</span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="text-arbiter-text-3 text-center py-2">
+                      No worker data — deploy Railway worker to enable 24/7 monitoring
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Quick Links */}
           <div className="space-y-3">
