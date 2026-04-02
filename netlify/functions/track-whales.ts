@@ -157,7 +157,7 @@ export const handler = schedule('*/15 * * * *', async () => {
         address: seed.address,
         display_name: seed.display_name,
         total_profit: 0,
-        total_bets: 0,
+        total_bets: 100,  // Pre-vetted whales — set above MIN_WHALE_TOTAL_BETS threshold
         win_rate: seed.estimated_win_rate,
         last_updated: new Date().toISOString(),
       }));
