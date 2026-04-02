@@ -77,14 +77,31 @@ function IconAnalytics({ className = '' }: { className?: string }) {
   );
 }
 
+function IconPolitics({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path fillRule="evenodd" d="M3 6a3 3 0 013-3h8a3 3 0 013 3v8a3 3 0 01-3 3H6a3 3 0 01-3-3V6zm4 0a1 1 0 00-1 1v1a1 1 0 002 0V7a1 1 0 00-1-1zm4 0a1 1 0 00-1 1v1a1 1 0 002 0V7a1 1 0 00-1-1zm-4 5a1 1 0 000 2h4a1 1 0 000-2H7z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function IconSentiment({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
+      <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', Icon: IconHome },
   { href: '/sports', label: 'Sports', Icon: IconSports },
   { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
+  { href: '/politics', label: 'Politics', Icon: IconPolitics },
+  { href: '/sentiment', label: 'Signals', Icon: IconSentiment },
   { href: '/arb', label: 'Arbitrage', Icon: IconArb },
   { href: '/performance', label: 'Performance', Icon: IconTracker },
-  { href: '/markets', label: 'Markets', Icon: IconMarkets },
 ];
 
 export function NavShell({ children }: { children: React.ReactNode }) {
