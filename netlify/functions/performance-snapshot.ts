@@ -87,7 +87,7 @@ export const handler = schedule('0 0 * * *', async () => {
   // ─── Calibration rollup per category × confidence tier ───────────────────
   // Tracks how well our predicted probabilities match actual outcomes (Brier score).
   // This is the #1 metric that separates professional forecasters from noise.
-  const categories = ['weather', 'sports', 'crypto', 'politics', 'sentiment'];
+  const categories = ['weather', 'sports', 'crypto', 'politics', 'sentiment', 'opportunity', 'whale_copy', 'high_prob_bond'];
   const tiers = ['LOW', 'MEDIUM', 'HIGH'];
   const resolvedBets = bets.filter((b) => b.status === 'WON' || b.status === 'LOST');
 

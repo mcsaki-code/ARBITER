@@ -128,7 +128,7 @@ export const handler = schedule('*/30 * * * *', async () => {
   // Get latest signal snapshots for each asset
   const signals: Record<string, SignalRow> = {};
 
-  for (const asset of ['BTC', 'ETH']) {
+  for (const asset of ['BTC', 'ETH', 'SOL']) {
     const { data } = await supabase
       .from('crypto_signals')
       .select('*')
@@ -175,7 +175,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     let matchedAsset: string | null = null;
     if (q.includes('bitcoin') || q.includes('btc')) matchedAsset = 'BTC';
     else if (q.includes('ethereum') || q.includes('eth')) matchedAsset = 'ETH';
-    else if (q.includes('solana') || q.includes('sol')) continue; // No signals yet
+    else if (q.includes('solana') || q.includes('sol')) matchedAsset = 'SOL';
 
     if (matchedAsset && signals[matchedAsset]) {
       candidates.push({

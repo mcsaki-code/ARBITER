@@ -18,6 +18,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -345,28 +346,82 @@ Respond ONLY in valid JSON:
 }`;
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 800,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(20000),
-      });
+      // Feature flag: use ensemble if multiple API keys are available
+      const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
 
-      if (!res.ok) { console.error(`[opportunities] Claude error ${res.status}`); continue; }
-      const data = await res.json();
-      const text = data.content?.[0]?.text ?? '';
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) { console.warn('[opportunities] No JSON in response'); continue; }
+      let analysis: any;
+      let ensembleData: EnsembleResult | null = null;
 
-      const analysis = JSON.parse(jsonMatch[0]) as any;
+      if (USE_ENSEMBLE) {
+        try {
+          ensembleData = await ensembleAnalyze(prompt);
+          const claudeResponse = ensembleData.model_responses.find((r: any) => r.model === 'claude');
+
+          if (claudeResponse?.direction && claudeResponse.edge !== null) {
+            // Build analysis from ensemble Claude response + market context
+            const computedTrueProb = claudeResponse.direction === 'BUY_YES'
+              ? Math.min(yesPrice + (claudeResponse.edge ?? 0), 0.99)
+              : Math.max(yesPrice - (claudeResponse.edge ?? 0), 0.01);
+
+            analysis = {
+              true_prob: computedTrueProb,
+              market_price: yesPrice,
+              edge: claudeResponse.edge,
+              direction: claudeResponse.direction,
+              confidence: claudeResponse.confidence,
+              reasoning: claudeResponse.reasoning,
+              auto_eligible: false,
+              flags: [],
+            };
+
+            console.log(
+              `[opportunities] Ensemble: models=${ensembleData.used_models.join(',')} | ` +
+              `agreement=${(ensembleData.agreement_score * 100).toFixed(1)}% | ` +
+              `consensus=${ensembleData.consensus_direction}`
+            );
+
+            // Boost confidence if all models strongly agree
+            if (ensembleData.agreement_score >= 1.0 && crossMarketCount >= 2) {
+              analysis.auto_eligible = true;
+              analysis.flags.push('ensemble_unanimous', 'cross_market_confirmed');
+            }
+
+            // Downgrade confidence on model disagreement
+            if (ensembleData.agreement_score < 0.67 && analysis.confidence !== 'LOW') {
+              analysis.confidence = 'LOW';
+            }
+          }
+        } catch (ensembleErr) {
+          console.error(`[opportunities] Ensemble failed, falling back to direct Claude:`, ensembleErr);
+          analysis = null;
+        }
+      }
+
+      // Fallback: direct Claude call if ensemble unavailable or failed
+      if (!analysis) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 800,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(20000),
+        });
+
+        if (!res.ok) { console.error(`[opportunities] Claude error ${res.status}`); continue; }
+        const data = await res.json();
+        const text = data.content?.[0]?.text ?? '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) { console.warn('[opportunities] No JSON in response'); continue; }
+
+        analysis = JSON.parse(jsonMatch[0]) as any;
+      }
 
       // Validate analysis
       const { validateOpportunityAnalysis } = await import('../../src/lib/validate-analysis');
