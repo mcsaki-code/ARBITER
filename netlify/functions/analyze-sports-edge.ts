@@ -17,7 +17,7 @@ const supabase = createClient(
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 12;   // was 3 → 8 → now 12 for higher throughput
-const MIN_EDGE_PCT = 0.02;
+const MIN_EDGE_PCT = 0.01;         // was 0.02 — too strict, sportsbooks track within 1-2%
 
 // Feature flag: use ensemble if OpenAI or Gemini keys are configured
 const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
@@ -651,8 +651,8 @@ Respond ONLY in valid JSON:
     const hoursToGame = Math.max(0, (new Date(consensus.commence).getTime() - Date.now()) / 3600000);
     if (hoursToGame < 1) continue;
 
-    // Skip if already analyzed recently (last 4 hours) to allow broader coverage across runs
-    const recentCutoff = new Date(Date.now() - 4 * 3600000).toISOString();
+    // Skip if already analyzed recently (2h cooldown — odds update hourly, stale analyses miss line moves)
+    const recentCutoff = new Date(Date.now() - 2 * 3600000).toISOString();
     const { data: recentAnalysis } = await supabase
       .from('sports_analyses')
       .select('id')
@@ -891,7 +891,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
   if (analyzed < MAX_ANALYSES_PER_RUN && Date.now() - startTime < 20000) {
     const matchedMarketIds = new Set(edgeCandidates.map(c => c.market.id));
     const unmatchedHighLiquidity = (sportsMarkets as MarketRow[])
-      .filter(m => !matchedMarketIds.has(m.id) && m.liquidity_usd >= 20000) // high-liquidity threshold
+      .filter(m => !matchedMarketIds.has(m.id) && m.liquidity_usd >= 10000) // was 20000 — too strict
       .sort((a, b) => b.liquidity_usd - a.liquidity_usd)
       .slice(0, 4); // pick top 4 by liquidity
 

@@ -77,10 +77,10 @@ function extractDirection(
   parsed: Record<string, unknown> | null
 ): 'BUY_YES' | 'BUY_NO' | 'PASS' | null {
   if (!parsed) return null;
-  const dir = parsed.direction as string;
-  if (['BUY_YES', 'BUY_NO', 'PASS'].includes(dir)) {
-    return dir as 'BUY_YES' | 'BUY_NO' | 'PASS';
-  }
+  const dir = String(parsed.direction || '').toUpperCase().trim();
+  if (dir === 'BUY_YES' || dir === 'YES' || dir === 'BUY') return 'BUY_YES';
+  if (dir === 'BUY_NO' || dir === 'NO' || dir === 'SELL') return 'BUY_NO';
+  if (dir === 'PASS' || dir === 'HOLD' || dir === 'SKIP' || dir === 'NONE') return 'PASS';
   return null;
 }
 
@@ -89,10 +89,10 @@ function extractConfidence(
   parsed: Record<string, unknown> | null
 ): 'HIGH' | 'MEDIUM' | 'LOW' | null {
   if (!parsed) return null;
-  const conf = parsed.confidence as string;
-  if (['HIGH', 'MEDIUM', 'LOW'].includes(conf)) {
-    return conf as 'HIGH' | 'MEDIUM' | 'LOW';
-  }
+  const conf = String(parsed.confidence || '').toUpperCase().trim();
+  if (conf === 'HIGH' || conf === 'STRONG') return 'HIGH';
+  if (conf === 'MEDIUM' || conf === 'MODERATE' || conf === 'MED') return 'MEDIUM';
+  if (conf === 'LOW' || conf === 'WEAK') return 'LOW';
   return null;
 }
 
@@ -434,11 +434,15 @@ function computeConsensus(
 // ============================================================
 
 export async function ensembleAnalyze(prompt: string): Promise<EnsembleResult> {
+  // Add explicit JSON compliance instruction for non-Claude models
+  const jsonPrefix = 'CRITICAL: Your response must be ONLY a single JSON object with these exact fields: direction (BUY_YES, BUY_NO, or PASS), confidence (HIGH, MEDIUM, or LOW), edge (decimal 0-1), reasoning (string). No markdown, no code fences, no explanation outside the JSON.\n\n';
+  const enhancedPrompt = jsonPrefix + prompt;
+
   // Run all 3 models in parallel using Promise.allSettled
   const [claudeSettled, gptSettled, geminiSettled] = await Promise.allSettled([
-    callClaude(prompt),
-    callGPT4o(prompt),
-    callGemini(prompt),
+    callClaude(prompt), // Claude gets original prompt (already well-formatted)
+    callGPT4o(enhancedPrompt),
+    callGemini(enhancedPrompt),
   ]);
 
   // Extract results (default to null on rejection)
@@ -474,6 +478,10 @@ export async function ensembleAnalyze(prompt: string): Promise<EnsembleResult> {
           reasoning: 'Request rejected',
           latency_ms: 0,
         };
+
+  // Log raw settlement status for debugging
+  const settled = { claude: claudeSettled.status, gpt4o: gptSettled.status, gemini: geminiSettled.status };
+  console.log(`[ensemble] Settlement: ${JSON.stringify(settled)} | Claude dir=${claudeResult.direction} | GPT dir=${gptResult.direction} | Gemini dir=${geminiResult.direction}`);
 
   // Track which models responded with valid data
   const used_models: string[] = [];
