@@ -128,7 +128,7 @@ function is15MinMarket(question: string): boolean {
      q.includes('up') || q.includes('down'))
   ) || (
     // Also catch "Will BTC be above $X at HH:MM?" markets (short duration)
-    (q.includes('bitcoin') || q.includes('btc') || q.includes('ethereum') || q.includes('eth') || q.includes('solana') || q.includes('sol')) &&
+    (q.includes('bitcoin') || /\bbtc\b/.test(q) || q.includes('ethereum') || /\beth\b/.test(q) || q.includes('solana') || /\bsol\b/.test(q)) &&
     (q.includes(':') && (q.includes('above') || q.includes('below')))
   );
 }
@@ -136,8 +136,8 @@ function is15MinMarket(question: string): boolean {
 function marketMatchesAsset(question: string, asset: string): boolean {
   const q = question.toLowerCase();
   if (asset === 'BTC') return q.includes('bitcoin') || q.includes('btc');
-  if (asset === 'ETH') return q.includes('ethereum') || q.includes('eth');
-  if (asset === 'SOL') return q.includes('solana') || q.includes('sol');
+  if (asset === 'ETH') return q.includes('ethereum') || /\beth\b/.test(q);
+  if (asset === 'SOL') return q.includes('solana') || /\bsol\b/.test(q);
   return false;
 }
 

@@ -156,7 +156,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     .gt('liquidity_usd', 5000)
     .gt('resolution_date', minResolutionDate)
     .order('volume_usd', { ascending: false })
-    .limit(30);
+    .limit(100); // Increased from 30 — SOL markets have lower volume than BTC/ETH
 
   if (!cryptoMarkets || cryptoMarkets.length === 0) {
     console.log('[analyze-crypto] No active crypto markets');
@@ -172,10 +172,12 @@ export const handler = schedule('*/30 * * * *', async () => {
     const q = market.question.toLowerCase();
 
     // Determine which asset this market is about
+    // IMPORTANT: Use word-boundary regex — substring matching causes false positives
+    // e.g. "eth" matches "Netherlands", "Beth", "Hegseth"; "sol" matches "resolution"
     let matchedAsset: string | null = null;
-    if (q.includes('bitcoin') || q.includes('btc')) matchedAsset = 'BTC';
-    else if (q.includes('ethereum') || q.includes('eth')) matchedAsset = 'ETH';
-    else if (q.includes('solana') || q.includes('sol')) matchedAsset = 'SOL';
+    if (q.includes('bitcoin') || /\bbtc\b/.test(q)) matchedAsset = 'BTC';
+    else if (q.includes('ethereum') || /\beth\b/.test(q) || q.includes('ether ')) matchedAsset = 'ETH';
+    else if (q.includes('solana') || /\bsol\b/.test(q)) matchedAsset = 'SOL';
 
     if (matchedAsset && signals[matchedAsset]) {
       candidates.push({
