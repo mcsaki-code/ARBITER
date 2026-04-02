@@ -231,15 +231,19 @@ export const handler = schedule('0 * * * *', async () => {
     let analysisConfidence: string | null = null;
 
     if (bet.analysis_id) {
-      // Try to get from weather_analyses (most common)
-      const { data: weatherAnalysis } = await supabase
-        .from('weather_analyses')
-        .select('edge, confidence')
-        .eq('id', bet.analysis_id)
-        .single();
-      if (weatherAnalysis) {
-        analysisEdge = weatherAnalysis.edge;
-        analysisConfidence = weatherAnalysis.confidence;
+      // Cascade through all analysis tables to find edge/confidence metadata.
+      // The analysis_id could point to weather_analyses, sports_analyses, or crypto_analyses.
+      for (const table of ['weather_analyses', 'sports_analyses', 'crypto_analyses']) {
+        const { data: analysis } = await supabase
+          .from(table)
+          .select('edge, confidence')
+          .eq('id', bet.analysis_id)
+          .single();
+        if (analysis) {
+          analysisEdge = analysis.edge;
+          analysisConfidence = analysis.confidence;
+          break;
+        }
       }
     }
 

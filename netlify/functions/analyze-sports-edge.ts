@@ -561,9 +561,10 @@ Respond ONLY in valid JSON:
         || (TEAM_ALIASES[homeLC] ?? []).some(a => q.includes(a))
         || q.includes(homeLC.split(' ').pop() ?? '');
 
-      // Require at least 2 sportsbooks for a reliable consensus.
-      // A single book's line could be stale or an outlier.
-      if (info.bookCount < 2) continue;
+      // Single-book lines are less reliable but still useful.
+      // We flag them so Claude's analysis can apply a confidence penalty.
+      // Previously this was `if (bookCount < 2) continue;` which silently
+      // blocked ALL sports analysis when only 1 sportsbook returned data.
 
       const sbProb = isHomeQuestion ? info.home : info.away;
       if (sbProb <= 0 || sbProb >= 1) continue;
@@ -623,7 +624,7 @@ GAME TIME: ${new Date(consensus.commence).toLocaleString()} (${Math.round(hoursT
 SPORTSBOOK CONSENSUS (vig-removed):
 - ${consensus.homeTeam} win: ${(consensus.home * 100).toFixed(1)}%
 - ${consensus.awayTeam} win: ${(consensus.away * 100).toFixed(1)}%
-- Books contributing: ${consensus.bookCount}
+- Books contributing: ${consensus.bookCount}${consensus.bookCount < 2 ? ' ⚠️ SINGLE-BOOK LINE — apply confidence penalty, line may be stale or outlier' : ''}
 
 SPORTSBOOK BREAKDOWN:
 ${sbBreakdown || 'No individual book breakdown available'}
