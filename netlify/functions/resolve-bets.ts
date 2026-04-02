@@ -79,8 +79,19 @@ export const handler = schedule('0 * * * *', async () => {
     }
   }
 
+  // Fetch v2_start_date — only v2 bets should affect the bankroll.
+  // Pre-v2 bets still resolve normally but their P&L is excluded from
+  // bankroll updates to prevent inflating the v2 fresh-start balance.
+  const { data: v2Row } = await supabase
+    .from('system_config')
+    .select('value')
+    .eq('key', 'v2_start_date')
+    .single();
+  const v2StartDate = v2Row?.value ? new Date(v2Row.value) : null;
+
   let resolved = 0;
-  let totalPnl = 0;
+  let totalPnl = 0;       // ALL resolved P&L (for logging)
+  let v2Pnl = 0;          // Only v2 bets P&L (for bankroll updates)
 
   // Minimum hours after resolution_date before we auto-resolve
   // This gives Polymarket time to officially settle the market
@@ -265,6 +276,15 @@ export const handler = schedule('0 * * * *', async () => {
     resolved++;
     totalPnl += pnl;
 
+    // Only count v2 bets toward bankroll updates
+    const betPlacedAt = bet.placed_at ? new Date(bet.placed_at) : null;
+    const isV2Bet = !v2StartDate || (betPlacedAt && betPlacedAt >= v2StartDate);
+    if (isV2Bet) {
+      v2Pnl += pnl;
+    } else {
+      console.log(`[resolve-bets] Pre-v2 bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — excluded from bankroll`);
+    }
+
     // Record outcome for circuit breaker (tracks consecutive losses)
     const cbResult = await recordOutcome(supabase, betWon);
     const cbNote = cbResult.paused
@@ -285,23 +305,26 @@ export const handler = schedule('0 * * * *', async () => {
       .single();
 
     const bankroll = parseFloat(bankrollRow?.value || '5000');
-    const newBankroll = Math.round((bankroll + totalPnl) * 100) / 100;
+    // Only apply v2 P&L to bankroll — pre-v2 bets resolve but don't affect v2 balance
+    const newBankroll = Math.round((bankroll + v2Pnl) * 100) / 100;
+    if (v2Pnl !== totalPnl) {
+      console.log(`[resolve-bets] Bankroll update: $${v2Pnl.toFixed(2)} v2 P&L applied (${totalPnl.toFixed(2)} total, ${(totalPnl - v2Pnl).toFixed(2)} pre-v2 excluded)`);
+    }
 
     await supabase
       .from('system_config')
       .update({ value: newBankroll.toString(), updated_at: new Date().toISOString() })
       .eq('key', 'paper_bankroll');
 
-    // Win rate
-    const { count: wins } = await supabase
-      .from('bets')
-      .select('*', { count: 'exact', head: true })
-      .eq('status', 'WON');
-
-    const { count: total } = await supabase
-      .from('bets')
-      .select('*', { count: 'exact', head: true })
-      .in('status', ['WON', 'LOST']);
+    // Win rate — v2 bets only
+    let winsQuery = supabase.from('bets').select('*', { count: 'exact', head: true }).eq('status', 'WON');
+    let totalQuery = supabase.from('bets').select('*', { count: 'exact', head: true }).in('status', ['WON', 'LOST']);
+    if (v2StartDate) {
+      winsQuery = winsQuery.gte('placed_at', v2StartDate.toISOString());
+      totalQuery = totalQuery.gte('placed_at', v2StartDate.toISOString());
+    }
+    const { count: wins } = await winsQuery;
+    const { count: total } = await totalQuery;
 
     const winRate = total && total > 0 ? Math.round(((wins || 0) / total) * 1000) / 10 : 0;
 
@@ -310,11 +333,12 @@ export const handler = schedule('0 * * * *', async () => {
       .update({ value: winRate.toString(), updated_at: new Date().toISOString() })
       .eq('key', 'paper_win_rate');
 
-    // Snapshot
-    const { data: pnlRows } = await supabase
-      .from('bets')
-      .select('pnl')
-      .in('status', ['WON', 'LOST']);
+    // Snapshot — v2 bets only
+    let pnlQuery = supabase.from('bets').select('pnl').in('status', ['WON', 'LOST']);
+    if (v2StartDate) {
+      pnlQuery = pnlQuery.gte('placed_at', v2StartDate.toISOString());
+    }
+    const { data: pnlRows } = await pnlQuery;
 
     const cumulativePnl = pnlRows?.reduce((s, r) => s + (r.pnl || 0), 0) || 0;
 
