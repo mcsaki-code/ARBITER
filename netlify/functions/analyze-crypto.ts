@@ -216,7 +216,7 @@ export const handler = schedule('*/30 * * * *', async () => {
   let analyzed = 0;
 
   for (const candidate of freshCandidates.slice(0, MAX_ANALYSES_PER_RUN)) {
-    if (Date.now() - startTime > 20000) break;
+    if (Date.now() - startTime > 120000) break; // 2 min guard (background fn has 15 min)
 
     const { market, signal, asset } = candidate;
     const hoursRemaining = market.resolution_date

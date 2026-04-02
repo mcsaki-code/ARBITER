@@ -246,7 +246,7 @@ export const handler = schedule('*/30 * * * *', async () => {
 
   for (const market of prioritized) {
     if (analyzed >= MAX_ANALYSES_PER_RUN) break;
-    if (Date.now() - startTime > 50000) { // 50s budget (30s func timeout buffer)
+    if (Date.now() - startTime > 120000) { // 50s budget (30s func timeout buffer)
       console.log('[opportunities] Time budget hit');
       break;
     }

@@ -325,7 +325,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     // the loop. The old slice(0, 8) was exhausting all 8 items on futures markets
     // (e.g. NBA Finals, World Cup) and producing 0 game analyses every run.
     for (const market of (sportsMarkets as MarketRow[])) {
-      if (Date.now() - startTime > 22000) break;
+      if (Date.now() - startTime > 120000) break; // 2 min guard (background fn has 15 min)
       if (analyzed >= MAX_ANALYSES_PER_RUN) break;
 
       // Skip futures/season-long markets — Claude's knowledge is ~10 months stale,
@@ -645,7 +645,7 @@ Respond ONLY in valid JSON:
   let analyzed = 0;
 
   for (const candidate of edgeCandidates.slice(0, MAX_ANALYSES_PER_RUN)) {
-    if (Date.now() - startTime > 22000) break;
+    if (Date.now() - startTime > 120000) break; // 2 min guard (background fn has 15 min)
 
     const { market, consensus } = candidate;
     const hoursToGame = Math.max(0, (new Date(consensus.commence).getTime() - Date.now()) / 3600000);
@@ -888,7 +888,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
   // Even when sportsbook data exists, pick 3-4 high-liquidity markets that weren't
   // matched to sportsbook events and run knowledge-only analysis on them.
   // This maximizes coverage across the 6,977 active sports markets.
-  if (analyzed < MAX_ANALYSES_PER_RUN && Date.now() - startTime < 20000) {
+  if (analyzed < MAX_ANALYSES_PER_RUN && Date.now() - startTime < 120000) {
     const matchedMarketIds = new Set(edgeCandidates.map(c => c.market.id));
     const unmatchedHighLiquidity = (sportsMarkets as MarketRow[])
       .filter(m => !matchedMarketIds.has(m.id) && m.liquidity_usd >= 10000) // was 20000 — too strict
@@ -899,7 +899,7 @@ Respond ONLY in valid JSON (no markdown, no explanation):
     const knowledgeAnalyzed = await Promise.all(
       unmatchedHighLiquidity.map(async (market) => {
         try {
-          if (analyzed >= MAX_ANALYSES_PER_RUN || Date.now() - startTime > 22000) return false;
+          if (analyzed >= MAX_ANALYSES_PER_RUN || Date.now() - startTime > 120000) return false;
 
           // Skip futures markets
           if (isFuturesMarket(market.question)) {

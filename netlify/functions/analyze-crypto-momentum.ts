@@ -222,7 +222,7 @@ export const handler = schedule('*/5 * * * *', async () => {  // Every 5 minutes
   const betSize = Math.min(bankroll * MAX_BET_PCT_BANKROLL, bankroll * 0.03);
 
   for (const signal of signals) {
-    if (Date.now() - startTime > 20000) break;
+    if (Date.now() - startTime > 120000) break; // 2 min guard (background fn has 15 min)
     if (signal.strength === 'WEAK') continue; // Only STRONG/MODERATE signals
 
     for (const market of activeMomentumMarkets) {
