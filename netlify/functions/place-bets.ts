@@ -20,7 +20,9 @@ const supabase = createClient(
 // Risk limits — calibrated to professional prediction market standards
 const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
-const MAX_DAILY_BETS_AUTO = 20;        // increased from 15
+// No daily bet COUNT cap — if a bet passes all risk filters (edge, entry price,
+// kelly sizing, liquidity, circuit breaker), it gets placed. The exposure cap
+// ($1K/day on $5K bankroll) prevents overextending. Don't leave money on the table.
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
 const MIN_EDGE = 0.05;                 // 5% minimum edge
 const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
@@ -141,11 +143,6 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   console.log(`[place-bets] Today: ${todayBetCount} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
-  if (todayBetCount >= MAX_DAILY_BETS_AUTO) {
-    console.log('[place-bets] Daily bet limit reached');
-    return { statusCode: 200 };
-  }
-
   if (todayExposure >= maxDailyExposure) {
     console.log('[place-bets] Daily exposure limit reached');
     return { statusCode: 200 };
@@ -243,8 +240,7 @@ export const handler = schedule('*/15 * * * *', async () => {
   let totalDeployed = todayExposure;
 
   for (const analysis of candidates) {
-    // Stop conditions
-    if (placed + todayBetCount >= MAX_DAILY_BETS_AUTO) break;
+    // Stop conditions — exposure cap and timeout only, no arbitrary count limit
     if (totalDeployed >= maxDailyExposure) break;
     if (Date.now() - startTime > 20000) break;
 

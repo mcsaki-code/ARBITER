@@ -22,7 +22,8 @@ export const maxDuration = 60; // Allow up to 60s for analysis + placement
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_SINGLE_BET_PCT = 0.03;     // 3% max per bet (down from 5%)
 const MAX_DAILY_EXPOSURE_PCT = 0.20;  // 20% max daily (down from 25%)
-const MAX_DAILY_BETS = 20;            // synced with place-bets.ts (was 15)
+// No daily bet COUNT cap — risk filters (edge, entry price, kelly, circuit breaker)
+// do the gatekeeping. The exposure cap prevents overextending.
 const MIN_EDGE = 0.05;               // 5% minimum edge (up from 2% — the #1 fix)
 const MIN_EDGE_WEATHER = 0.08;       // 8% for weather (matching successful bots)
 const MIN_LIQUIDITY = 5000;          // Skip thin markets
@@ -84,11 +85,6 @@ export async function GET() {
     const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
 
     log.push(`Bankroll: $${bankroll} | Today: ${todayBetCount} bets, $${todayExposure.toFixed(2)} deployed`);
-
-    if (todayBetCount >= MAX_DAILY_BETS) {
-      log.push('Daily bet limit reached');
-      return NextResponse.json({ success: true, placed: 0, log });
-    }
 
     // All open bet market IDs (prevent duplicates)
     const { data: openBets } = await supabase
@@ -238,7 +234,6 @@ export async function GET() {
     let totalDeployed = todayExposure;
 
     for (const analysis of candidates) {
-      if (placed + todayBetCount >= MAX_DAILY_BETS) break;
       if (totalDeployed >= maxDailyExposure) break;
       if (Date.now() - startTime > 55000) break;
 
