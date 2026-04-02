@@ -8,6 +8,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -17,6 +18,9 @@ const supabase = createClient(
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 8;   // was 3 — increased to find more bets
 const MIN_EDGE_PCT = 0.02;
+
+// Feature flag: use ensemble if OpenAI or Gemini keys are configured
+const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
 
 // ── Edge/Probability Normalization ────────────────────────
 // Claude sometimes returns 84.9 instead of 0.849
@@ -391,25 +395,50 @@ Respond ONLY in valid JSON:
 }`;
 
       try {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey!, 'anthropic-version': '2023-06-01' },
-          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }),
-          signal: AbortSignal.timeout(15000),
-        });
-        if (!res.ok) { console.error(`[analyze-sports] Claude error ${res.status}`); continue; }
+        let analysis: any = null;
+        let ensembleData: EnsembleResult | null = null;
 
-        const data = await res.json();
-        const text = data.content?.[0]?.text ?? '';
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) continue;
+        // Try ensemble first if enabled
+        if (USE_ENSEMBLE) {
+          try {
+            ensembleData = await ensembleAnalyze(prompt);
+            const claudeModelResponse = ensembleData.model_responses.find((r) => r.model === 'claude');
+            if (claudeModelResponse && claudeModelResponse.reasoning) {
+              try {
+                const jsonMatch = claudeModelResponse.reasoning.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                  analysis = JSON.parse(jsonMatch[0]);
+                }
+              } catch {
+                console.log(`[analyze-sports] JSON parse failed in ensemble Claude for market ${market.id}, using fallback`);
+              }
+            }
+          } catch (ensembleErr) {
+            console.log(`[analyze-sports] Ensemble failed for market ${market.id}, falling back to direct Claude API`);
+          }
+        }
 
-        let analysis: any;
-        try {
-          analysis = JSON.parse(jsonMatch[0]);
-        } catch {
-          console.error(`[analyze-sports] JSON parse error for market ${market.id}`);
-          continue;
+        // Fallback: direct Claude API call if ensemble didn't work or isn't enabled
+        if (!analysis) {
+          const res = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey!, 'anthropic-version': '2023-06-01' },
+            body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }),
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!res.ok) { console.error(`[analyze-sports] Claude error ${res.status}`); continue; }
+
+          const data = await res.json();
+          const text = data.content?.[0]?.text ?? '';
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) continue;
+
+          try {
+            analysis = JSON.parse(jsonMatch[0]);
+          } catch {
+            console.error(`[analyze-sports] JSON parse error for market ${market.id}`);
+            continue;
+          }
         }
 
         // Runtime validation — reject bad Claude responses at the boundary
@@ -424,8 +453,33 @@ Respond ONLY in valid JSON:
         const edgeNorm = (validation as any).data.edge;
         const sbProbNorm = (validation as any).data.sportsbook_consensus;
         const pmPriceNorm = (validation as any).data.polymarket_price;
-        analysis.direction = (validation as any).data.direction;
-        analysis.confidence = (validation as any).data.confidence;
+        const claudeDir = (validation as any).data.direction;
+        const claudeConf = (validation as any).data.confidence;
+        analysis.direction = claudeDir;
+        analysis.confidence = claudeConf;
+
+        // Cross-validate with ensemble if available
+        if (ensembleData) {
+          const ensembleDir = ensembleData.consensus_direction;
+          const agreementScore = ensembleData.agreement_score;
+          analysis.ensemble_agreement_score = agreementScore;
+          analysis.ensemble_used_models = ensembleData.used_models;
+
+          // If Claude and ensemble disagree on direction, downgrade confidence
+          if (ensembleDir !== 'PASS' && claudeDir !== ensembleDir && claudeDir !== 'PASS') {
+            if (claudeConf === 'HIGH') {
+              analysis.confidence = 'MEDIUM';
+              (analysis.flags ??= []).push('ensemble_disagreement_downgrade_high_to_medium');
+            } else if (claudeConf === 'MEDIUM') {
+              analysis.confidence = 'LOW';
+              (analysis.flags ??= []).push('ensemble_disagreement_downgrade_medium_to_low');
+            }
+          } else if (agreementScore >= 0.99 && ensembleDir === claudeDir && ensembleDir !== 'PASS' && claudeConf === 'MEDIUM') {
+            // All models agree and confidence is MEDIUM, boost to HIGH
+            analysis.confidence = 'HIGH';
+            (analysis.flags ??= []).push('ensemble_full_agreement_boost_medium_to_high');
+          }
+        }
 
         let kellyFraction = 0, recBetUsd = 0;
         if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
@@ -472,10 +526,13 @@ Respond ONLY in valid JSON:
           data_sources: analysis.data_sources ?? ['claude_knowledge'],
           auto_eligible: analysis.auto_eligible ?? false,
           flags: analysis.flags ?? [],
+          ensemble_agreement_score: analysis.ensemble_agreement_score ?? null,
+          ensemble_used_models: analysis.ensemble_used_models ?? null,
         });
 
         analyzed++;
-        console.log(`[analyze-sports] ✅ [knowledge] "${market.question.substring(0, 60)}": edge=${(edgeNorm ?? 0).toFixed(3)} dir=${analysis.direction}`);
+        const usedEnsemble = ensembleData ? `ensemble(${ensembleData.used_models.join(',')})` : 'claude-only';
+        console.log(`[analyze-sports] ✅ [knowledge] "${market.question.substring(0, 60)}": edge=${(edgeNorm ?? 0).toFixed(3)} dir=${analysis.direction} used=${usedEnsemble}`);
       } catch (err) {
         console.error('[analyze-sports] Knowledge analysis error:', err);
       }
@@ -665,37 +722,62 @@ Respond ONLY in valid JSON (no markdown, no explanation):
 }`;
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 1200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
+      let analysis: any = null;
+      let ensembleData: EnsembleResult | null = null;
 
-      if (!res.ok) {
-        console.error(`[analyze-sports] Claude API error: ${res.status}`);
-        continue;
+      // Try ensemble first if enabled
+      if (USE_ENSEMBLE) {
+        try {
+          ensembleData = await ensembleAnalyze(prompt);
+          const claudeModelResponse = ensembleData.model_responses.find((r) => r.model === 'claude');
+          if (claudeModelResponse && claudeModelResponse.reasoning) {
+            try {
+              const jsonMatch = claudeModelResponse.reasoning.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                analysis = JSON.parse(jsonMatch[0]);
+              }
+            } catch {
+              console.log(`[analyze-sports] JSON parse failed in ensemble Claude for ${market.id}, using fallback`);
+            }
+          }
+        } catch (ensembleErr) {
+          console.log(`[analyze-sports] Ensemble failed for ${market.id}, falling back to direct Claude API`);
+        }
       }
 
-      const data = await res.json();
-      const text = data.content?.[0]?.text ?? '';
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) { console.warn('[analyze-sports] No JSON in Claude response'); continue; }
+      // Fallback: direct Claude API call if ensemble didn't work or isn't enabled
+      if (!analysis) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 1200,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
 
-      let analysis: Record<string, unknown>;
-      try {
-        analysis = JSON.parse(jsonMatch[0]);
-      } catch {
-        console.error(`[analyze-sports] JSON parse error for ${market.id}`);
-        continue;
+        if (!res.ok) {
+          console.error(`[analyze-sports] Claude API error: ${res.status}`);
+          continue;
+        }
+
+        const data = await res.json();
+        const text = data.content?.[0]?.text ?? '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) { console.warn('[analyze-sports] No JSON in Claude response'); continue; }
+
+        try {
+          analysis = JSON.parse(jsonMatch[0]);
+        } catch {
+          console.error(`[analyze-sports] JSON parse error for ${market.id}`);
+          continue;
+        }
       }
 
       // Runtime validation — reject bad Claude responses at the boundary
@@ -709,8 +791,33 @@ Respond ONLY in valid JSON (no markdown, no explanation):
       const edgeNorm   = validation2.data.edge || null;
       const sbProbNorm = validation2.data.sportsbook_consensus;
       const pmPriceNorm = validation2.data.polymarket_price;
-      analysis.direction = validation2.data.direction;
-      analysis.confidence = validation2.data.confidence;
+      const claudeDir = validation2.data.direction;
+      const claudeConf = validation2.data.confidence;
+      analysis.direction = claudeDir;
+      analysis.confidence = claudeConf;
+
+      // Cross-validate with ensemble if available
+      if (ensembleData) {
+        const ensembleDir = ensembleData.consensus_direction;
+        const agreementScore = ensembleData.agreement_score;
+        analysis.ensemble_agreement_score = agreementScore;
+        analysis.ensemble_used_models = ensembleData.used_models;
+
+        // If Claude and ensemble disagree on direction, downgrade confidence
+        if (ensembleDir !== 'PASS' && claudeDir !== ensembleDir && claudeDir !== 'PASS') {
+          if (claudeConf === 'HIGH') {
+            analysis.confidence = 'MEDIUM';
+            (analysis.flags ??= []).push('ensemble_disagreement_downgrade_high_to_medium');
+          } else if (claudeConf === 'MEDIUM') {
+            analysis.confidence = 'LOW';
+            (analysis.flags ??= []).push('ensemble_disagreement_downgrade_medium_to_low');
+          }
+        } else if (agreementScore >= 0.99 && ensembleDir === claudeDir && ensembleDir !== 'PASS' && claudeConf === 'MEDIUM') {
+          // All models agree and confidence is MEDIUM, boost to HIGH
+          analysis.confidence = 'HIGH';
+          (analysis.flags ??= []).push('ensemble_full_agreement_boost_medium_to_high');
+        }
+      }
 
       // Calculate Kelly bet size
       let kellyFraction = 0;
@@ -765,10 +872,13 @@ Respond ONLY in valid JSON (no markdown, no explanation):
         data_sources: analysis.data_sources || ['pinnacle'],
         auto_eligible: analysis.auto_eligible || false,
         flags: analysis.flags || [],
+        ensemble_agreement_score: analysis.ensemble_agreement_score ?? null,
+        ensemble_used_models: analysis.ensemble_used_models ?? null,
       });
 
       analyzed++;
-      console.log(`[analyze-sports] ✅ ${consensus.homeTeam} vs ${consensus.awayTeam}: edge=${edgeNorm?.toFixed(3)} dir=${analysis.direction} conf=${analysis.confidence}`);
+      const usedEnsemble = ensembleData ? `ensemble(${ensembleData.used_models.join(',')})` : 'claude-only';
+      console.log(`[analyze-sports] ✅ ${consensus.homeTeam} vs ${consensus.awayTeam}: edge=${edgeNorm?.toFixed(3)} dir=${analysis.direction} conf=${analysis.confidence} used=${usedEnsemble}`);
     } catch (err) {
       console.error(`[analyze-sports] Analysis failed:`, err);
     }

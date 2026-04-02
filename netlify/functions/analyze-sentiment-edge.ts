@@ -22,13 +22,13 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const SIGNAL_WINDOW_MS      = 90 * 60000;   // 90 min: signals within this window are correlated
-const MIN_TRUMP_SCORE        = 0.35;          // Min impact score to act alone
-const MIN_TRUMP_COMBINED     = 0.20;          // Lower bar when combined with options anomaly
-const MIN_OPTIONS_ZSCORE     = 3.0;           // Options-only: need stronger signal
-const MIN_OPTIONS_COMBINED   = 2.0;           // Combined: lower bar
-const MAX_ANALYSES_PER_RUN   = 4;
-const MIN_EDGE               = 0.06;          // 6% minimum edge for sentiment bets
+const SIGNAL_WINDOW_MS      = 4 * 3600000;  // 4 hours: wider window catches more signal combinations
+const MIN_TRUMP_SCORE        = 0.25;          // Min impact score to act alone (was 0.35 — too strict)
+const MIN_TRUMP_COMBINED     = 0.15;          // Lower bar when combined with options anomaly
+const MIN_OPTIONS_ZSCORE     = 2.5;           // Options-only: still need strong signal (was 3.0)
+const MIN_OPTIONS_COMBINED   = 1.5;           // Combined: lower bar (was 2.0)
+const MAX_ANALYSES_PER_RUN   = 6;             // More analyses per run (was 4)
+const MIN_EDGE               = 0.05;          // 5% minimum edge for sentiment bets (was 6%)
 const MIN_LIQUIDITY          = 5000;
 
 // ── Category → Polymarket search terms mapping ──────────────────────

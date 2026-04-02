@@ -12,6 +12,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,6 +22,9 @@ const supabase = createClient(
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 8;
 const MIN_EDGE_PCT = 0.05;
+
+// Feature flag: use ensemble if OpenAI or Gemini keys are configured
+const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
 
 function normalizeEdge(raw: number | null | undefined): number | null {
   if (raw == null) return null;
@@ -550,34 +554,61 @@ Respond ONLY in valid JSON:
 }`;
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 1200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (!res.ok) { console.error(`[analyze-politics] Claude API error: ${res.status}`); continue; }
-
-      const data = await res.json();
-      const text = data.content?.[0]?.text ?? '';
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
-
       let analysis: any;
-      try {
-        analysis = JSON.parse(jsonMatch[0]);
-      } catch {
-        console.error(`[analyze-politics] JSON parse error for market ${market.id}`);
-        continue;
+      let ensembleData: EnsembleResult | null = null;
+
+      // Try ensemble first if enabled, with fallback to direct Claude call
+      if (USE_ENSEMBLE) {
+        try {
+          ensembleData = await ensembleAnalyze(prompt);
+
+          // Extract Claude response from ensemble (primary model)
+          const claudeResponse = ensembleData.model_responses.find(r => r.model === 'claude');
+          if (claudeResponse && claudeResponse.reasoning) {
+            try {
+              const jsonMatch = claudeResponse.reasoning.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                analysis = JSON.parse(jsonMatch[0]);
+              }
+            } catch {
+              console.log(`[analyze-politics] JSON parse failed in ensemble Claude response, using direct Claude call`);
+            }
+          }
+        } catch (ensembleErr) {
+          console.log(`[analyze-politics] Ensemble call failed for market ${mktId}, falling back to direct Claude:`, ensembleErr);
+        }
+      }
+
+      // Fallback: direct Claude API call if ensemble didn't work or isn't enabled
+      if (!analysis) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 1200,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (!res.ok) { console.error(`[analyze-politics] Claude API error: ${res.status}`); continue; }
+
+        const data = await res.json();
+        const text = data.content?.[0]?.text ?? '';
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+
+        try {
+          analysis = JSON.parse(jsonMatch[0]);
+        } catch {
+          console.error(`[analyze-politics] JSON parse error for market ${market.id}`);
+          continue;
+        }
       }
 
       // Runtime validation
@@ -600,6 +631,48 @@ Respond ONLY in valid JSON:
       const edgeNorm    = validation.data.edge || null;
       const mktPriceNorm = validation.data.market_price;
       const trueProbNorm = validation.data.true_prob;
+
+      // Cross-validate with ensemble consensus if available
+      if (ensembleData && analysis.best_bet) {
+        const ensembleDir = ensembleData.consensus_direction;
+        const claudeDir = analysis.best_bet.direction;
+        const agreementScore = ensembleData.agreement_score;
+
+        // Store ensemble metadata for later calibration
+        analysis.ensemble_agreement_score = agreementScore;
+        analysis.ensemble_used_models = ensembleData.used_models;
+
+        // If Claude and ensemble disagree on direction, downgrade confidence
+        if (ensembleDir !== 'PASS' && claudeDir !== ensembleDir && claudeDir !== 'PASS') {
+          const oldConfidence = analysis.best_bet.confidence;
+          // Downgrade by one level: HIGH→MEDIUM, MEDIUM→LOW, LOW→LOW
+          if (oldConfidence === 'HIGH') {
+            analysis.best_bet.confidence = 'MEDIUM';
+            analysis.flags.push('ensemble_disagreement_downgrade_high_to_medium');
+          } else if (oldConfidence === 'MEDIUM') {
+            analysis.best_bet.confidence = 'LOW';
+            analysis.flags.push('ensemble_disagreement_downgrade_medium_to_low');
+          }
+          console.log(
+            `[analyze-politics] ${question.substring(0, 60)} — ensemble disagreement: Claude=${claudeDir}, Ensemble=${ensembleDir}, downgraded confidence from ${oldConfidence}`
+          );
+        } else if (agreementScore >= 0.99 && ensembleDir === claudeDir && ensembleDir !== 'PASS') {
+          // All models agree — boost confidence by one level
+          const oldConfidence = analysis.best_bet.confidence;
+          if (oldConfidence === 'MEDIUM') {
+            analysis.best_bet.confidence = 'HIGH';
+            analysis.flags.push('ensemble_full_agreement_boost_medium_to_high');
+          } else if (oldConfidence === 'LOW') {
+            analysis.best_bet.confidence = 'MEDIUM';
+            analysis.flags.push('ensemble_full_agreement_boost_low_to_medium');
+          }
+        }
+
+        // Log ensemble performance
+        console.log(
+          `[analyze-politics] Ensemble: agreement=${(agreementScore * 100).toFixed(1)}%, models=[${ensembleData.used_models.join(',')}], consensus_dir=${ensembleDir}`
+        );
+      }
 
       // Kelly sizing
       let kellyFraction = 0, recBetUsd = 0;
@@ -655,10 +728,13 @@ Respond ONLY in valid JSON:
           ...(metaculusRef ? [`metaculus_${(metaculusRef.probability * 100).toFixed(0)}pct`] : []),
           ...(crossMarketCount >= 2 ? ['cross_market_confirmed'] : []),
         ],
+        ensemble_agreement_score: analysis.ensemble_agreement_score ?? null,
+        ensemble_used_models: analysis.ensemble_used_models ?? null,
       });
 
       analyzed++;
-      console.log(`[analyze-politics] ✅ "${question.substring(0, 60)}": edge=${edgeNorm?.toFixed(3)} dir=${analysis.best_bet?.direction} conf=${analysis.best_bet?.confidence}`);
+      const usedEnsemble = ensembleData ? `ensemble(${ensembleData.used_models.join(',')})` : 'claude-only';
+      console.log(`[analyze-politics] ✅ "${question.substring(0, 60)}": edge=${edgeNorm?.toFixed(3)} dir=${analysis.best_bet?.direction} conf=${analysis.best_bet?.confidence} used=${usedEnsemble}`);
     } catch (err) {
       console.error(`[analyze-politics] Analysis failed:`, err);
     }
