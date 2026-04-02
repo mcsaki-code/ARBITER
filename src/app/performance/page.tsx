@@ -113,6 +113,16 @@ export default function PerformancePage() {
     return sum + ((b.amount_usd / b.entry_price) - b.amount_usd);
   }, 0);
 
+  // Countdown to real money
+  const startDate = config.paper_trade_start_date;
+  const daysElapsed = startDate
+    ? Math.floor((Date.now() - new Date(startDate).getTime()) / 86400000)
+    : 0;
+  const daysRemaining = Math.max(0, 30 - daysElapsed);
+  const betsNeeded = Math.max(0, 50 - bets.length);
+  const winRateReady = winRate >= 0.58;
+  const allMilestonesHit = daysRemaining === 0 && betsNeeded === 0 && winRateReady;
+
   // Sharpe ratio
   const returns = resolved.map(b => b.pnl || 0);
   const avgReturn = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
@@ -375,6 +385,33 @@ export default function PerformancePage() {
                     <span className="text-arbiter-text-3">Largest Loss</span>
                     <span className="font-data text-arbiter-red">
                       ${fmt(resolved.filter(b => b.status === 'LOST').reduce((min, b) => Math.min(min, b.pnl || 0), 0))}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Real Money Countdown */}
+              <div className={`border rounded-lg p-4 ${allMilestonesHit ? 'bg-arbiter-green/5 border-arbiter-green/30' : 'bg-arbiter-card border-arbiter-border'}`}>
+                <h3 className="text-xs text-arbiter-text-3 uppercase tracking-wider mb-3">
+                  {allMilestonesHit ? 'READY FOR REAL MONEY' : 'REAL MONEY COUNTDOWN'}
+                </h3>
+                <div className="space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-arbiter-text-3">30-day track record</span>
+                    <span className={`font-data ${daysRemaining === 0 ? 'text-arbiter-green' : 'text-arbiter-amber'}`}>
+                      {daysRemaining === 0 ? 'Complete' : `${daysRemaining}d left`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-arbiter-text-3">50 minimum bets</span>
+                    <span className={`font-data ${betsNeeded === 0 ? 'text-arbiter-green' : 'text-arbiter-amber'}`}>
+                      {betsNeeded === 0 ? 'Complete' : `${betsNeeded} more`}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-arbiter-text-3">58%+ win rate</span>
+                    <span className={`font-data ${winRateReady ? 'text-arbiter-green' : 'text-arbiter-amber'}`}>
+                      {winRateReady ? 'Complete' : `${(winRate * 100).toFixed(1)}%`}
                     </span>
                   </div>
                 </div>
