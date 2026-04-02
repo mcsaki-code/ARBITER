@@ -179,16 +179,16 @@ function ArbCard({ arb, formatUsd }: { arb: ArbOpportunity; formatUsd: (n: numbe
             <div className="flex items-center gap-2 mt-1.5">
               <Badge variant={categoryVariant(arb.category)}>{arb.category}</Badge>
               <span className="text-[10px] text-arbiter-text-3 font-mono">
-                Liq {formatUsd(arb.liquidity_a)}
+                Liq {formatUsd(arb.liquidity_a ?? 0)}
               </span>
               <span className="text-[10px] text-arbiter-text-3 font-mono">
-                Vol {formatUsd(arb.volume_a)}
+                Vol {formatUsd(arb.volume_a ?? 0)}
               </span>
             </div>
           </div>
           <div className="text-right shrink-0">
             <div className="font-mono text-sm font-semibold text-arbiter-green">
-              +{(arb.net_edge * 100).toFixed(1)}%
+              +{((arb.net_edge ?? 0) * 100).toFixed(1)}%
             </div>
             <div className="text-[10px] text-arbiter-text-3 font-mono">net edge</div>
           </div>
@@ -200,20 +200,20 @@ function ArbCard({ arb, formatUsd }: { arb: ArbOpportunity; formatUsd: (n: numbe
           <div className="pt-3 grid grid-cols-2 gap-3">
             <div>
               <div className="text-[10px] text-arbiter-text-3 uppercase">YES Price</div>
-              <div className="font-mono text-sm">${arb.price_yes.toFixed(3)}</div>
+              <div className="font-mono text-sm">${(arb.price_yes ?? 0).toFixed(3)}</div>
             </div>
             <div>
               <div className="text-[10px] text-arbiter-text-3 uppercase">NO Price</div>
-              <div className="font-mono text-sm">${arb.price_no.toFixed(3)}</div>
+              <div className="font-mono text-sm">${(arb.price_no ?? 0).toFixed(3)}</div>
             </div>
             <div>
               <div className="text-[10px] text-arbiter-text-3 uppercase">Combined Cost</div>
-              <div className="font-mono text-sm">${arb.combined_cost.toFixed(3)}</div>
+              <div className="font-mono text-sm">${(arb.combined_cost ?? 0).toFixed(3)}</div>
             </div>
             <div>
               <div className="text-[10px] text-arbiter-text-3 uppercase">Gross Edge</div>
               <div className="font-mono text-sm text-arbiter-green">
-                {(arb.gross_edge * 100).toFixed(2)}%
+                {((arb.gross_edge ?? 0) * 100).toFixed(2)}%
               </div>
             </div>
           </div>
