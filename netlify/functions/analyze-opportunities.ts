@@ -332,8 +332,8 @@ CONSTRAINTS:
 
 Respond ONLY in valid JSON:
 {
-  "true_prob_yes": number (0-1),
-  "polymarket_price_yes": number (0-1),
+  "true_prob": number (0-1),
+  "market_price": number (0-1),
   "edge": number (0-1),
   "direction": "BUY_YES"|"BUY_NO"|"PASS",
   "confidence": "HIGH"|"MEDIUM"|"LOW",
