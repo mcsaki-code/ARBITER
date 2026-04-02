@@ -44,6 +44,7 @@ interface BondCandidate {
   direction: 'BUY_YES' | 'BUY_NO';
   liquidity: number;
   days_remaining: number;
+  category: string;
 }
 
 // Parse outcome prices from Gamma API response
@@ -109,14 +110,28 @@ async function fetchAllMarkets(): Promise<GammaMarket[]> {
   return allMarkets;
 }
 
-// Quick Claude assessment: is this >95% likely to resolve YES?
-async function assessBondProbability(question: string, outcome_label: string): Promise<boolean> {
+// Quick Claude assessment: is this outcome likely to resolve in the indicated direction?
+// For sports markets with <48h remaining, use heuristic instead of Claude
+async function assessBondProbability(
+  question: string,
+  outcome_label: string,
+  category: string,
+  daysRemaining: number
+): Promise<boolean> {
+  // For sports markets resolving very soon (<48h), skip Claude and trust price
+  if (category === 'sports' && daysRemaining < 2) {
+    console.log(
+      `[high-prob-bonds] Sports market resolving in ${daysRemaining.toFixed(1)}d — using price heuristic`
+    );
+    return true;
+  }
+
   if (!ANTHROPIC_API_KEY) {
     console.log('[high-prob-bonds] No ANTHROPIC_API_KEY — skipping assessments');
     return false;
   }
 
-  const prompt = `Is this outcome >95% likely to resolve YES? Answer only YES or NO with one sentence.
+  const prompt = `Is this outcome likely to resolve in the direction indicated by the high market price (>88% probability)? Answer only YES or NO with one sentence.
 
 Market: ${question}
 Outcome: ${outcome_label}`;
@@ -205,68 +220,107 @@ export const handler = schedule('*/20 * * * *', async () => {
     .select('market_id');
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
 
-  // Fetch all markets
-  const allMarkets = await fetchAllMarkets();
-  if (allMarkets.length === 0) {
-    console.log('[high-prob-bonds] No markets found');
+  // Fetch all markets from Gamma API
+  const gammaMarkets = await fetchAllMarkets();
+  if (gammaMarkets.length === 0) {
+    console.log('[high-prob-bonds] No markets found from Gamma API');
     return { statusCode: 200 };
   }
 
-  // Filter for bond candidates (price 0.90-0.97)
+  // Upsert Gamma markets into DB to ensure we have UUIDs
+  if (gammaMarkets.length > 0) {
+    const rows = gammaMarkets.map((m) => {
+      let outcomes: string[];
+      let outcomePrices: number[];
+      try {
+        outcomes = JSON.parse(m.outcomes);
+      } catch {
+        outcomes = [];
+      }
+      try {
+        outcomePrices = JSON.parse(m.outcomePrices).map((p: string) => parseFloat(p));
+      } catch {
+        outcomePrices = [];
+      }
+      return {
+        condition_id: m.conditionId,
+        question: m.question,
+        category: categorizeMarket(m.question),
+        outcomes,
+        outcome_prices: outcomePrices,
+        volume_usd: parseFloat(m.volume) || 0,
+        liquidity_usd: parseFloat(m.liquidity) || 0,
+        resolution_date: m.endDate,
+        is_active: m.active && !m.closed,
+        updated_at: new Date().toISOString(),
+      };
+    });
+    await supabase.from('markets').upsert(rows, { onConflict: 'condition_id' });
+    console.log(`[high-prob-bonds] Upserted ${rows.length} markets to DB`);
+  }
+
+  // Query markets from DB (this gives us the UUIDs we need for the bets table)
+  const { data: dbMarkets } = await supabase
+    .from('markets')
+    .select('id, condition_id, question, category, outcome_prices, liquidity_usd, resolution_date, is_active')
+    .eq('is_active', true)
+    .gt('liquidity_usd', 50000);
+
+  if (!dbMarkets || dbMarkets.length === 0) {
+    console.log('[high-prob-bonds] No markets in DB with sufficient liquidity');
+    return { statusCode: 200 };
+  }
+
+  // Filter for bond candidates (price 0.90-0.97 or 0.03-0.10)
   const candidates: BondCandidate[] = [];
 
-  for (const m of allMarkets) {
+  for (const m of dbMarkets) {
     // Skip if we already have a position
-    if (openMarketIds.has(m.conditionId)) continue;
+    if (openMarketIds.has(m.id)) continue;
 
-    // Check liquidity (bonds need deep liquidity for clean entry)
-    const liquidity = parseFloat(m.liquidity);
-    if (liquidity < 50000) continue;
+    // Skip weather markets (too volatile at high prices)
+    if (m.category === 'weather') continue;
 
     // Check resolution date (7-90 days remaining)
-    const endDate = new Date(m.endDate);
+    const endDate = new Date(m.resolution_date);
     const daysRemaining = (endDate.getTime() - Date.now()) / (24 * 3600000);
     if (daysRemaining < 7 || daysRemaining > 90) continue;
 
-    // Skip weather markets (too volatile at high prices)
-    const category = categorizeMarket(m.question);
-    if (category === 'weather') continue;
+    // Get prices and outcomes (they're already in the DB)
+    const prices = m.outcome_prices || [];
+    const outcomes = m.outcomes || [];
 
-    // Parse prices and outcomes
-    const prices = parseOutcomePrices(m.outcomePrices);
-    const outcomes = parseOutcomes(m.outcomes);
-
-    // Look for outcomes at 0.90-0.97
+    // Look for outcomes at 0.90-0.97 (YES bonds)
     for (let i = 0; i < prices.length; i++) {
       const price = prices[i];
       if (price >= 0.90 && price <= 0.97) {
         candidates.push({
-          market_id: m.conditionId,
-          condition_id: m.conditionId,
+          market_id: m.id, // Use DB UUID, not condition_id
+          condition_id: m.condition_id,
           question: m.question,
           outcome_label: outcomes[i] || `Outcome ${i}`,
           price,
           direction: 'BUY_YES',
-          liquidity,
+          liquidity: m.liquidity_usd,
           days_remaining: daysRemaining,
+          category: m.category,
         });
       }
 
-      // Also check the NO side if the YES price is high
-      if (price >= 0.90 && price <= 0.97) {
+      // Also check the NO side: if YES price is 0.03-0.10, then NO is 0.90-0.97 (NO bonds)
+      if (price >= 0.03 && price <= 0.10) {
         const noPrice = 1 - price;
-        if (noPrice >= 0.90 && noPrice <= 0.97) {
-          candidates.push({
-            market_id: m.conditionId,
-            condition_id: m.conditionId,
-            question: m.question,
-            outcome_label: outcomes[i] ? `NOT ${outcomes[i]}` : `NOT Outcome ${i}`,
-            price: noPrice,
-            direction: 'BUY_NO',
-            liquidity,
-            days_remaining: daysRemaining,
-          });
-        }
+        candidates.push({
+          market_id: m.id, // Use DB UUID, not condition_id
+          condition_id: m.condition_id,
+          question: m.question,
+          outcome_label: outcomes[i] ? `NOT ${outcomes[i]}` : `NOT Outcome ${i}`,
+          price: noPrice,
+          direction: 'BUY_NO',
+          liquidity: m.liquidity_usd,
+          days_remaining: daysRemaining,
+          category: m.category,
+        });
       }
     }
   }
@@ -285,10 +339,10 @@ export const handler = schedule('*/20 * * * *', async () => {
     if (totalDeployed >= maxDailyExposure) break;
     if (Date.now() - startTime > 18000) break; // Stay within 18s timeout
 
-    // Quick Claude assessment
-    const isHighProb = await assessBondProbability(cand.question, cand.outcome_label);
+    // Quick Claude assessment (or heuristic for sports <48h)
+    const isHighProb = await assessBondProbability(cand.question, cand.outcome_label, cand.category, cand.days_remaining);
     if (!isHighProb) {
-      console.log(`[high-prob-bonds] ${cand.question.substring(0, 60)}... — Claude says <95% prob`);
+      console.log(`[high-prob-bonds] ${cand.question.substring(0, 60)}... — Assessment says not high prob`);
       continue;
     }
 

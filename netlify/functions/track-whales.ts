@@ -95,6 +95,23 @@ interface CLOBTrade {
   outcome_index?: number;
 }
 
+interface DataApiTrade {
+  proxyWallet: string;
+  side: 'BUY' | 'SELL';
+  asset: string;        // conditionId token
+  conditionId: string;  // market condition ID
+  size: number;
+  price: number;
+  timestamp: number;    // unix seconds
+  title: string;
+  slug: string;
+  outcome: string;
+  outcomeIndex: number;
+  name: string;
+  pseudonym: string;
+  transactionHash: string;
+}
+
 interface WhaleProfile {
   address: string;
   display_name?: string | null;
@@ -201,45 +218,53 @@ export const handler = schedule('*/15 * * * *', async () => {
     return { statusCode: 200 };
   }
 
-  // ── Fetch recent trades from top whales ───────────────────
-  const cutoffTime = new Date(Date.now() - LOOKBACK_MINUTES * 60000).toISOString();
-  const topWallets = whaleProfiles.slice(0, 20); // Poll top 20 wallets
+  // ── Fetch recent trades from the public data API ──────────────────
+  // This endpoint returns ALL trades globally — no auth needed
+  const cutoffTime = Date.now() - LOOKBACK_MINUTES * 60000;
+  const freshTrades: (DataApiTrade & { is_known_whale: boolean })[] = [];
 
-  // Fetch trades from multiple wallets in parallel (batches of 5)
-  const BATCH_SIZE = 5;
-  const freshTrades: (CLOBTrade & { whale_address: string; whale_win_rate: number })[] = [];
-
-  for (let i = 0; i < topWallets.length; i += BATCH_SIZE) {
-    if (Date.now() - startTime > 18000) break;
-
-    const batch = topWallets.slice(i, i + BATCH_SIZE);
-    const batchFetches = batch.map(whale =>
-      fetchJson(
-        `https://clob.polymarket.com/trades?maker_address=${whale.address}&limit=20`
-      ).then(r => {
-        const trades = (r as { data?: CLOBTrade[] } | CLOBTrade[] | null);
-        const tradeArr = Array.isArray(trades) ? trades : (trades as { data?: CLOBTrade[] } | null)?.data ?? [];
-        return tradeArr
-          .filter((t: CLOBTrade) => {
-            const tTime = new Date(t.created_at).getTime();
-            return tTime > Date.now() - LOOKBACK_MINUTES * 60000
-              && parseFloat(t.size) >= MIN_TRADE_SIZE
-              && t.side === 'BUY'
-              && t.status !== 'CANCELED';
-          })
-          .map((t: CLOBTrade) => ({
-            ...t,
-            whale_address: whale.address,
-            whale_win_rate: whale.win_rate,
-          }));
-      }).catch(() => [])
-    );
-
-    const batchResults = await Promise.all(batchFetches);
-    for (const trades of batchResults) freshTrades.push(...trades);
+  const dataApiUrl = `https://data-api.polymarket.com/trades?limit=50&sizeThreshold=${MIN_TRADE_SIZE}`;
+  let recentTrades: DataApiTrade[] = [];
+  try {
+    const res = await fetch(dataApiUrl, {
+      signal: AbortSignal.timeout(8000),
+      headers: { Accept: 'application/json' },
+    });
+    if (res.ok) {
+      recentTrades = await res.json() as DataApiTrade[];
+      console.log(`[whales] Fetched ${recentTrades.length} large trades from data API`);
+    }
+  } catch (err) {
+    console.error('[whales] Data API fetch failed:', err);
   }
 
-  console.log(`[whales] Found ${freshTrades.length} fresh large trades from top wallets`);
+  // Filter and enrich trades
+  const knownWhaleAddresses = new Set(whaleProfiles.map(w => w.address.toLowerCase()));
+
+  for (const trade of recentTrades) {
+    // Only BUY trades
+    if (trade.side !== 'BUY') continue;
+
+    // Size >= MIN_TRADE_SIZE
+    if (trade.size < MIN_TRADE_SIZE) continue;
+
+    // Price between 0.02 and MAX_ENTRY_PRICE
+    if (trade.price < 0.02 || trade.price > MAX_ENTRY_PRICE) continue;
+
+    // Timestamp within last LOOKBACK_MINUTES
+    if (trade.timestamp * 1000 < cutoffTime) continue;
+
+    // Skip short-term crypto/ETH up-down markets (market maker bots, not real whales)
+    if (trade.title.includes('Up or Down')) continue;
+
+    const isKnownWhale = knownWhaleAddresses.has(trade.proxyWallet.toLowerCase());
+    freshTrades.push({
+      ...trade,
+      is_known_whale: isKnownWhale,
+    });
+  }
+
+  console.log(`[whales] Found ${freshTrades.length} fresh large trades (${freshTrades.filter(t => t.is_known_whale).length} from known whales)`);
 
   if (freshTrades.length === 0) {
     console.log('[whales] No qualifying whale trades in the last 20 minutes');
@@ -252,55 +277,46 @@ export const handler = schedule('*/15 * * * *', async () => {
   for (const trade of freshTrades) {
     if (Date.now() - startTime > 22000) break;
 
-    const tradeSize = parseFloat(trade.size);
-    const tradePrice = parseFloat(trade.price);
+    const tradeSize = trade.size;
+    const tradePrice = trade.price;
 
-    // Filter by entry price: only mirror low-entry whale bets for better payout asymmetry
-    if (tradePrice <= 0.01 || tradePrice > MAX_ENTRY_PRICE) continue;
-
-    // Find market in our DB by condition_id (asset_id in CLOB = condition_id)
+    // Find market in our DB by condition_id
     const { data: dbMarket } = await supabase
       .from('markets')
       .select('id, question, liquidity_usd, is_active')
-      .eq('condition_id', trade.asset_id)
+      .eq('condition_id', trade.conditionId)
       .single();
 
     if (!dbMarket?.is_active) continue;
     if (dbMarket.liquidity_usd < 10000) continue; // Higher liquidity bar for whale copies
     if (openMarketIds.has(dbMarket.id)) continue;
 
-    // Check we haven't already mirrored this trade (same asset + whale + last 20 min)
+    // Check we haven't already mirrored this trade (same market + last 20 min)
     const { data: existingMirror } = await supabase
       .from('bets')
       .select('id')
       .eq('market_id', dbMarket.id)
       .eq('category', 'whale_copy')
-      .gte('placed_at', cutoffTime)
+      .gte('placed_at', new Date(cutoffTime).toISOString())
       .limit(1);
     if (existingMirror?.length) continue;
 
+    // Determine mirror percentage based on whale profile
+    // Known whales get 18% mirror, others get 12%
+    const mirrorPct = trade.is_known_whale ? 0.18 : MIRROR_PCT;
+
     // Calculate mirror bet size
     const mirrorSize = Math.min(
-      tradeSize * MIRROR_PCT,
+      tradeSize * mirrorPct,
       bankroll * MAX_MIRROR_PCT_BANKROLL,
       bankroll * 0.02  // Hard cap at 2% regardless
     );
     if (mirrorSize < 1) continue;
 
-    const direction = trade.side === 'BUY' ? 'BUY_YES' : 'BUY_NO';
+    const direction = 'BUY_YES'; // Always BUY_YES since we filter for BUY side only
 
-    // Find whale display name if available
-    const whale = whaleProfiles.find(w => w.address === trade.whale_address);
-    const whaleName = whale?.display_name || trade.whale_address.substring(0, 8);
-
-    // Structured whale_trades logging in notes
-    const tradeNotes = [
-      `whale_address: ${trade.whale_address}`,
-      `whale_name: ${whaleName}`,
-      `whale_win_rate: ${(trade.whale_win_rate * 100).toFixed(0)}%`,
-      `entry_price: ${tradePrice.toFixed(4)}`,
-      `source: clob_mirror`,
-    ].join(' | ');
+    // Determine whale name
+    const whaleName = trade.name || trade.pseudonym || trade.proxyWallet.substring(0, 10);
 
     const result = await executeBet(
       supabase,
@@ -309,7 +325,7 @@ export const handler = schedule('*/15 * * * *', async () => {
         analysis_id: null,
         category: 'whale_copy',
         direction,
-        outcome_label: `Whale copy: ${whaleName} (WR=${(trade.whale_win_rate * 100).toFixed(0)}%)`,
+        outcome_label: `Whale copy: ${whaleName}`,
         entry_price: tradePrice,
         amount_usd: mirrorSize,
       },
@@ -320,8 +336,9 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (result.success) {
       mirrored++;
       openMarketIds.add(dbMarket.id);
+      const whaleType = trade.is_known_whale ? 'known' : 'detected';
       console.log(
-        `[whales] ✅ Mirrored $${mirrorSize.toFixed(2)} ${direction} | whale=${whaleName} (${trade.whale_address.substring(0, 8)}...) WR=${(trade.whale_win_rate * 100).toFixed(0)}% | price=${tradePrice.toFixed(4)} | "${dbMarket.question.substring(0, 50)}"`
+        `[whales] ✅ Mirrored $${mirrorSize.toFixed(2)} ${direction} | whale=${whaleName} (${trade.proxyWallet.substring(0, 8)}...) [${whaleType}] | price=${tradePrice.toFixed(4)} | market="${trade.title}"`
       );
     }
   }

@@ -16,7 +16,7 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_ANALYSES_PER_RUN = 8;   // was 3 — increased to find more bets
+const MAX_ANALYSES_PER_RUN = 12;   // was 3 → 8 → now 12 for higher throughput
 const MIN_EDGE_PCT = 0.02;
 
 // Feature flag: use ensemble if OpenAI or Gemini keys are configured
@@ -278,7 +278,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     return { statusCode: 500 };
   }
 
-  // Get active sports markets with 2+ hours remaining (top 100 by volume)
+  // Get active sports markets with 2+ hours remaining (top 200 by volume for broader coverage)
   const minSportsResolutionDate = new Date(Date.now() + 2 * 3600000).toISOString();
   const { data: sportsMarkets } = await supabase
     .from('markets')
@@ -288,7 +288,7 @@ export const handler = schedule('*/30 * * * *', async () => {
     .gt('liquidity_usd', 5000)
     .gt('resolution_date', minSportsResolutionDate)
     .order('volume_usd', { ascending: false })
-    .limit(100);
+    .limit(200);
 
   if (!sportsMarkets?.length) {
     console.log('[analyze-sports] No active sports markets');
@@ -651,8 +651,8 @@ Respond ONLY in valid JSON:
     const hoursToGame = Math.max(0, (new Date(consensus.commence).getTime() - Date.now()) / 3600000);
     if (hoursToGame < 1) continue;
 
-    // Skip if already analyzed recently (last 2 hours) to avoid duplicate analyses
-    const recentCutoff = new Date(Date.now() - 2 * 3600000).toISOString();
+    // Skip if already analyzed recently (last 4 hours) to allow broader coverage across runs
+    const recentCutoff = new Date(Date.now() - 4 * 3600000).toISOString();
     const { data: recentAnalysis } = await supabase
       .from('sports_analyses')
       .select('id')
@@ -884,6 +884,194 @@ Respond ONLY in valid JSON (no markdown, no explanation):
     }
   }
 
-  console.log(`[analyze-sports] Done. Analyzed ${analyzed} matchups in ${Date.now() - startTime}ms`);
+  // ── KNOWLEDGE-ONLY PATH: HIGH-LIQUIDITY UNMATCHED MARKETS ──
+  // Even when sportsbook data exists, pick 3-4 high-liquidity markets that weren't
+  // matched to sportsbook events and run knowledge-only analysis on them.
+  // This maximizes coverage across the 6,977 active sports markets.
+  if (analyzed < MAX_ANALYSES_PER_RUN && Date.now() - startTime < 20000) {
+    const matchedMarketIds = new Set(edgeCandidates.map(c => c.market.id));
+    const unmatchedHighLiquidity = (sportsMarkets as MarketRow[])
+      .filter(m => !matchedMarketIds.has(m.id) && m.liquidity_usd >= 20000) // high-liquidity threshold
+      .sort((a, b) => b.liquidity_usd - a.liquidity_usd)
+      .slice(0, 4); // pick top 4 by liquidity
+
+    const knowledgeCutoff = new Date(Date.now() - 6 * 3600000).toISOString(); // 6h for knowledge-only
+    const knowledgeAnalyzed = await Promise.all(
+      unmatchedHighLiquidity.map(async (market) => {
+        try {
+          if (analyzed >= MAX_ANALYSES_PER_RUN || Date.now() - startTime > 22000) return false;
+
+          // Skip futures markets
+          if (isFuturesMarket(market.question)) {
+            console.log(`[analyze-sports] SKIP futures (knowledge): "${market.question.substring(0, 60)}"`);
+            return false;
+          }
+
+          // Skip recently analyzed
+          const { data: recent } = await supabase
+            .from('sports_analyses')
+            .select('id')
+            .eq('market_id', market.id)
+            .gte('analyzed_at', knowledgeCutoff)
+            .limit(1);
+          if (recent?.length) {
+            console.log(`[analyze-sports] SKIP ${market.id.substring(0, 8)} (knowledge) — analyzed recently`);
+            return false;
+          }
+
+          const hoursRemaining = market.resolution_date
+            ? (new Date(market.resolution_date as string).getTime() - Date.now()) / 3600000
+            : Infinity;
+
+          // Knowledge-only: near-term markets only (2-72 hours)
+          if (hoursRemaining < 2 || hoursRemaining > 72) {
+            return false;
+          }
+
+          const outcomesList = market.outcomes
+            .map((o: string, i: number) => `${o}: $${market.outcome_prices[i]?.toFixed(3) ?? '?'}`)
+            .join('\n');
+
+          const prompt = `You are ARBITER's sports analyst. Assess whether the Polymarket price is mis-priced vs your best estimate.
+
+⚠️  KNOWLEDGE-ONLY MODE: Your training data has a knowledge cutoff of ~May 2025. The current date is approximately ${new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}. This means your knowledge is approximately 10+ months out of date. You do NOT know:
+- Current standings, records, or recent form
+- Trade deadline moves that occurred after May 2025
+- Current injuries or lineup news
+- Recent head-to-head results
+- The current state of this team's season
+
+Because of this knowledge gap, you MUST be extremely conservative. Only flag edges where you have HIGH confidence based on structural/historical factors (e.g., a historically dominant team priced as underdog). Set auto_eligible = false unless confidence is HIGH and the structural case is very clear.
+
+MARKET: ${market.question}
+OUTCOMES:
+${outcomesList}
+LIQUIDITY: $${market.liquidity_usd.toLocaleString()} | VOLUME: $${market.volume_usd.toLocaleString()}
+RESOLVES: in ${Math.round(hoursRemaining)} hours
+
+TASK:
+1. Estimate the true probability for each outcome based on historical/structural factors
+2. Compare to Polymarket prices — is there an edge >= 8%? (higher threshold due to knowledge staleness)
+3. Be conservative — only flag if you would bet even accounting for stale knowledge
+4. Set auto_eligible = true ONLY if: confidence HIGH, edge >= 0.10, AND structural (not dependent on current form)
+5. Add "KNOWLEDGE_ONLY_UNMATCHED" to flags
+
+Respond with JSON:
+{
+  "event_description": "...",
+  "sport": "...",
+  "confidence": "HIGH" | "MEDIUM" | "LOW",
+  "direction": "BUY_YES" | "BUY_NO" | "PASS",
+  "edge": 0.XX,
+  "reasoning": "...",
+  "auto_eligible": boolean,
+  "data_sources": ["claude_knowledge"],
+  "flags": ["KNOWLEDGE_ONLY_UNMATCHED", ...],
+  "ensemble_agreement_score": null,
+  "ensemble_used_models": null
+}`;
+
+          let analysis: EnsembleResult;
+          try {
+            const response = await fetch('https://api.anthropic.com/v1/messages/create', {
+              method: 'POST',
+              headers: {
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: CLAUDE_MODEL,
+                max_tokens: 500,
+                messages: [{ role: 'user', content: prompt }],
+              }),
+            });
+
+            const result = (await response.json()) as { content: { type: string; text: string }[] };
+            if (!result.content[0]) throw new Error('No response from Claude');
+
+            const text = result.content[0].text;
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) throw new Error('No JSON in response');
+
+            analysis = JSON.parse(jsonMatch[0]);
+          } catch (e) {
+            console.error(`[analyze-sports] Claude API error (knowledge):`, e);
+            return false;
+          }
+
+          const edgeNorm = normalizeEdge(analysis.edge);
+          const pmYes = market.outcome_prices[0];
+          const pmNo = market.outcome_prices[1];
+          const pmPriceNorm = analysis.direction === 'BUY_YES' ? pmYes : pmNo;
+
+          let kellyFraction = 0, recBetUsd = 0;
+          if (analysis.direction !== 'PASS' && edgeNorm !== null && edgeNorm >= MIN_EDGE_PCT) {
+            const { data: configRows } = await supabase
+              .from('system_config')
+              .select('key, value')
+              .in('key', ['paper_bankroll']);
+            const bankroll = parseFloat(configRows?.find((r: { key: string }) => r.key === 'paper_bankroll')?.value ?? '5000');
+
+            const { data: calData } = await supabase
+              .from('calibration_snapshots')
+              .select('total_bets, predicted_win_rate, actual_win_rate')
+              .eq('category', 'sports')
+              .eq('confidence_tier', analysis.confidence || 'LOW')
+              .order('snapshot_date', { ascending: false })
+              .limit(1)
+              .single();
+
+            const { computeKelly, getCalibrationDiscount } = await import('../../src/lib/trading-math');
+            const calDiscount = getCalibrationDiscount(calData);
+            const kelly = computeKelly({
+              trueProb: 0.5, // conservative estimate for knowledge-only
+              marketPrice: pmPriceNorm,
+              direction: analysis.direction,
+              confidence: analysis.confidence,
+              category: 'sports',
+              bankroll,
+              calibrationDiscount: calDiscount,
+            });
+            kellyFraction = kelly.kellyFraction;
+            recBetUsd = kelly.recBetUsd;
+          }
+
+          await supabase.from('sports_analyses').insert({
+            market_id: market.id,
+            event_description: analysis.event_description ?? market.question.substring(0, 100),
+            sport: normalizeSport(analysis.sport),
+            sportsbook_consensus: null,
+            polymarket_price: pmPriceNorm,
+            edge: edgeNorm,
+            direction: analysis.direction ?? 'PASS',
+            confidence: analysis.confidence ?? 'LOW',
+            kelly_fraction: kellyFraction,
+            rec_bet_usd: recBetUsd,
+            reasoning: analysis.reasoning ?? null,
+            data_sources: analysis.data_sources ?? ['claude_knowledge'],
+            auto_eligible: analysis.auto_eligible ?? false,
+            flags: analysis.flags ?? ['KNOWLEDGE_ONLY_UNMATCHED'],
+            ensemble_agreement_score: null,
+            ensemble_used_models: null,
+          });
+
+          analyzed++;
+          console.log(`[analyze-sports] ✅ [knowledge-only] "${market.question.substring(0, 60)}": edge=${(edgeNorm ?? 0).toFixed(3)} dir=${analysis.direction} conf=${analysis.confidence}`);
+          return true;
+        } catch (err) {
+          console.error(`[analyze-sports] Knowledge analysis error (unmatched):`, err);
+          return false;
+        }
+      })
+    );
+
+    const knowledgeCount = knowledgeAnalyzed.filter(x => x).length;
+    if (knowledgeCount > 0) {
+      console.log(`[analyze-sports] Knowledge-only mode added ${knowledgeCount} unmatched high-liquidity analyses`);
+    }
+  }
+
+  console.log(`[analyze-sports] Done. Analyzed ${analyzed} markets total in ${Date.now() - startTime}ms`);
   return { statusCode: 200 };
 });
