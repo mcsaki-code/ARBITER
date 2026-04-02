@@ -23,8 +23,9 @@ const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 8;
 const MIN_EDGE_PCT = 0.05;
 
-// Feature flag: use ensemble if OpenAI or Gemini keys are configured
-const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
+// Feature flag: DISABLED — ensemble abstraction is lossy, strips domain
+// fields and causes validation/parsing failures. Direct Claude works fine.
+const USE_ENSEMBLE = false;
 
 function normalizeEdge(raw: number | null | undefined): number | null {
   if (raw == null) return null;

@@ -19,8 +19,10 @@ const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_ANALYSES_PER_RUN = 12;   // was 3 → 8 → now 12 for higher throughput
 const MIN_EDGE_PCT = 0.01;         // was 0.02 — too strict, sportsbooks track within 1-2%
 
-// Feature flag: use ensemble if OpenAI or Gemini keys are configured
-const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
+// Feature flag: DISABLED — ensemble abstraction strips domain fields
+// (sportsbook_consensus, polymarket_price) causing validation failures.
+// Same root cause as crypto 0-output bug. Direct Claude works fine.
+const USE_ENSEMBLE = false;
 
 // ── Edge/Probability Normalization ────────────────────────
 // Claude sometimes returns 84.9 instead of 0.849

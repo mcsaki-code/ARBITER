@@ -317,8 +317,8 @@ Pick EXACTLY ONE market to analyze. Respond ONLY in valid JSON:
 }`;
 
     try {
-      // Feature flag: use ensemble if multiple API keys are available
-      const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
+      // Feature flag: DISABLED — ensemble abstraction is lossy
+      const USE_ENSEMBLE = false;
 
       let analysis: any;
       let ensembleData: EnsembleResult | null = null;

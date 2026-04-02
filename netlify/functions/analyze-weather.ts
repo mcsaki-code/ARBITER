@@ -16,8 +16,9 @@ const supabase = createClient(
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 
-// Feature flag: use ensemble if OpenAI or Gemini keys are configured
-const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
+// Feature flag: DISABLED — ensemble abstraction is lossy, strips domain
+// fields and causes validation failures. Direct Claude works fine.
+const USE_ENSEMBLE = false;
 
 export const handler = schedule('*/20 * * * *', async () => {
   console.log('[analyze-weather-v2] Starting enhanced weather analysis');
