@@ -172,6 +172,12 @@ process.on('uncaughtException', (err) => {
   // Don't exit — Railway will restart on crash anyway, but we prefer to stay up
 });
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[worker] Unhandled promise rejection:', reason);
+  metrics.errors++;
+  // Don't exit — log and continue
+});
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 async function main() {
   console.log('');

@@ -128,13 +128,17 @@ export async function analyzeTemperatureMarkets(
   log(`Found ${tempMarkets.length} eligible markets (${daysLookahead}-day lookahead)`);
 
   // Pre-load recently analyzed to avoid churn
+  // NOTE: Do NOT use .in() with 1000+ IDs — exceeds PostgREST URL length limit (~8KB).
+  // Instead, fetch ALL recent temperature_statistical analyses and filter in JS.
   const recentCutoff = new Date(Date.now() - recentWindowHours * 3600000).toISOString();
-  const { data: recentRows } = await supabase
+  const { data: recentRows, error: recentErr } = await supabase
     .from('weather_analyses')
     .select('market_id')
     .gte('analyzed_at', recentCutoff)
-    .eq('market_type', 'temperature_statistical')
-    .in('market_id', tempMarkets.map(m => m.id));
+    .eq('market_type', 'temperature_statistical');
+  if (recentErr) {
+    err(`Recent analyses fetch: ${recentErr.message}`);
+  }
   const recentIds = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
   // Pre-load all cities
