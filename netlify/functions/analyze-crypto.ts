@@ -6,6 +6,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { ensembleAnalyze } from '../../src/lib/ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -314,39 +315,102 @@ Respond ONLY in JSON:
 }`;
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 1200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(15000),
-      });
-
-      if (!res.ok) {
-        console.error(`[analyze-crypto] Claude API error: ${res.status}`);
-        continue;
-      }
-
-      const data = await res.json();
-      const text = data.content?.[0]?.text;
-      if (!text) continue;
-
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
+      // Feature flag: use ensemble if multiple API keys are available
+      const USE_ENSEMBLE = (process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY) ? true : false;
 
       let analysis: any;
-      try {
-        analysis = JSON.parse(jsonMatch[0]);
-      } catch {
-        console.error(`[analyze-crypto] JSON parse error for market ${market.id}`);
-        continue;
+      let ensembleData: any = null;
+
+      if (USE_ENSEMBLE) {
+        // Call ensemble for parallel multi-model analysis
+        try {
+          ensembleData = await ensembleAnalyze(prompt);
+
+          // Extract Claude response from ensemble (primary model)
+          const claudeResponse = ensembleData.model_responses.find((r: any) => r.model === 'claude');
+          if (!claudeResponse) {
+            console.error(`[analyze-crypto] Ensemble failed to return Claude response for market ${market.id}`);
+            continue;
+          }
+
+          // Parse Claude's full JSON response if available
+          // The ensemble gives us structured data, but we need the raw analysis object
+          // Fall back to direct Claude if parsing fails
+          if (claudeResponse.direction && claudeResponse.edge !== null) {
+            // Build analysis object from ensemble consensus if Claude was included
+            analysis = {
+              asset: asset,
+              spot_at_analysis: signal.spot_price,
+              target_bracket: market.outcomes[0] || '',
+              bracket_prob: null, // Will be extracted from reasoning or use consensus
+              market_price: null,
+              edge: claudeResponse.edge,
+              direction: claudeResponse.direction,
+              confidence: claudeResponse.confidence,
+              kelly_fraction: 0,
+              rec_bet_usd: 0,
+              reasoning: claudeResponse.reasoning,
+              auto_eligible: false,
+              flags: [],
+            };
+
+            // Log ensemble metrics
+            console.log(
+              `[analyze-crypto] Ensemble: models=${ensembleData.used_models.join(',')} | agreement=${(ensembleData.agreement_score * 100).toFixed(1)}% | latencies=${ensembleData.model_responses.map((r: any) => `${r.model}:${r.latency_ms}ms`).join(', ')}`
+            );
+
+            // If models disagree (agreement < 0.67), downgrade confidence as a warning
+            if (ensembleData.agreement_score < 0.67 && analysis.confidence !== 'LOW') {
+              console.log(`[analyze-crypto] Model disagreement detected (${(ensembleData.agreement_score * 100).toFixed(1)}%) — downgrading confidence from ${analysis.confidence} to LOW`);
+              analysis.confidence = 'LOW';
+            }
+          }
+        } catch (ensembleErr) {
+          console.error(`[analyze-crypto] Ensemble call failed, falling back to direct Claude:`, ensembleErr);
+          // Fall through to direct Claude as backup
+          analysis = null;
+        }
+      }
+
+      // Fallback to direct Claude if ensemble unavailable or failed
+      if (!analysis) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 1200,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (!res.ok) {
+          console.error(`[analyze-crypto] Claude API error: ${res.status}`);
+          continue;
+        }
+
+        const data = await res.json();
+        const text = data.content?.[0]?.text;
+        if (!text) continue;
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+
+        try {
+          analysis = JSON.parse(jsonMatch[0]);
+        } catch {
+          console.error(`[analyze-crypto] JSON parse error for market ${market.id}`);
+          continue;
+        }
+
+        if (ensembleData) {
+          console.log(`[analyze-crypto] Used direct Claude fallback (ensemble consensus unavailable)`);
+        }
       }
 
       // ── RUNTIME VALIDATION ──────────────────────────────────────────

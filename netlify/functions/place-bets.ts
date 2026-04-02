@@ -11,6 +11,7 @@ import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
 import { notifyBetPlaced } from '../../src/lib/notify';
 import { shouldTrade } from '../../src/lib/circuit-breaker';
+import { getOrderbookDepth, computeSpread, estimateSlippage } from '../../src/lib/ws-price-feed';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -238,6 +239,8 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   let placed = 0;
   let totalDeployed = todayExposure;
+  let orderbookChecks = 0;
+  const MAX_ORDERBOOK_CHECKS = 8;
 
   for (const analysis of candidates) {
     // Stop conditions — exposure cap and timeout only, no arbitrary count limit
@@ -437,6 +440,60 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (entryPrice > MAX_ENTRY_PRICE) {
       console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap (bad risk/reward)`);
       continue;
+    }
+
+    // Real-time orderbook validation — check actual spread and slippage
+    // before committing to a bet. Stale prices kill edge.
+    // Advisory check only — wrapped in try/catch so failures don't block bets.
+    if (orderbookChecks < MAX_ORDERBOOK_CHECKS) {
+      try {
+        const { data: marketData } = await supabase
+          .from('markets')
+          .select('condition_id')
+          .eq('id', analysis.market_id)
+          .single();
+
+        if (marketData?.condition_id) {
+          const book = await getOrderbookDepth(marketData.condition_id);
+          if (book) {
+            const spreadPct = computeSpread(book);
+            const isBuyOrder = analysis.direction === 'BUY_YES' || analysis.direction === 'BUY_NO';
+            const slippagePct = estimateSlippage(book, betAmount, isBuyOrder);
+
+            // Skip if spread eats more than 40% of our edge
+            if (spreadPct > edgeNorm * 100 * 0.4) {
+              console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — spread ${spreadPct.toFixed(1)}% eats ${((spreadPct / (edgeNorm * 100)) * 100).toFixed(0)}% of edge`);
+              orderbookChecks++;
+              continue;
+            }
+
+            // Skip if slippage would cost more than 20% of bet amount
+            const slippageDollar = (slippagePct / 100) * betAmount;
+            if (slippageDollar > betAmount * 0.20) {
+              console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — estimated slippage $${slippageDollar.toFixed(2)} on $${betAmount.toFixed(2)} bet (exceeds 20%)`);
+              orderbookChecks++;
+              continue;
+            }
+
+            // Use real-time best price instead of stale analysis price
+            const realPrice = isBuyOrder && analysis.direction === 'BUY_YES'
+              ? book.bestAsk
+              : isBuyOrder && analysis.direction === 'BUY_NO'
+              ? 1 - book.bestBid
+              : book.bestBid;
+
+            if (realPrice && Math.abs(realPrice - entryPrice) > 0.03) {
+              console.log(`[place-bets] Price moved: analysis=${entryPrice.toFixed(3)}, live=${realPrice.toFixed(3)} — using live price`);
+              entryPrice = realPrice;
+            }
+
+            orderbookChecks++;
+          }
+        }
+      } catch (e) {
+        // Orderbook check is advisory — don't block bets if it fails
+        console.log(`[place-bets] Orderbook check failed (non-blocking): ${e}`);
+      }
     }
 
     // Near-expiry filter for crypto: don't bet on monthly/quarterly crypto targets

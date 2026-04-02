@@ -7,6 +7,7 @@
 
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
+import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -14,6 +15,9 @@ const supabase = createClient(
 );
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+
+// Feature flag: use ensemble if OpenAI or Gemini keys are configured
+const USE_ENSEMBLE = !!(process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY);
 
 export const handler = schedule('*/20 * * * *', async () => {
   console.log('[analyze-weather-v2] Starting enhanced weather analysis');
@@ -133,39 +137,75 @@ export const handler = schedule('*/20 * * * *', async () => {
     );
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: CLAUDE_MODEL,
-          max_tokens: 2000,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: AbortSignal.timeout(12000),
-      });
+      let analysis: any;
+      let ensembleData: EnsembleResult | null = null;
 
-      if (!res.ok) {
-        console.error(`[analyze-weather-v2] Claude API error: ${res.status}`);
-        continue;
+      if (USE_ENSEMBLE) {
+        // Use ensemble: run Claude + GPT-4o + Gemini in parallel
+        ensembleData = await ensembleAnalyze(prompt);
+
+        // Extract Claude's response from ensemble (Claude has 40% weight, goes first)
+        const claudeModelResponse = ensembleData.model_responses.find((r) => r.model === 'claude');
+        if (!claudeModelResponse || !claudeModelResponse.reasoning) {
+          console.log(
+            `[analyze-weather-v2] ${city.name} — no valid Claude response from ensemble, using fallback`
+          );
+          // Fall through to direct Claude call
+        } else {
+          // Claude responded in ensemble — parse its reasoning field
+          try {
+            const jsonMatch = claudeModelResponse.reasoning.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+              console.log(
+                `[analyze-weather-v2] ${city.name} — no JSON in Claude ensemble response, using fallback`
+              );
+            } else {
+              analysis = JSON.parse(jsonMatch[0]);
+              // Successfully parsed Claude's response from ensemble — skip to validation
+            }
+          } catch {
+            console.log(
+              `[analyze-weather-v2] ${city.name} — JSON parse failed in ensemble Claude, using fallback`
+            );
+          }
+        }
       }
 
-      const data = await res.json();
-      const text = data.content?.[0]?.text;
-      if (!text) continue;
+      // Fallback: direct Claude API call if ensemble didn't work or isn't enabled
+      if (!analysis) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model: CLAUDE_MODEL,
+            max_tokens: 2000,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+          signal: AbortSignal.timeout(12000),
+        });
 
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) continue;
+        if (!res.ok) {
+          console.error(`[analyze-weather-v2] Claude API error: ${res.status}`);
+          continue;
+        }
 
-      let analysis: any;
-      try {
-        analysis = JSON.parse(jsonMatch[0]);
-      } catch {
-        console.error(`[analyze-weather] JSON parse error for market ${market.id}`);
-        continue;
+        const data = await res.json();
+        const text = data.content?.[0]?.text;
+        if (!text) continue;
+
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) continue;
+
+        try {
+          analysis = JSON.parse(jsonMatch[0]);
+        } catch {
+          console.error(`[analyze-weather] JSON parse error for market ${market.id}`);
+          continue;
+        }
       }
 
       // Runtime validation — reject malformed Claude responses
@@ -186,6 +226,48 @@ export const handler = schedule('*/20 * * * *', async () => {
       }
       analysis.auto_eligible = validation.data.auto_eligible;
       analysis.flags = validation.data.flags;
+
+      // Cross-validate with ensemble consensus if available
+      if (ensembleData && analysis.best_bet) {
+        const ensembleDir = ensembleData.consensus_direction;
+        const claudeDir = analysis.best_bet.direction;
+        const agreementScore = ensembleData.agreement_score;
+
+        // Store ensemble metadata for later calibration
+        analysis.ensemble_agreement_score = agreementScore;
+        analysis.ensemble_used_models = ensembleData.used_models;
+
+        // If Claude and ensemble disagree on direction, downgrade confidence
+        if (ensembleDir !== 'PASS' && claudeDir !== ensembleDir && claudeDir !== 'PASS') {
+          const oldConfidence = analysis.best_bet.confidence;
+          // Downgrade by one level: HIGH→MEDIUM, MEDIUM→LOW, LOW→LOW
+          if (oldConfidence === 'HIGH') {
+            analysis.best_bet.confidence = 'MEDIUM';
+            analysis.flags.push('ensemble_disagreement_downgrade_high_to_medium');
+          } else if (oldConfidence === 'MEDIUM') {
+            analysis.best_bet.confidence = 'LOW';
+            analysis.flags.push('ensemble_disagreement_downgrade_medium_to_low');
+          }
+          console.log(
+            `[analyze-weather-v2] ${city.name} — ensemble disagreement: Claude=${claudeDir}, Ensemble=${ensembleDir}, downgraded confidence from ${oldConfidence}`
+          );
+        } else if (agreementScore === 1.0 && ensembleDir === claudeDir && ensembleDir !== 'PASS') {
+          // All models agree — boost confidence by one level
+          const oldConfidence = analysis.best_bet.confidence;
+          if (oldConfidence === 'MEDIUM') {
+            analysis.best_bet.confidence = 'HIGH';
+            analysis.flags.push('ensemble_full_agreement_boost_medium_to_high');
+          } else if (oldConfidence === 'LOW') {
+            analysis.best_bet.confidence = 'MEDIUM';
+            analysis.flags.push('ensemble_full_agreement_boost_low_to_medium');
+          }
+        }
+
+        // Log ensemble performance
+        console.log(
+          `[analyze-weather-v2] Ensemble: agreement=${(agreementScore * 100).toFixed(1)}%, models=[${ensembleData.used_models.join(',')}], consensus_dir=${ensembleDir}, consensus_conf=${ensembleData.consensus_confidence}`
+        );
+      }
 
       // Calculate Kelly bet size
       let kellyFraction = 0;
@@ -277,11 +359,14 @@ export const handler = schedule('*/20 * * * *', async () => {
         ensemble_edge: analysis.best_bet?.ensemble_edge ?? null,
         precip_consensus: consensus.precip_consensus_mm ?? null,
         flags: analysis.flags || [],
+        ensemble_agreement_score: analysis.ensemble_agreement_score ?? null,
+        ensemble_used_models: analysis.ensemble_used_models ?? null,
       });
 
       processed++;
+      const usedEnsemble = ensembleData ? `ensemble(${ensembleData.used_models.join(',')})` : 'claude-only';
       console.log(
-        `[analyze-weather-v2] ${city.name} (${marketType}): edge=${analysis.best_bet?.edge ?? 0}, ensemble=${analysis.best_bet?.ensemble_prob ? 'yes' : 'no'}`
+        `[analyze-weather-v2] ${city.name} (${marketType}): edge=${analysis.best_bet?.edge ?? 0}, used=${usedEnsemble}, confidence=${analysis.best_bet?.confidence ?? 'PASS'}`
       );
     } catch (err) {
       console.error(`[analyze-weather-v2] Analysis failed for ${city.name}:`, err);
