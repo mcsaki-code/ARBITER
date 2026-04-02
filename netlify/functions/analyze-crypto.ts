@@ -317,8 +317,10 @@ Respond ONLY in JSON:
 }`;
 
     try {
-      // Feature flag: use ensemble if multiple API keys are available
-      const USE_ENSEMBLE = (process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY) ? true : false;
+      // DISABLED: ensemble strips bracket_prob/market_price which validator requires.
+      // Direct Claude returns full JSON with all domain-specific fields.
+      // TODO: fix ensemble to pass through raw model responses for crypto-specific fields.
+      const USE_ENSEMBLE = false;
 
       let analysis: any;
       let ensembleData: any = null;
