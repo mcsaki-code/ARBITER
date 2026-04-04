@@ -49,7 +49,8 @@ const OPTIMAL_HOURS_MAX = 72;            // sweet spot upper bound
 
 /** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
 function normalizeEdge(raw: number | null): number {
-  if (raw === null) return 0;
+  if (raw === null || isNaN(raw)) return 0;
+  if (raw < 0) return 0;  // Negative edges are invalid
   if (raw > 100) return raw / 1000;
   if (raw > 1) return raw / 100;
   return raw;
@@ -57,7 +58,8 @@ function normalizeEdge(raw: number | null): number {
 
 /** Normalize probability/price values (0–1 range) */
 function normalizeProb(raw: number | null): number {
-  if (raw === null) return 0;
+  if (raw === null || isNaN(raw)) return 0;
+  if (raw < 0) return 0;  // Negative probabilities are invalid
   if (raw > 1) return raw / 100;
   return raw;
 }

@@ -13,6 +13,7 @@ const supabase = createClient(
 );
 
 interface GammaMarket {
+  id: string | number;  // Gamma numeric market ID — required for reliable API lookups
   conditionId: string;
   question: string;
   outcomes: string;

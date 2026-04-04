@@ -176,7 +176,7 @@ export const handler = schedule('0 * * * *', async () => {
 
     // Validate entry_price — skip corrupt bets instead of silently defaulting
     const entryPrice = bet.entry_price;
-    if (!entryPrice || entryPrice <= 0 || entryPrice > 1) {
+    if (!entryPrice || isNaN(entryPrice) || entryPrice <= 0 || entryPrice > 1) {
       console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — invalid entry_price ${entryPrice} (expected 0-1)`);
       continue;
     }
