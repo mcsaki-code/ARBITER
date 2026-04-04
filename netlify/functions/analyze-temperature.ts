@@ -1,4 +1,8 @@
 // ============================================================
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
+// analyze-weather.ts handles all weather analysis (LLM-powered).
+// This statistical Gaussian analyzer may be re-enabled later as a supplementary signal.
+// ============================================================
 // Netlify Scheduled Function: analyze-temperature
 // Runs every 15 minutes — PURE STATISTICAL (no LLM)
 // Phase 2: temperature category markets ($400+ liquidity)
@@ -96,6 +100,9 @@ function resolveDateStr(dateStr: string): string | null {
 }
 
 export const handler = schedule('*/15 * * * *', async () => {
+  console.log('[analyze-temperature] V3 DISABLED — skipping');
+  return { statusCode: 200 };
+
   const startTime = Date.now();
   console.log('[analyze-temperature] Starting Phase 2 statistical analysis');
 

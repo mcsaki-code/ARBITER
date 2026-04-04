@@ -30,6 +30,7 @@ const supabase = createClient(
 const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
+const MAX_BETS_PER_DAY = 15;           // max 15 bets per day across all markets
 const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
 const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
 const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update frequently
@@ -133,8 +134,13 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   console.log(`[place-bets] Today: ${todaysBets?.length || 0} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
+  const todayBetCount = todaysBets?.length || 0;
   if (todayExposure >= maxDailyExposure) {
     console.log('[place-bets] Daily exposure limit reached');
+    return { statusCode: 200 };
+  }
+  if (todayBetCount >= MAX_BETS_PER_DAY) {
+    console.log(`[place-bets] Daily bet count limit reached (${todayBetCount}/${MAX_BETS_PER_DAY})`);
     return { statusCode: 200 };
   }
 
@@ -184,6 +190,7 @@ export const handler = schedule('*/15 * * * *', async () => {
   for (const analysis of candidates) {
     // Stop conditions
     if (totalDeployed >= maxDailyExposure) break;
+    if (todayBetCount + placed >= MAX_BETS_PER_DAY) break;
     if (Date.now() - startTime > 20000) break;
 
     // Skip if we already have an open bet on this market

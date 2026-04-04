@@ -163,8 +163,8 @@ export const handler = schedule('0 * * * *', async () => {
     const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
     // After official resolution, prices should be 0/1 (or very close)
-    // Require 0.95+ to handle any floating point edge cases
-    if (prices.length === 0 || maxPrice < 0.95) {
+    // Require 0.98+ to ensure oracle has fully settled (not mid-dispute)
+    if (prices.length === 0 || maxPrice < 0.98) {
       console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — resolvedBy set but maxPrice only ${maxPrice.toFixed(3)} (expected ~1.0)`);
       continue;
     }
@@ -178,13 +178,6 @@ export const handler = schedule('0 * * * *', async () => {
     const entryPrice = bet.entry_price;
     if (!entryPrice || isNaN(entryPrice) || entryPrice <= 0 || entryPrice > 1) {
       console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — invalid entry_price ${entryPrice} (expected 0-1)`);
-      continue;
-    }
-
-    // Safety check: if PnL would be > 50x bet amount, flag for manual review
-    const projectedPnl = bet.amount_usd * ((1.0 / entryPrice) - 1);
-    if (projectedPnl > bet.amount_usd * 50) {
-      console.log(`[resolve-bets] SUSPICIOUSLY HIGH PnL: $${projectedPnl.toFixed(2)} on $${bet.amount_usd} bet (${(projectedPnl / bet.amount_usd).toFixed(0)}x) for ${bet.id.substring(0, 8)} — skipping for manual review`);
       continue;
     }
 
@@ -214,9 +207,16 @@ export const handler = schedule('0 * * * *', async () => {
       betWon = betLabel === winner;
     }
 
-    const pnl = betWon
+    let pnl = betWon
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;
+
+    // Safety cap: if winning PnL exceeds 200x stake, cap it and log for review.
+    // This catches corrupt entry_price data without blocking resolution entirely.
+    if (betWon && pnl > bet.amount_usd * 200) {
+      console.log(`[resolve-bets] WARNING: PnL $${pnl.toFixed(2)} exceeds 200x stake ($${bet.amount_usd}) for ${bet.id.substring(0, 8)} — capping at 200x`);
+      pnl = Math.round(bet.amount_usd * 200 * 100) / 100;
+    }
 
     // Brier score = (predicted_prob - actual_outcome)^2
     // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality.
