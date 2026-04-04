@@ -45,35 +45,12 @@ export async function GET() {
 
     let reasoning: string | null = null;
 
-    // Fetch reasoning from the appropriate analysis table
+    // Fetch reasoning from weather analysis (weather-only v3)
     if (bet.analysis_id && bet.category === 'weather') {
       const { data: analysis } = await supabase
         .from('weather_analyses')
         .select('reasoning')
         .eq('id', bet.analysis_id)
-        .single();
-      reasoning = analysis?.reasoning || null;
-    }
-
-    // For sports/crypto, analysis_id is null (FK constraint), so search by market_id + time
-    if (!reasoning && bet.category === 'sports') {
-      const { data: analysis } = await supabase
-        .from('sports_analyses')
-        .select('reasoning')
-        .eq('market_id', bet.market_id)
-        .order('analyzed_at', { ascending: false })
-        .limit(1)
-        .single();
-      reasoning = analysis?.reasoning || null;
-    }
-
-    if (!reasoning && bet.category === 'crypto') {
-      const { data: analysis } = await supabase
-        .from('crypto_analyses')
-        .select('reasoning')
-        .eq('market_id', bet.market_id)
-        .order('analyzed_at', { ascending: false })
-        .limit(1)
         .single();
       reasoning = analysis?.reasoning || null;
     }

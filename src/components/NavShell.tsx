@@ -95,12 +95,7 @@ function IconSentiment({ className = '' }: { className?: string }) {
 
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', Icon: IconHome },
-  { href: '/sports', label: 'Sports', Icon: IconSports },
-  { href: '/crypto', label: 'Crypto', Icon: IconCrypto },
   { href: '/weather', label: 'Weather', Icon: IconWeather },
-  { href: '/politics', label: 'Politics', Icon: IconPolitics },
-  { href: '/sentiment', label: 'Signals', Icon: IconSentiment },
-  { href: '/arb', label: 'Arbitrage', Icon: IconArb },
   { href: '/performance', label: 'Performance', Icon: IconTracker },
 ];
 

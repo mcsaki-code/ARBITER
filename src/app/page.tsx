@@ -50,18 +50,6 @@ interface CitySignal {
   signal_type: 'edge' | 'near_miss' | 'pass' | 'no_market';
 }
 
-interface ArbOpportunity {
-  id: string;
-  event_question: string;
-  price_yes: number;
-  price_no: number;
-  combined_cost: number;
-  gross_edge: number;
-  net_edge: number | null;
-  category: string | null;
-  status: string;
-  detected_at: string;
-}
 
 // ============================================================
 // Helpers
@@ -121,10 +109,6 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [bets, setBets] = useState<Bet[]>([]);
   const [signals, setSignals] = useState<CitySignal[]>([]);
-  const [arbs, setArbs] = useState<ArbOpportunity[]>([]);
-  const [sportsCount, setSportsCount] = useState(0);
-  const [cryptoCount, setCryptoCount] = useState(0);
-  const [cryptoSignals, setCryptoSignals] = useState<Record<string, { spot_price: number; rsi_14: number | null; signal_summary: string }>>({});
 
   // Pipeline state
   const [pipelineStatus, setPipelineStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -137,12 +121,9 @@ export default function HomePage() {
   useEffect(() => {
     async function load() {
       try {
-        const [betsRes, signalsRes, arbRes, sportsRes, cryptoRes, configRes] = await Promise.all([
+        const [betsRes, signalsRes, configRes] = await Promise.all([
           fetch('/api/bets'),
           fetch('/api/signals'),
-          fetch('/api/arb'),
-          fetch('/api/sports'),
-          fetch('/api/crypto'),
           fetch('/api/config'),
         ]);
 
@@ -161,22 +142,6 @@ export default function HomePage() {
         if (signalsRes.ok) {
           const sData = await signalsRes.json();
           setSignals(sData.signals || []);
-        }
-
-        if (arbRes.ok) {
-          const aData = await arbRes.json();
-          setArbs(aData.opportunities || []);
-        }
-
-        if (sportsRes.ok) {
-          const spData = await sportsRes.json();
-          setSportsCount(spData.summary?.total_markets || 0);
-        }
-
-        if (cryptoRes.ok) {
-          const cData = await cryptoRes.json();
-          setCryptoCount(cData.summary?.total_markets || 0);
-          setCryptoSignals(cData.latest_signals || {});
         }
       } catch (err) {
         console.error('Failed to load dashboard data:', err);
@@ -213,7 +178,7 @@ export default function HomePage() {
 
       // Step 2: Market discovery (50%)
       setPipelineProgress(30);
-      setPipelineStep('Discovering markets across weather, sports & crypto...');
+      setPipelineStep('Discovering weather markets...');
       const res = await fetch('/api/trigger');
       const trigData = res.ok ? await res.json() : null;
       const marketsFound = trigData?.summary?.marketsFound || 0;
@@ -273,7 +238,7 @@ export default function HomePage() {
   const bankroll = parseFloat(config.paper_bankroll || '5000');
   const openExposure = openBets.reduce((sum, b) => sum + b.amount_usd, 0);
   const edgeSignals = signals.filter((s) => s.signal_type === 'edge');
-  const allOpportunities = [...edgeSignals, ...arbs];
+  const allOpportunities = edgeSignals;
 
   // Calculate potential winnings from open bets
   const potentialWinnings = openBets.reduce((sum, b) => {
@@ -289,7 +254,7 @@ export default function HomePage() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-3xl font-bold text-arbiter-text mb-1">ARBITER</h1>
-            <p className="text-sm text-arbiter-text-3">AI-Powered Market Scanner</p>
+            <p className="text-sm text-arbiter-text-3">AI-Powered Weather Prediction Market</p>
           </div>
           <button
             onClick={runPipeline}
@@ -480,24 +445,22 @@ export default function HomePage() {
               </div>
 
               <div className="divide-y divide-arbiter-border/50">
-                {allOpportunities.slice(0, 4).map((opp) => {
-                  const isSignal = 'city_name' in opp;
-                  const title = isSignal ? (opp as CitySignal).city_name : (opp as ArbOpportunity).event_question;
-                  const edge = isSignal ? (opp as CitySignal).edge || 0 : (opp as ArbOpportunity).net_edge || (opp as ArbOpportunity).gross_edge;
-                  const confidence = isSignal ? (opp as CitySignal).confidence : 'HIGH';
-                  const reasoning = isSignal ? (opp as CitySignal).reasoning : null;
-                  const category = isSignal ? 'weather' : (opp as ArbOpportunity).category;
-                  const marketPrice = isSignal ? (opp as CitySignal).market_price : null;
-                  const trueProb = isSignal ? (opp as CitySignal).true_prob : null;
-                  const recBet = isSignal ? (opp as CitySignal).rec_bet_usd : null;
-                  const outcome = isSignal ? (opp as CitySignal).best_outcome_label : null;
+                {allOpportunities.slice(0, 4).map((signal) => {
+                  const title = signal.city_name;
+                  const edge = signal.edge || 0;
+                  const confidence = signal.confidence;
+                  const reasoning = signal.reasoning;
+                  const marketPrice = signal.market_price;
+                  const trueProb = signal.true_prob;
+                  const recBet = signal.rec_bet_usd;
+                  const outcome = signal.best_outcome_label;
 
                   return (
-                    <div key={isSignal ? (opp as CitySignal).city_id : (opp as ArbOpportunity).id} className="p-5 hover:bg-arbiter-elevated/30 transition-colors">
+                    <div key={signal.city_id} className="p-5 hover:bg-arbiter-elevated/30 transition-colors">
                       {/* Header with category badge and title */}
                       <div className="flex items-start justify-between mb-3">
                         <div className="flex items-start gap-3 flex-1">
-                          <div className="mt-1.5">{getCategoryBadge(category)}</div>
+                          <div className="mt-1.5">{getCategoryBadge('weather')}</div>
                           <div className="flex-1 min-w-0">
                             <div className="text-sm font-semibold text-arbiter-text truncate">{title}</div>
                             {outcome && (
@@ -513,7 +476,7 @@ export default function HomePage() {
                       </div>
 
                       {/* Prices and reasoning */}
-                      {isSignal && marketPrice && trueProb && (
+                      {marketPrice && trueProb && (
                         <div className="bg-arbiter-bg rounded p-3 mb-3 text-xs">
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-arbiter-text-3">Market price:</span>
@@ -523,12 +486,6 @@ export default function HomePage() {
                             <span className="text-arbiter-text-3">AI estimate:</span>
                             <span className="font-mono text-arbiter-green font-semibold">{formatCents(trueProb)}</span>
                           </div>
-                        </div>
-                      )}
-
-                      {!isSignal && (
-                        <div className="text-xs text-arbiter-text-3 mb-3 font-mono">
-                          YES {formatCents((opp as ArbOpportunity).price_yes)} + NO {formatCents((opp as ArbOpportunity).price_no)} = {((opp as ArbOpportunity).combined_cost * 100).toFixed(0)}¢
                         </div>
                       )}
 
@@ -556,10 +513,9 @@ export default function HomePage() {
                       {/* Bet status — show if AI already placed a bet on this market */}
                       <div className="mt-3">
                         {(() => {
-                          const signal = isSignal ? (opp as CitySignal) : null;
-                          const oppMarketId = signal ? (signal.market_id || signal.city_id) : (opp as ArbOpportunity).id;
+                          const oppMarketId = signal.market_id || signal.city_id;
                           const existingBet = bets.find((b) => b.market_id === oppMarketId && b.status === 'OPEN');
-                          const marketDead = signal && !signal.market_active;
+                          const marketDead = !signal.market_active;
 
                           if (existingBet) {
                             return (
@@ -779,9 +735,8 @@ export default function HomePage() {
             </div>
 
             <div className="p-5 space-y-3 text-xs">
-              <StatusDot label="Markets scanned" count={pipelineMarketCount > 0 ? pipelineMarketCount : sportsCount + cryptoCount} active={pipelineMarketCount > 0 || sportsCount + cryptoCount > 0} />
+              <StatusDot label="Markets scanned" count={pipelineMarketCount > 0 ? pipelineMarketCount : 0} active={pipelineMarketCount > 0} />
               <StatusDot label="Weather edges" count={edgeSignals.length} active={edgeSignals.length > 0} />
-              <StatusDot label="Arb opportunities" count={arbs.length} active={arbs.length > 0} />
               <StatusDot label="Open positions" count={openBets.length} active={openBets.length > 0} />
               <StatusDot label="Resolved bets" count={resolvedBets.length} active={resolvedBets.length > 0} />
             </div>
@@ -863,42 +818,6 @@ export default function HomePage() {
               </div>
               <h4 className="text-sm font-semibold text-arbiter-text mb-1">Weather</h4>
               <p className="text-xs text-arbiter-text-3">{edgeSignals.length > 0 ? `${edgeSignals.length} edges` : 'Forecast analysis'}</p>
-            </Link>
-
-            <Link
-              href="/sports"
-              className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-arbiter-green/40 transition-all"
-            >
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 bg-blue-400 rounded-full" />
-                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">SPO</span>
-              </div>
-              <h4 className="text-sm font-semibold text-arbiter-text mb-1">Sports</h4>
-              <p className="text-xs text-arbiter-text-3">{sportsCount > 0 ? `${sportsCount} markets` : 'Market analysis'}</p>
-            </Link>
-
-            <Link
-              href="/crypto"
-              className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-purple-400/40 transition-all"
-            >
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 bg-orange-400 rounded-full" />
-                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">CRY</span>
-              </div>
-              <h4 className="text-sm font-semibold text-arbiter-text mb-1">Crypto</h4>
-              <p className="text-xs text-arbiter-text-3">{cryptoCount > 0 ? `${cryptoCount} markets` : 'Bracket analysis'}</p>
-            </Link>
-
-            <Link
-              href="/arb"
-              className="block bg-arbiter-card border border-arbiter-border rounded-lg p-4 hover:border-cyan-400/40 transition-all"
-            >
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2.5 h-2.5 bg-cyan-400 rounded-full" />
-                <span className="text-xs font-semibold text-arbiter-text-3 uppercase">ARB</span>
-              </div>
-              <h4 className="text-sm font-semibold text-arbiter-text mb-1">Arbitrage</h4>
-              <p className="text-xs text-arbiter-text-3">{arbs.length > 0 ? `${arbs.length} opps` : 'Scanner'}</p>
             </Link>
           </div>
         </div>
