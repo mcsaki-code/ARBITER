@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Ingest Sports Odds v2
 // Runs every 60 minutes (was 10) to conserve API budget.
@@ -9,7 +10,7 @@
 // New schedule (60 min) + Pinnacle first = no more budget burn.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { shinDevig } from '../../src/lib/trading-math';
 
@@ -384,7 +385,8 @@ async function fetchOddsApiOdds(sport: string): Promise<OddsRow[]> {
 
 // ── Main handler ───────────────────────────────────────────
 
-export const handler = schedule('0 * * * *', async () => {  // Every hour (was every 10 min)
+export const handler = async () => {
+  console.log('[ingest-sports-odds] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[ingest-sports] Starting sports odds ingestion v2');
   const startTime = Date.now();
 

@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Sentiment Edge Analyzer
 // Runs every 10 minutes
@@ -13,7 +14,7 @@
 //
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
@@ -70,7 +71,8 @@ interface SentimentSignal {
   summary: string;
 }
 
-export const handler = schedule('*/10 * * * *', async () => {
+export const handler = async () => {
+  console.log('[analyze-sentiment-edge] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[sentiment] Starting sentiment edge analysis');
   const startTime = Date.now();
 

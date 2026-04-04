@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Whale Copy Trader
 // Runs every 15 minutes — mirrors bets from top Polymarket wallets
@@ -9,7 +10,7 @@
 // RESEARCH: 65-75% win rate copying wallets with >70% track record
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
 
@@ -121,7 +122,8 @@ interface WhaleProfile {
   last_updated: string;
 }
 
-export const handler = schedule('*/15 * * * *', async () => {
+export const handler = async () => {
+  console.log('[track-whales] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[whales] Starting whale copy trader scan');
   const startTime = Date.now();
 

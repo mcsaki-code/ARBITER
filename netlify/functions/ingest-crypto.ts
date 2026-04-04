@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Ingest Crypto Signals v2
 // Runs every 10 minutes — BTC/ETH/SOL price data + indicators
@@ -5,7 +6,7 @@
 // Both are free, no API keys, no geo restrictions
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -133,7 +134,8 @@ interface GammaEvent {
   markets: GammaMarket[];
 }
 
-export const handler = schedule('*/10 * * * *', async () => {
+export const handler = async () => {
+  console.log('[ingest-crypto] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[ingest-crypto] Starting crypto signal ingestion v2');
   const startTime = Date.now();
 

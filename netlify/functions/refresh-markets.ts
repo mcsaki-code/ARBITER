@@ -294,6 +294,7 @@ export const handler = schedule('*/30 * * * *', async () => {
       const { error } = await supabase.from('markets').upsert(
         {
           condition_id: m.conditionId,
+          gamma_market_id: String(m.id),  // Gamma numeric ID — required for reliable API lookups
           question: m.question,
           category,
           city_id: cityId,

@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Macro News Signal Ingestor
 // Runs every 5 minutes
@@ -15,7 +16,7 @@
 // Table: trump_posts (unchanged schema — no downstream changes needed)
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -279,7 +280,8 @@ async function upsertArticles(
   return { stored, highImpact };
 }
 
-export const handler = schedule('*/5 * * * *', async () => {
+export const handler = async () => {
+  console.log('[ingest-trump-social] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[macro-news] Starting macro news ingest');
   const startTime = Date.now();
   let totalStored = 0, totalHighImpact = 0;

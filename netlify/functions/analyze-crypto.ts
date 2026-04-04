@@ -1,10 +1,11 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Analyze Crypto Edge
 // Runs every 30 minutes — compares technical/on-chain signals
 // against Polymarket price bracket markets to find mispricings.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze } from '../../src/lib/ensemble';
 
@@ -115,7 +116,8 @@ interface MarketRow {
   resolution_date: string | null;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = async () => {
+  console.log('[analyze-crypto] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[analyze-crypto] Starting crypto edge analysis');
   const startTime = Date.now();
 

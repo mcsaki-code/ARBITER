@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: High-Probability Bonds
 // Runs every 20 minutes — buys near-certain outcomes at 90-97¢
@@ -9,7 +10,7 @@
 // accuracy, but on 50+ positions this achieves 95%+ overall ROI.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
 import { shouldTrade } from '../../src/lib/circuit-breaker';
@@ -171,7 +172,8 @@ Outcome: ${outcome_label}`;
   }
 }
 
-export const handler = schedule('*/20 * * * *', async () => {
+export const handler = async () => {
+  console.log('[high-prob-bonds] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[high-prob-bonds] Starting high-probability bonds scan');
   const startTime = Date.now();
 

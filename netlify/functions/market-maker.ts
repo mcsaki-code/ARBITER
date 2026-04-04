@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Market Making Scanner
 // Runs every 30 minutes — identifies market-making opportunities
@@ -13,7 +14,7 @@
 // - Non-trending markets (avoid MM in volatile markets)
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -136,7 +137,8 @@ async function fetchAllMarkets(): Promise<GammaMarket[]> {
   return allMarkets;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = async () => {
+  console.log('[market-maker] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[market-maker] Starting market-making opportunity scan');
   const startTime = Date.now();
 

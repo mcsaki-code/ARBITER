@@ -1,10 +1,11 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Arbitrage Scanner
 // Runs every 15 minutes — scans ALL Polymarket markets for
 // sum-to-one arbitrage (YES + NO < $0.98 after fees)
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -68,7 +69,8 @@ function categorizeMarket(question: string): string {
   return 'other';
 }
 
-export const handler = schedule('*/15 * * * *', async () => {
+export const handler = async () => {
+  console.log('[arb-scanner] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[arb-scanner] Starting arbitrage scan v2 (parallel)');
   const startTime = Date.now();
 

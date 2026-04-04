@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: General Opportunity Scanner
 // Runs every 30 minutes
@@ -16,7 +17,7 @@
 // Storage: opportunity_analyses table
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
@@ -114,7 +115,8 @@ function normalizeProb(raw: number | null | undefined): number {
   return raw;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = async () => {
+  console.log('[analyze-opportunities] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[opportunities] Starting general market opportunity scan');
   const startTime = Date.now();
 

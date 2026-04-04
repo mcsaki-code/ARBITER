@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Analyze Sports Edge v2
 // Runs every 30 minutes — sportsbook consensus vs Polymarket
@@ -6,7 +7,7 @@
 // FIXED: Increased MAX_ANALYSES_PER_RUN from 3 to 8
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
@@ -270,7 +271,8 @@ interface OddsRow {
   implied_prob: number;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = async () => {
+  console.log('[analyze-sports-edge] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[analyze-sports] Starting sports edge analysis v2');
   const startTime = Date.now();
 

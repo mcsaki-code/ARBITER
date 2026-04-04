@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Analyze Politics Edge
 // Runs every 30 minutes — cross-references multiple prediction
@@ -10,7 +11,7 @@
 // - 9 news RSS feeds     — AP, Reuters, BBC, NYT, White House
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 
@@ -217,7 +218,8 @@ function titleOverlap(a: string, b: string): number {
   return union === 0 ? 0 : inter / union;
 }
 
-export const handler = schedule('*/30 * * * *', async () => {
+export const handler = async () => {
+  console.log('[analyze-politics] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[analyze-politics] Starting politics edge analysis');
   const startTime = Date.now();
 

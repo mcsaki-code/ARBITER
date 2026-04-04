@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Crypto 15-Minute Momentum
 // Runs every 5 minutes — the strategy behind the $313→$438K bot
@@ -12,7 +13,7 @@
 // Decision happens in <200ms. Claude latency = missed window.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { executeBet } from '../../src/lib/execute-bet';
 
@@ -157,7 +158,8 @@ function estimateTrueProb(signal: MomentumSignal, isUpQuestion: boolean): number
   return 1 - baseProb; // Wrong direction
 }
 
-export const handler = schedule('*/5 * * * *', async () => {  // Every 5 minutes
+export const handler = async () => {
+  console.log('[analyze-crypto-momentum] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[momentum] Starting 15-min crypto momentum scan');
   const startTime = Date.now();
 

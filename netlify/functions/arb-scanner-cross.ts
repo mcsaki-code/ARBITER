@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Cross-Platform Arbitrage Scanner
 // Runs every 15 minutes — finds price discrepancies between
@@ -7,7 +8,7 @@
 // and guarantee a profit regardless of outcome.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -72,7 +73,8 @@ interface KalshiMarketRow {
   category: string;
 }
 
-export const handler = schedule('*/15 * * * *', async () => {
+export const handler = async () => {
+  console.log('[arb-scanner-cross] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[arb-cross] Starting cross-platform arbitrage scan');
   const startTime = Date.now();
 

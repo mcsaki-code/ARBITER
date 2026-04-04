@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Ingest Kalshi Markets
 // Runs every 15 minutes — fetches Kalshi open markets + prices
@@ -7,7 +8,7 @@
 // Auth (KALSHI_API_KEY) only needed for placing orders.
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -76,7 +77,8 @@ interface KalshiEventsResponse {
   cursor?: string;
 }
 
-export const handler = schedule('*/15 * * * *', async () => {
+export const handler = async () => {
+  console.log('[ingest-kalshi] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[ingest-kalshi] Starting Kalshi market ingestion');
   const startTime = Date.now();
 

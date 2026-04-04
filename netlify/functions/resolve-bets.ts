@@ -66,28 +66,45 @@ export const handler = schedule('0 * * * *', async () => {
 
   console.log(`[resolve-bets] Found ${openBets.length} open bets`);
 
-  // Collect unique condition_ids
-  const conditionIds = [
-    ...new Set(openBets.map((b) => b.markets?.condition_id).filter(Boolean)),
-  ] as string[];
+  // Collect unique gamma_market_ids for direct API lookups.
+  // IMPORTANT: The Gamma API's condition_id filter is unreliable — it returns
+  // random legacy markets instead of the correct one. We MUST use the numeric
+  // gamma_market_id with the /markets/{id} endpoint for reliable lookups.
+  const gammaIdToBet = new Map<string, string[]>();
+  for (const bet of openBets) {
+    const gid = bet.markets?.gamma_market_id;
+    if (gid) {
+      if (!gammaIdToBet.has(gid)) gammaIdToBet.set(gid, []);
+      gammaIdToBet.get(gid)!.push(bet.id);
+    }
+  }
 
-  // Fetch current state from Gamma API — store ALL results per condition_id
-  const gammaCache = new Map<string, GammaMarket[]>();
+  // Fetch current state from Gamma API — one request per unique market
+  const gammaCache = new Map<string, GammaMarket>();
 
-  for (const cid of conditionIds) {
-    try {
-      const res = await fetch(
-        `https://gamma-api.polymarket.com/markets?condition_id=${cid}`,
-        { signal: AbortSignal.timeout(8000) }
-      );
-      if (res.ok) {
-        const data = await res.json();
-        gammaCache.set(cid, Array.isArray(data) ? data : []);
-      } else {
-        gammaCache.set(cid, []);
-      }
-    } catch {
-      gammaCache.set(cid, []);
+  const gammaIds = [...gammaIdToBet.keys()];
+  // Batch in groups of 5 for parallel fetching within timeout
+  for (let i = 0; i < gammaIds.length; i += 5) {
+    const batch = gammaIds.slice(i, i + 5);
+    const results = await Promise.all(
+      batch.map(async (gid) => {
+        try {
+          const res = await fetch(
+            `https://gamma-api.polymarket.com/markets/${gid}`,
+            { signal: AbortSignal.timeout(8000) }
+          );
+          if (res.ok) {
+            const data = await res.json();
+            return { gid, data: data as GammaMarket };
+          }
+        } catch {
+          // Network error — skip this market
+        }
+        return { gid, data: null };
+      })
+    );
+    for (const { gid, data } of results) {
+      if (data) gammaCache.set(gid, data);
     }
   }
 
@@ -111,30 +128,16 @@ export const handler = schedule('0 * * * *', async () => {
 
     let winningOutcome: string | null = null;
 
-    // Find the matching Gamma market for this specific bet.
-    // Multi-bracket events return multiple sub-markets per condition_id.
-    // We must match by question text to avoid cross-contamination.
-    const gammaResults = gammaCache.get(market.condition_id) || [];
-    let gamma: GammaMarket | null = null;
-
-    if (gammaResults.length === 1) {
-      gamma = gammaResults[0];
-    } else if (gammaResults.length > 1) {
-      // Multiple results — match by question/description to our market
-      const marketQ = (market.question || '').toLowerCase().trim();
-      gamma = gammaResults.find((g) => {
-        const gq = (g.question || g.description || '').toLowerCase().trim();
-        return gq === marketQ || gq.includes(marketQ) || marketQ.includes(gq);
-      }) || null;
-
-      if (!gamma) {
-        console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — ${gammaResults.length} Gamma results, none match question "${marketQ.substring(0, 50)}"`);
-        continue;
-      }
+    // Look up Gamma data by gamma_market_id (direct, reliable endpoint)
+    const gammaId = market.gamma_market_id;
+    if (!gammaId) {
+      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — no gamma_market_id (needs refresh-markets run)`);
+      continue;
     }
 
+    const gamma = gammaCache.get(gammaId) || null;
     if (!gamma) {
-      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — no Gamma data for condition_id ${market.condition_id?.substring(0, 12)}`);
+      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — no Gamma data for gamma_market_id ${gammaId}`);
       continue;
     }
 
@@ -171,8 +174,14 @@ export const handler = schedule('0 * * * *', async () => {
 
     if (!winningOutcome) continue;
 
+    // Validate entry_price — skip corrupt bets instead of silently defaulting
+    const entryPrice = bet.entry_price;
+    if (!entryPrice || entryPrice <= 0 || entryPrice > 1) {
+      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — invalid entry_price ${entryPrice} (expected 0-1)`);
+      continue;
+    }
+
     // Safety check: if PnL would be > 50x bet amount, flag for manual review
-    const entryPrice = bet.entry_price > 0 && bet.entry_price <= 1 ? bet.entry_price : 0.5;
     const projectedPnl = bet.amount_usd * ((1.0 / entryPrice) - 1);
     if (projectedPnl > bet.amount_usd * 50) {
       console.log(`[resolve-bets] SUSPICIOUSLY HIGH PnL: $${projectedPnl.toFixed(2)} on $${bet.amount_usd} bet (${(projectedPnl / bet.amount_usd).toFixed(0)}x) for ${bet.id.substring(0, 8)} — skipping for manual review`);

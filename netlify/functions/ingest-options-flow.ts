@@ -1,3 +1,4 @@
+// V3 DISABLED: Weather-only rebuild. This function is not part of the active pipeline.
 // ============================================================
 // Netlify Scheduled Function: Options Flow Anomaly Detector
 // Runs every 5 minutes
@@ -10,7 +11,7 @@
 // DATA: CBOE delayed quotes (free, no auth) → Yahoo Finance fallback
 // ============================================================
 
-import { schedule } from '@netlify/functions';
+// import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
@@ -177,7 +178,8 @@ async function fetchOptionsSnapshot(ticker: string): Promise<OptionsSnapshot | n
   return fetchYahooOptions(ticker);
 }
 
-export const handler = schedule('*/5 * * * *', async () => {
+export const handler = async () => {
+  console.log('[ingest-options-flow] V3 DISABLED — weather-only mode'); return { statusCode: 200 };
   console.log('[options-flow] Scanning options for anomalies');
   const startTime = Date.now();
 

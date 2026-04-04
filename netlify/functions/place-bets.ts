@@ -223,20 +223,25 @@ export const handler = schedule('*/15 * * * *', async () => {
     // ── Timing Validation (Whale Insight) ─────────────────────
     // Optimal entry is 24-48h before resolution. Too early = uncertainty.
     // Too late = market has converged on the right answer.
-    if (currentMarket.resolution_date) {
-      const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
+    // Weather bets MUST have a resolution_date — without it we can't
+    // validate timing or know when the market settles.
+    if (!currentMarket.resolution_date) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — no resolution_date`);
+      continue;
+    }
 
-      if (hoursLeft < MIN_HOURS_BEFORE_RESOLUTION) {
-        console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${MIN_HOURS_BEFORE_RESOLUTION}h)`);
-        continue;
-      }
+    const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
 
-      // Log timing quality for analytics
-      const timingQuality = (hoursLeft >= OPTIMAL_HOURS_MIN && hoursLeft <= OPTIMAL_HOURS_MAX)
-        ? 'OPTIMAL' : hoursLeft < OPTIMAL_HOURS_MIN ? 'LATE' : 'EARLY';
-      if (timingQuality !== 'OPTIMAL') {
-        console.log(`[place-bets] Timing ${timingQuality} for ${analysis.market_id.substring(0, 8)}: ${hoursLeft.toFixed(1)}h left (sweet spot: ${OPTIMAL_HOURS_MIN}-${OPTIMAL_HOURS_MAX}h)`);
-      }
+    if (hoursLeft < MIN_HOURS_BEFORE_RESOLUTION) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${MIN_HOURS_BEFORE_RESOLUTION}h)`);
+      continue;
+    }
+
+    // Log timing quality for analytics
+    const timingQuality = (hoursLeft >= OPTIMAL_HOURS_MIN && hoursLeft <= OPTIMAL_HOURS_MAX)
+      ? 'OPTIMAL' : hoursLeft < OPTIMAL_HOURS_MIN ? 'LATE' : 'EARLY';
+    if (timingQuality !== 'OPTIMAL') {
+      console.log(`[place-bets] Timing ${timingQuality} for ${analysis.market_id.substring(0, 8)}: ${hoursLeft.toFixed(1)}h left (sweet spot: ${OPTIMAL_HOURS_MIN}-${OPTIMAL_HOURS_MAX}h)`);
     }
 
     // ── Tail Bet Detection (Whale Strategy) ───────────────────
@@ -345,23 +350,30 @@ export const handler = schedule('*/15 * * * *', async () => {
       }
     }
 
-    // Execute the bet
-    const execResult = await executeBet(
-      supabase,
-      {
-        market_id: analysis.market_id,
-        analysis_id: analysis.id,
-        category: 'weather',
-        direction: analysis.direction,
-        outcome_label: outcomeLabel,
-        entry_price: entryPrice,
-        amount_usd: betAmount,
-        edge: analysis.edge || null,
-        confidence: analysis.confidence || null,
-      },
-      config,
-      0
-    );
+    // Execute the bet — wrapped in try-catch so a single failure
+    // doesn't crash the function and orphan remaining analyses.
+    let execResult;
+    try {
+      execResult = await executeBet(
+        supabase,
+        {
+          market_id: analysis.market_id,
+          analysis_id: analysis.id,
+          category: 'weather',
+          direction: analysis.direction,
+          outcome_label: outcomeLabel,
+          entry_price: entryPrice,
+          amount_usd: betAmount,
+          edge: analysis.edge || null,
+          confidence: analysis.confidence || null,
+        },
+        config,
+        0
+      );
+    } catch (err) {
+      console.error(`[place-bets] Exception during executeBet for ${String(analysis.id).substring(0, 8)}:`, err);
+      continue;
+    }
 
     if (!execResult.success && !execResult.bet_id) {
       console.error(`[place-bets] Execution error for ${String(analysis.id).substring(0, 8)}:`, execResult.error);
