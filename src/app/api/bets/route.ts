@@ -7,14 +7,14 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   const supabase = getSupabaseAdmin();
 
-  // Fetch v2_start_date to filter out legacy bets
-  const { data: v2Config } = await supabase
+  // Fetch v3_start_date to filter out legacy bets (pre-weather-only rebuild)
+  const { data: v3Config } = await supabase
     .from('system_config')
     .select('value')
-    .eq('key', 'v2_start_date')
+    .eq('key', 'v3_start_date')
     .single();
 
-  const v2StartDate = v2Config?.value || null;
+  const v3StartDate = v3Config?.value || null;
 
   // Fetch bets joined with markets for the question text
   let betsQuery = supabase
@@ -23,9 +23,9 @@ export async function GET() {
     .order('placed_at', { ascending: false })
     .limit(100);
 
-  // Only show bets placed after v2 start date (filters out legacy pre-rule-change bets)
-  if (v2StartDate) {
-    betsQuery = betsQuery.gte('placed_at', v2StartDate);
+  // Only show bets placed after v3 start date (filters out legacy pre-rebuild bets)
+  if (v3StartDate) {
+    betsQuery = betsQuery.gte('placed_at', v3StartDate);
   }
 
   const { data: bets, error } = await betsQuery;
@@ -113,8 +113,8 @@ export async function GET() {
       'paper_win_rate',
       'paper_trade_start_date',
       'paper_days_required',
-      'v2_start_date',
-      'v2_bankroll',
+      'v3_start_date',
+      'v3_bankroll',
     ]);
 
   const configMap: Record<string, string> = {};
@@ -122,15 +122,15 @@ export async function GET() {
     configMap[r.key] = r.value;
   });
 
-  // Get snapshots for chart (only v2 period)
+  // Get snapshots for chart (only v3 period)
   let snapshotsQuery = supabase
     .from('performance_snapshots')
     .select('*')
     .order('snapshot_date', { ascending: true })
     .limit(90);
 
-  if (v2StartDate) {
-    snapshotsQuery = snapshotsQuery.gte('snapshot_date', v2StartDate.split('T')[0]);
+  if (v3StartDate) {
+    snapshotsQuery = snapshotsQuery.gte('snapshot_date', v3StartDate.split('T')[0]);
   }
 
   const { data: snapshots } = await snapshotsQuery;

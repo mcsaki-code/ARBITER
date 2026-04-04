@@ -1,6 +1,17 @@
 // ============================================================
-// Netlify Scheduled Function: Resolve Bets
-// Runs every hour — checks OPEN bets against resolved markets
+// Netlify Scheduled Function: Resolve Bets (V3 — Weather Only)
+// Runs every hour — checks OPEN bets against OFFICIALLY resolved
+// Polymarket markets using the UMA Optimistic Oracle resolvedBy field.
+//
+// CRITICAL FIX: Previous versions used `gamma.closed` to detect
+// resolution, but closed != resolved on Polymarket. A market can
+// stop trading (closed=true) while the UMA oracle challenge window
+// is still open. The definitive signal is `resolvedBy` — an Ethereum
+// address that appears only after the oracle proposal passes the
+// 2-hour challenge period and the market is officially settled.
+//
+// Weather-only: all bets are weather bracket markets where exactly
+// ONE bracket per city/date resolves Yes (the actual temperature).
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -18,6 +29,7 @@ interface GammaMarket {
   outcomes: string;
   active: boolean;
   closed: boolean;
+  resolvedBy: string | null;  // Ethereum address of oracle proposer — null until officially settled
   question?: string;
   description?: string;
 }
@@ -39,7 +51,7 @@ function parseOutcomes(raw: string): string[] {
 }
 
 export const handler = schedule('0 * * * *', async () => {
-  console.log('[resolve-bets] Starting bet resolution check');
+  console.log('[resolve-bets] Starting bet resolution check (V3 — weather only, resolvedBy)');
 
   // Get all OPEN bets with their market data
   const { data: openBets, error } = await supabase
@@ -79,46 +91,33 @@ export const handler = schedule('0 * * * *', async () => {
     }
   }
 
-  // Fetch v2_start_date — only v2 bets should affect the bankroll.
-  // Pre-v2 bets still resolve normally but their P&L is excluded from
-  // bankroll updates to prevent inflating the v2 fresh-start balance.
-  const { data: v2Row } = await supabase
+  // Fetch v3_start_date — only v3 bets affect the bankroll.
+  // Pre-v3 bets still resolve but their P&L is excluded from
+  // bankroll updates to prevent contaminating the v3 fresh start.
+  const { data: v3Row } = await supabase
     .from('system_config')
     .select('value')
-    .eq('key', 'v2_start_date')
+    .eq('key', 'v3_start_date')
     .single();
-  const v2StartDate = v2Row?.value ? new Date(v2Row.value) : null;
+  const v3StartDate = v3Row?.value ? new Date(v3Row.value) : null;
 
   let resolved = 0;
   let totalPnl = 0;       // ALL resolved P&L (for logging)
-  let v2Pnl = 0;          // Only v2 bets P&L (for bankroll updates)
-
-  // Minimum hours after resolution_date before we auto-resolve
-  // This gives Polymarket time to officially settle the market
-  const MIN_HOURS_PAST_RESOLUTION = 4;
+  let v3Pnl = 0;          // Only v3 bets P&L (for bankroll updates)
 
   for (const bet of openBets) {
     const market = bet.markets;
     if (!market) continue;
 
-    const resolutionDate = market.resolution_date
-      ? new Date(market.resolution_date)
-      : null;
-    const hoursPast = resolutionDate
-      ? (Date.now() - resolutionDate.getTime()) / 3600000
-      : 0;
-    const isPast = resolutionDate && hoursPast > MIN_HOURS_PAST_RESOLUTION;
-
     let winningOutcome: string | null = null;
 
-    // Find the matching Gamma market for this specific bet
-    // Multi-bracket events return multiple sub-markets per condition_id
-    // We must match by question text to avoid cross-contamination
+    // Find the matching Gamma market for this specific bet.
+    // Multi-bracket events return multiple sub-markets per condition_id.
+    // We must match by question text to avoid cross-contamination.
     const gammaResults = gammaCache.get(market.condition_id) || [];
     let gamma: GammaMarket | null = null;
 
     if (gammaResults.length === 1) {
-      // Single result — safe to use directly
       gamma = gammaResults[0];
     } else if (gammaResults.length > 1) {
       // Multiple results — match by question/description to our market
@@ -134,46 +133,41 @@ export const handler = schedule('0 * * * *', async () => {
       }
     }
 
-    if (gamma) {
-      const prices = parseOutcomePrices(gamma.outcomePrices);
-      const outcomes = parseOutcomes(gamma.outcomes);
-      const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
-
-      // Require closed + very high confidence price (0.99+) for definitive resolution
-      if (gamma.closed && prices.length > 0 && maxPrice >= 0.99) {
-        const winIdx = prices.indexOf(maxPrice);
-        winningOutcome = outcomes[winIdx] || null;
-      } else if (gamma.closed && isPast && maxPrice >= 0.95) {
-        // Lower threshold OK only if well past resolution date
-        const winIdx = prices.indexOf(maxPrice);
-        winningOutcome = outcomes[winIdx] || null;
-      }
-
-      // Cross-validate: Gamma winner should agree with DB price direction
-      if (winningOutcome) {
-        const dbPrices = market.outcome_prices || [];
-        const dbOutcomes = market.outcomes || [];
-        const dbWinIdx = dbOutcomes.indexOf(winningOutcome);
-        if (dbWinIdx >= 0 && dbPrices[dbWinIdx] !== undefined) {
-          const dbPrice = dbPrices[dbWinIdx];
-          // If DB price contradicts Gamma (DB shows <10% but Gamma says winner), flag it
-          if (dbPrice < 0.10 && maxPrice > 0.90) {
-            console.log(`[resolve-bets] CONFLICT: Gamma says "${winningOutcome}" won (${maxPrice.toFixed(3)}) but DB price is ${dbPrice.toFixed(3)} for bet ${bet.id.substring(0, 8)} — skipping`);
-            winningOutcome = null;
-          }
-        }
-      }
-    } else if (isPast) {
-      // Fallback to DB prices — require very high confidence
-      const dbPrices = market.outcome_prices || [];
-      if (dbPrices.length > 0) {
-        const maxP = Math.max(...dbPrices);
-        if (maxP >= 0.95) {
-          const winIdx = dbPrices.indexOf(maxP);
-          winningOutcome = market.outcomes?.[winIdx] || null;
-        }
-      }
+    if (!gamma) {
+      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — no Gamma data for condition_id ${market.condition_id?.substring(0, 12)}`);
+      continue;
     }
+
+    // ── THE CRITICAL CHECK: resolvedBy !== null ──────────────────
+    // This is the ONLY reliable way to know a Polymarket market has
+    // officially settled. The UMA Optimistic Oracle flow is:
+    //   1. Market closes (trading stops) → closed=true
+    //   2. Anyone can propose an outcome → proposal pending
+    //   3. 2-hour challenge window → anyone can dispute
+    //   4. If unchallenged, oracle settles → resolvedBy = proposer address
+    //
+    // Previously we checked `gamma.closed` which fires at step 1,
+    // but the actual outcome isn't known until step 4. This caused
+    // 18/20 phantom wins where we locked in premature trading prices.
+    if (!gamma.resolvedBy) {
+      // Market not yet officially resolved by the oracle
+      continue;
+    }
+
+    // Market is officially resolved — determine winner from final prices
+    const prices = parseOutcomePrices(gamma.outcomePrices);
+    const outcomes = parseOutcomes(gamma.outcomes);
+    const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+
+    // After official resolution, prices should be 0/1 (or very close)
+    // Require 0.95+ to handle any floating point edge cases
+    if (prices.length === 0 || maxPrice < 0.95) {
+      console.log(`[resolve-bets] Skip ${bet.id.substring(0, 8)} — resolvedBy set but maxPrice only ${maxPrice.toFixed(3)} (expected ~1.0)`);
+      continue;
+    }
+
+    const winIdx = prices.indexOf(maxPrice);
+    winningOutcome = outcomes[winIdx] || null;
 
     if (!winningOutcome) continue;
 
@@ -196,26 +190,12 @@ export const handler = schedule('0 * * * *', async () => {
       })
       .eq('id', market.id);
 
-    // Resolve the bet — handle BUY_NO logic correctly
+    // Resolve the bet — weather bets use outcome_label matching
     const betLabel = (bet.outcome_label || '').toLowerCase().trim();
     const winner = (winningOutcome || '').toLowerCase().trim();
 
-    // Categories where outcome_label is descriptive text (not an outcome name).
-    // For these, rely purely on direction: BUY_YES wins when "Yes" wins, BUY_NO when "No" wins.
-    const DIRECTION_BASED_CATEGORIES = ['crypto_momentum', 'whale_copy', 'politics', 'arb'];
-    const isDirectionBased = DIRECTION_BASED_CATEGORIES.includes(bet.category ?? '');
-
-    // Guard: if outcome_label is null/undefined AND direction is not simple, skip with warning
-    if (!bet.outcome_label && !isDirectionBased && bet.direction !== 'BUY_YES') {
-      console.log(`[resolve-bets] SKIP ${bet.id.substring(0, 8)}: outcome_label null/undefined but category requires it (direction=${bet.direction})`);
-      continue;
-    }
-
     let betWon: boolean;
-    if (isDirectionBased) {
-      // Use direction as ground truth — case-insensitive comparison
-      betWon = bet.direction === 'BUY_YES' ? (winner === 'yes') : (winner === 'no');
-    } else if (bet.direction === 'BUY_NO') {
+    if (bet.direction === 'BUY_NO') {
       // For BUY_NO: we win when our named outcome does NOT win
       // Exception: if outcome_label is literally "No", we win when "No" wins
       const isLiteralNo = betLabel === 'no';
@@ -224,37 +204,32 @@ export const handler = schedule('0 * * * *', async () => {
       // For BUY_YES: we win if our outcome matches the winner (case-insensitive)
       betWon = betLabel === winner;
     }
-    // entryPrice already computed above for safety check
+
     const pnl = betWon
       ? Math.round(bet.amount_usd * ((1.0 / entryPrice) - 1) * 100) / 100
       : -bet.amount_usd;
 
     // Brier score = (predicted_prob - actual_outcome)^2
-    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality over time.
+    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality.
     const predictedProb = bet.direction === 'BUY_YES'
       ? (bet.entry_price ?? 0.5)
       : 1 - (bet.entry_price ?? 0.5);
     const actualOutcome = betWon ? 1.0 : 0.0;
     const brierScore = Math.pow(predictedProb - actualOutcome, 2);
 
-    // Pull edge and confidence from the associated analysis if available
+    // Pull edge and confidence from the weather analysis
     let analysisEdge: number | null = null;
     let analysisConfidence: string | null = null;
 
     if (bet.analysis_id) {
-      // Cascade through all analysis tables to find edge/confidence metadata.
-      // The analysis_id could point to weather_analyses, sports_analyses, or crypto_analyses.
-      for (const table of ['weather_analyses', 'sports_analyses', 'crypto_analyses']) {
-        const { data: analysis } = await supabase
-          .from(table)
-          .select('edge, confidence')
-          .eq('id', bet.analysis_id)
-          .single();
-        if (analysis) {
-          analysisEdge = analysis.edge;
-          analysisConfidence = analysis.confidence;
-          break;
-        }
+      const { data: analysis } = await supabase
+        .from('weather_analyses')
+        .select('edge, confidence')
+        .eq('id', bet.analysis_id)
+        .single();
+      if (analysis) {
+        analysisEdge = analysis.edge;
+        analysisConfidence = analysis.confidence;
       }
     }
 
@@ -265,7 +240,7 @@ export const handler = schedule('0 * * * *', async () => {
         exit_price: betWon ? 1.0 : 0.0,
         pnl,
         resolved_at: new Date().toISOString(),
-        notes: `Auto-resolved: winner "${winningOutcome}" | ${betWon ? 'WIN' : 'LOSS'}`,
+        notes: `V3 auto-resolved: resolvedBy=${gamma.resolvedBy.substring(0, 10)}... | winner="${winningOutcome}" | ${betWon ? 'WIN' : 'LOSS'}`,
         predicted_prob: predictedProb,
         brier_score: Math.round(brierScore * 10000) / 10000,
         edge: analysisEdge,
@@ -276,23 +251,23 @@ export const handler = schedule('0 * * * *', async () => {
     resolved++;
     totalPnl += pnl;
 
-    // Only count v2 bets toward bankroll updates
+    // Only count v3 bets toward bankroll updates
     const betPlacedAt = bet.placed_at ? new Date(bet.placed_at) : null;
-    const isV2Bet = !v2StartDate || (betPlacedAt && betPlacedAt >= v2StartDate);
-    if (isV2Bet) {
-      v2Pnl += pnl;
+    const isV3Bet = !v3StartDate || (betPlacedAt && betPlacedAt >= v3StartDate);
+    if (isV3Bet) {
+      v3Pnl += pnl;
     } else {
-      console.log(`[resolve-bets] Pre-v2 bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — excluded from bankroll`);
+      console.log(`[resolve-bets] Pre-v3 bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — excluded from bankroll`);
     }
 
     // Record outcome for circuit breaker (tracks consecutive losses)
     const cbResult = await recordOutcome(supabase, betWon);
     const cbNote = cbResult.paused
-      ? ` | CIRCUIT BREAKER: ${cbResult.consecutiveLosses} consecutive losses → paused ${cbResult.pauseDuration}`
+      ? ` | CIRCUIT BREAKER: ${cbResult.consecutiveLosses} consecutive losses -> paused ${cbResult.pauseDuration}`
       : '';
 
     console.log(
-      `[resolve-bets] ${betWon ? 'WON' : 'LOST'} bet ${bet.id.substring(0, 8)}: $${pnl.toFixed(2)}${cbNote}`
+      `[resolve-bets] ${betWon ? 'WON' : 'LOST'} bet ${bet.id.substring(0, 8)}: $${pnl.toFixed(2)} (entry=${entryPrice.toFixed(3)})${cbNote}`
     );
   }
 
@@ -304,11 +279,11 @@ export const handler = schedule('0 * * * *', async () => {
       .eq('key', 'paper_bankroll')
       .single();
 
-    const bankroll = parseFloat(bankrollRow?.value || '5000');
-    // Only apply v2 P&L to bankroll — pre-v2 bets resolve but don't affect v2 balance
-    const newBankroll = Math.round((bankroll + v2Pnl) * 100) / 100;
-    if (v2Pnl !== totalPnl) {
-      console.log(`[resolve-bets] Bankroll update: $${v2Pnl.toFixed(2)} v2 P&L applied (${totalPnl.toFixed(2)} total, ${(totalPnl - v2Pnl).toFixed(2)} pre-v2 excluded)`);
+    const bankroll = parseFloat(bankrollRow?.value || '1000');
+    // Only apply v3 P&L to bankroll
+    const newBankroll = Math.round((bankroll + v3Pnl) * 100) / 100;
+    if (v3Pnl !== totalPnl) {
+      console.log(`[resolve-bets] Bankroll update: $${v3Pnl.toFixed(2)} v3 P&L applied (${totalPnl.toFixed(2)} total, ${(totalPnl - v3Pnl).toFixed(2)} pre-v3 excluded)`);
     }
 
     await supabase
@@ -316,12 +291,12 @@ export const handler = schedule('0 * * * *', async () => {
       .update({ value: newBankroll.toString(), updated_at: new Date().toISOString() })
       .eq('key', 'paper_bankroll');
 
-    // Win rate — v2 bets only
+    // Win rate — v3 bets only
     let winsQuery = supabase.from('bets').select('*', { count: 'exact', head: true }).eq('status', 'WON');
     let totalQuery = supabase.from('bets').select('*', { count: 'exact', head: true }).in('status', ['WON', 'LOST']);
-    if (v2StartDate) {
-      winsQuery = winsQuery.gte('placed_at', v2StartDate.toISOString());
-      totalQuery = totalQuery.gte('placed_at', v2StartDate.toISOString());
+    if (v3StartDate) {
+      winsQuery = winsQuery.gte('placed_at', v3StartDate.toISOString());
+      totalQuery = totalQuery.gte('placed_at', v3StartDate.toISOString());
     }
     const { count: wins } = await winsQuery;
     const { count: total } = await totalQuery;
@@ -333,10 +308,10 @@ export const handler = schedule('0 * * * *', async () => {
       .update({ value: winRate.toString(), updated_at: new Date().toISOString() })
       .eq('key', 'paper_win_rate');
 
-    // Snapshot — v2 bets only
+    // Performance snapshot — v3 bets only
     let pnlQuery = supabase.from('bets').select('pnl').in('status', ['WON', 'LOST']);
-    if (v2StartDate) {
-      pnlQuery = pnlQuery.gte('placed_at', v2StartDate.toISOString());
+    if (v3StartDate) {
+      pnlQuery = pnlQuery.gte('placed_at', v3StartDate.toISOString());
     }
     const { data: pnlRows } = await pnlQuery;
 
@@ -352,7 +327,7 @@ export const handler = schedule('0 * * * *', async () => {
     });
 
     console.log(
-      `[resolve-bets] Updated bankroll $${bankroll} → $${newBankroll}, win rate ${winRate}%`
+      `[resolve-bets] Updated bankroll $${bankroll} -> $${newBankroll}, win rate ${winRate}%`
     );
   }
 

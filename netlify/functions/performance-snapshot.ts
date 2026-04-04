@@ -14,22 +14,22 @@ const supabase = createClient(
 export const handler = schedule('0 0 * * *', async () => {
   console.log('[performance-snapshot] Running nightly snapshot');
 
-  // Fetch v2_start_date to only count bets under current risk rules
-  const { data: v2Row } = await supabase
+  // Fetch v3_start_date to only count bets under current weather-only system
+  const { data: v3Row } = await supabase
     .from('system_config')
     .select('value')
-    .eq('key', 'v2_start_date')
+    .eq('key', 'v3_start_date')
     .single();
 
-  const v2StartDate = v2Row?.value || null;
+  const v3StartDate = v3Row?.value || null;
 
-  // Get bets — filtered to v2 period if set
+  // Get bets — filtered to v3 period if set
   let betsQuery = supabase
     .from('bets')
     .select('status, pnl, amount_usd, category, confidence, predicted_prob, brier_score, entry_price, direction, edge');
 
-  if (v2StartDate) {
-    betsQuery = betsQuery.gte('placed_at', v2StartDate);
+  if (v3StartDate) {
+    betsQuery = betsQuery.gte('placed_at', v3StartDate);
   }
 
   const { data: bets } = await betsQuery;
@@ -49,7 +49,7 @@ export const handler = schedule('0 0 * * *', async () => {
   const { data: configRows } = await supabase
     .from('system_config')
     .select('key, value')
-    .in('key', ['paper_bankroll', 'real_bankroll', 'v2_bankroll']);
+    .in('key', ['paper_bankroll', 'real_bankroll', 'v3_bankroll']);
 
   const config: Record<string, string> = {};
   configRows?.forEach((r: { key: string; value: string }) => {

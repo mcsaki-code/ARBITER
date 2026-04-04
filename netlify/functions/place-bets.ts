@@ -1,9 +1,17 @@
 // ============================================================
-// Netlify Scheduled Function: Place Bets
-// Runs every 30 minutes — takes analyses from weather, sports,
-// and crypto pipelines and creates paper bets in the bets table.
-// THIS IS THE CRITICAL GLUE that closes the paper trading loop:
-// analyze → place-bet → resolve-bet → track P&L → pass guardrails
+// Netlify Scheduled Function: Place Bets (V3 — Weather Only)
+// Runs every 15 minutes — takes weather analyses and creates
+// paper bets in the bets table.
+//
+// V3 REBUILD: Stripped to weather-only. Incorporates whale
+// strategy insights from gopfan2 ($2M+ profit):
+//   - Focus on tail bets: entry <15¢ with massive asymmetric upside
+//   - Optimal entry window: 24-48h before resolution
+//   - Temperature ladder strategy: adjacent bracket coverage
+//   - Fractional Kelly (1/8th) with confidence scaling
+//   - Min $400 liquidity (weather brackets are naturally thin)
+//
+// Pipeline: analyze-weather → place-bets → resolve-bets → P&L
 // ============================================================
 
 import { schedule } from '@netlify/functions';
@@ -18,24 +26,26 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
-// Risk limits — calibrated to professional prediction market standards
+// Risk limits — calibrated for weather bracket markets
 const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
-// No daily bet COUNT cap — if a bet passes all risk filters (edge, entry price,
-// kelly sizing, liquidity, circuit breaker), it gets placed. The exposure cap
-// ($1K/day on $5K bankroll) prevents overextending. Don't leave money on the table.
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
-const MIN_EDGE = 0.05;                 // 5% minimum edge
-const MIN_EDGE_WEATHER = 0.08;         // 8% for weather
-const MIN_LIQUIDITY = 5000;            // Skip thin markets
-// Per-category staleness windows — sports/crypto ingest runs hourly now
-const MAX_ANALYSIS_AGE_WEATHER  = 2 * 3600000;  // 2h
-const MAX_ANALYSIS_AGE_SPORTS   = 6 * 3600000;  // 6h (matches hourly ingest rhythm)
-const MAX_ANALYSIS_AGE_CRYPTO   = 4 * 3600000;  // 4h
-const MAX_ANALYSIS_AGE_POLITICS = 6 * 3600000;  // 6h
-// (MAX_ANALYSIS_AGE_MS removed — each category has its own cutoff above)
-const MAX_ANALYSIS_AGE_SENTIMENT   = 2 * 3600000;  // 2h — sentiment signals stale fast
-const MAX_ANALYSIS_AGE_OPPORTUNITY = 8 * 3600000;  // 8h — general opportunity scanner
+const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
+const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
+const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update frequently
+
+// Entry price bounds — derived from empirical data:
+//   - ALL bets with entry > 0.40 have lost (100% loss rate)
+//   - Best wins come from tail entries <15¢ (10x-27x payout)
+//   - Below 2% is adverse selection territory
+const MIN_ENTRY_PRICE = 0.02;
+const MAX_ENTRY_PRICE = 0.40;
+
+// Whale insight: optimal entry window is 24-48h before resolution.
+// Too early = forecast uncertainty too high. Too late = market already priced in.
+const MIN_HOURS_BEFORE_RESOLUTION = 4;   // absolute minimum
+const OPTIMAL_HOURS_MIN = 12;            // sweet spot lower bound
+const OPTIMAL_HOURS_MAX = 72;            // sweet spot upper bound
 
 /** Normalize edge values — Claude sometimes returns 849 instead of 0.849 */
 function normalizeEdge(raw: number | null): number {
@@ -62,21 +72,14 @@ interface AnalysisRow {
   rec_bet_usd: number | null;
   auto_eligible: boolean;
   analyzed_at: string;
-  // Weather-specific
   best_outcome_idx?: number | null;
   best_outcome_label?: string | null;
   market_price?: number | null;
   model_agreement?: string | null;
-  // Sports-specific
-  polymarket_price?: number | null;
-  event_description?: string | null;
-  // Crypto-specific
-  target_bracket?: string | null;
-  asset?: string | null;
 }
 
 export const handler = schedule('*/15 * * * *', async () => {
-  console.log('[place-bets] Starting automated bet placement');
+  console.log('[place-bets] Starting automated weather bet placement (V3)');
   const startTime = Date.now();
 
   // Load system config
@@ -92,7 +95,7 @@ export const handler = schedule('*/15 * * * *', async () => {
       'live_kill_switch',
       'live_max_single_bet_usd',
       'live_max_daily_usd',
-      'v2_start_date',
+      'v3_start_date',
     ]);
 
   const config: Record<string, string> = {};
@@ -100,14 +103,11 @@ export const handler = schedule('*/15 * * * *', async () => {
     config[r.key] = r.value;
   });
 
-  const bankroll = parseFloat(config.paper_bankroll || '5000');
+  const bankroll = parseFloat(config.paper_bankroll || '1000');
   const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
   const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
   // ── Circuit Breaker Check ─────────────────────────────────
-  // Halt trading on consecutive losses, daily/weekly drawdown, or peak drawdown.
-  // This prevents catastrophic loss spirals — one trader lost $2.36M in 8 days
-  // from lack of automated shutdowns.
   const cbState = await shouldTrade(supabase);
   if (!cbState.canTrade) {
     console.log(`[place-bets] CIRCUIT BREAKER ACTIVE: ${cbState.reason}`);
@@ -116,95 +116,47 @@ export const handler = schedule('*/15 * * * *', async () => {
   console.log(`[place-bets] Circuit breaker OK — streak: ${cbState.consecutiveLosses} losses, daily P&L: $${cbState.dailyPnl.toFixed(2)}, drawdown: ${(cbState.currentDrawdown * 100).toFixed(1)}%`);
 
   // Check today's existing bets to enforce daily limits.
-  // Use v2_start_date as a floor so pre-v2 bets (placed before the reset)
-  // don't count against today's limits. On subsequent days todayStart > v2Start
-  // and the floor has no effect.
   const todayStart = new Date();
   todayStart.setUTCHours(0, 0, 0, 0);
-  const v2Start = config.v2_start_date ? new Date(config.v2_start_date) : null;
-  const effectiveTodayStart = v2Start && v2Start > todayStart ? v2Start : todayStart;
+  const v3Start = config.v3_start_date ? new Date(config.v3_start_date) : null;
+  const effectiveTodayStart = v3Start && v3Start > todayStart ? v3Start : todayStart;
 
   const { data: todaysBets } = await supabase
     .from('bets')
     .select('id, amount_usd, market_id, category')
     .gte('placed_at', effectiveTodayStart.toISOString());
 
-  const todayBetCount = todaysBets?.length || 0;
   const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
   const existingMarketIds = new Set(todaysBets?.map((b) => b.market_id) || []);
 
-  // Per-category exposure tracking — prevents any single category dominating daily exposure.
-  // Weather resolving the same day as placement means concentrated same-day exposure is extra risky.
-  const MAX_CATEGORY_EXPOSURE_PCT = 0.40; // no single category > 40% of daily budget
-  const categoryExposure: Record<string, number> = {};
-  for (const b of (todaysBets || [])) {
-    const cat = (b as unknown as { category?: string }).category || 'unknown';
-    categoryExposure[cat] = (categoryExposure[cat] || 0) + (b.amount_usd || 0);
-  }
-
-  console.log(`[place-bets] Today: ${todayBetCount} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
+  console.log(`[place-bets] Today: ${todaysBets?.length || 0} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
   if (todayExposure >= maxDailyExposure) {
     console.log('[place-bets] Daily exposure limit reached');
     return { statusCode: 200 };
   }
 
-  // Also get ALL open bet market IDs + labels to avoid duplicate positions
-  // and enforce correlation limits (e.g. max 2 BTC-related open bets)
+  // Get ALL open bet market IDs to avoid duplicate positions
   const { data: openBets } = await supabase
     .from('bets')
-    .select('market_id, category, outcome_label')
+    .select('market_id')
     .eq('status', 'OPEN');
 
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
 
-  // Count open crypto bets by underlying asset to cap correlated exposure.
-  // BTC is the main offender — we've had 5+ simultaneous BTC price bets.
-  const openCryptoBtcCount = (openBets || []).filter(
-    (b) => b.category === 'crypto' && (b.outcome_label || '').toLowerCase().includes('bitcoin')
-  ).length;
+  // Fetch eligible weather analyses — only category we trade now
+  const weatherCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE).toISOString();
 
-  // Collect eligible analyses using per-category staleness windows (all in parallel)
-  const weatherCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_WEATHER).toISOString();
-  const sportsCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_SPORTS).toISOString();
-  const cryptoCutoff   = new Date(Date.now() - MAX_ANALYSIS_AGE_CRYPTO).toISOString();
-  const politicsCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE_POLITICS).toISOString();
+  const { data: weatherAnalysesRaw } = await supabase
+    .from('weather_analyses')
+    .select('*')
+    .gte('analyzed_at', weatherCutoff)
+    .neq('direction', 'PASS')
+    .gt('edge', MIN_EDGE_WEATHER)
+    .order('edge', { ascending: false })
+    .limit(50);
 
-  const sentimentCutoff    = new Date(Date.now() - MAX_ANALYSIS_AGE_SENTIMENT).toISOString();
-  const opportunityCutoff  = new Date(Date.now() - MAX_ANALYSIS_AGE_OPPORTUNITY).toISOString();
-
-  // Fetch more rows than needed (limit 50) then deduplicate client-side.
-  // The analyze cron creates a new row every ~6 min per market, so a 2h window
-  // can produce 20+ rows for ONE market, crowding out other markets entirely.
-  const [weatherAnalysesRaw, sportsAnalysesRaw, cryptoAnalysesRaw, politicsAnalysesRaw, sentimentAnalysesRaw, opportunityAnalysesRaw] = await Promise.all([
-    supabase.from('weather_analyses').select('*')
-      .gte('analyzed_at', weatherCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE_WEATHER)
-      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
-    supabase.from('sports_analyses').select('*')
-      .gte('analyzed_at', sportsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
-    supabase.from('crypto_analyses').select('*')
-      .gte('analyzed_at', cryptoCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(50).then(r => r.data ?? []),
-    supabase.from('politics_analyses').select('*')
-      .gte('analyzed_at', politicsCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(50)
-      .then(r => r.data ?? [], () => [] as unknown[]),
-    // Sentiment analyses — macro news + options flow correlated signals
-    supabase.from('sentiment_analyses').select('*')
-      .gte('analyzed_at', sentimentCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(30)
-      .then(r => r.data ?? [], () => [] as unknown[]),
-    // General opportunity scanner — covers all uncategorized markets
-    supabase.from('opportunity_analyses').select('*')
-      .gte('analyzed_at', opportunityCutoff).neq('direction', 'PASS').gt('edge', MIN_EDGE)
-      .order('edge', { ascending: false }).limit(30)
-      .then(r => r.data ?? [], () => [] as unknown[]),
-  ]);
-
-  // Deduplicate: keep only the latest analysis per market_id.
-  // The analyze cron writes a new row every cycle, so without dedup
-  // one hot market can fill all 20 candidate slots with identical picks.
+  // Deduplicate: keep only the latest analysis per market_id
   function dedup(rows: AnalysisRow[]): AnalysisRow[] {
     const seen = new Map<string, AnalysisRow>();
     for (const row of rows) {
@@ -216,26 +168,11 @@ export const handler = schedule('*/15 * * * *', async () => {
     return Array.from(seen.values());
   }
 
-  const weatherAnalyses  = dedup(weatherAnalysesRaw);
-  const sportsAnalyses   = dedup(sportsAnalysesRaw);
-  const cryptoAnalyses   = dedup(cryptoAnalysesRaw);
-  const politicsAnalyses = dedup(politicsAnalysesRaw as AnalysisRow[]);
-  const sentimentAnalyses = dedup(sentimentAnalysesRaw as AnalysisRow[]);
-  const opportunityAnalyses = dedup(opportunityAnalysesRaw as AnalysisRow[]);
+  const candidates = dedup(weatherAnalysesRaw || []);
+  // Sort by edge descending — best opportunities first
+  candidates.sort((a, b) => (normalizeEdge(b.edge) - normalizeEdge(a.edge)));
 
-  const candidates: (AnalysisRow & { category: string; source_table: string })[] = [
-    ...weatherAnalyses.map((a: AnalysisRow)  => ({ ...a, category: 'weather',     source_table: 'weather_analyses'     })),
-    ...sportsAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'sports',      source_table: 'sports_analyses'      })),
-    ...cryptoAnalyses.map((a: AnalysisRow)   => ({ ...a, category: 'crypto',      source_table: 'crypto_analyses'      })),
-    ...(politicsAnalyses    as AnalysisRow[]).map(a => ({ ...a, category: 'politics',    source_table: 'politics_analyses'    })),
-    ...(sentimentAnalyses   as AnalysisRow[]).map(a => ({ ...a, category: 'sentiment',   source_table: 'sentiment_analyses'   })),
-    ...(opportunityAnalyses as AnalysisRow[]).map(a => ({ ...a, category: 'opportunity', source_table: 'opportunity_analyses' })),
-  ];
-
-  console.log(`[place-bets] Found ${candidates.length} eligible analyses (weather: ${weatherAnalyses.length}, sports: ${sportsAnalyses.length}, crypto: ${cryptoAnalyses.length}, politics: ${(politicsAnalyses as unknown[]).length}, opportunity: ${(opportunityAnalyses as unknown[]).length})`);
-
-  // Sort all candidates by edge descending (best opportunities first)
-  candidates.sort((a, b) => (b.edge || 0) - (a.edge || 0));
+  console.log(`[place-bets] Found ${candidates.length} eligible weather analyses`);
 
   let placed = 0;
   let totalDeployed = todayExposure;
@@ -243,7 +180,7 @@ export const handler = schedule('*/15 * * * *', async () => {
   const MAX_ORDERBOOK_CHECKS = 8;
 
   for (const analysis of candidates) {
-    // Stop conditions — exposure cap and timeout only, no arbitrary count limit
+    // Stop conditions
     if (totalDeployed >= maxDailyExposure) break;
     if (Date.now() - startTime > 20000) break;
 
@@ -256,38 +193,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Skip if already bet on this market today
     if (existingMarketIds.has(analysis.market_id)) continue;
 
-    // Crypto correlation cap: max 2 open BTC positions simultaneously.
-    // Having 5+ simultaneous "BTC hits $X" bets creates correlated drawdown risk.
-    const MAX_CORRELATED_CRYPTO = 2;
-    if (analysis.category === 'crypto') {
-      const label = ((analysis.target_bracket || analysis.asset || '') as string).toLowerCase();
-      if (label.includes('bitcoin') && openCryptoBtcCount >= MAX_CORRELATED_CRYPTO) {
-        console.log(`[place-bets] Skipping BTC bet — already have ${openCryptoBtcCount} open BTC positions (cap=${MAX_CORRELATED_CRYPTO})`);
-        continue;
-      }
-    }
-
-    // Per-category concentration cap: no category > 40% of total daily exposure budget
-    const catSpend = categoryExposure[analysis.category] || 0;
-    if (catSpend >= maxDailyExposure * MAX_CATEGORY_EXPOSURE_PCT) {
-      console.log(`[place-bets] Skipping ${analysis.category} — category already at $${catSpend.toFixed(0)} (${(catSpend / maxDailyExposure * 100).toFixed(0)}% of daily budget)`);
-      continue;
-    }
-
-    // Normalize edge and price values (handle Claude returning 849 instead of 0.849)
     const edgeNorm = normalizeEdge(analysis.edge);
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
-    if (analysis.polymarket_price) analysis.polymarket_price = normalizeProb(analysis.polymarket_price);
 
-    // Eligibility is determined HERE by our risk system, not by Claude's self-report.
-    // Claude's auto_eligible field is advisory only — LLMs add subjective flags
-    // (LONG_TIMEFRAME, HIGH_VOLATILITY_ASSET) that wrongly veto legitimate edges.
-    // Our rule: confidence >= MEDIUM AND edge >= MIN_EDGE.
-    const isMediumEligible =
+    // Eligibility: confidence >= MEDIUM AND edge >= MIN_EDGE_WEATHER
+    const isEligible =
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
-      edgeNorm >= MIN_EDGE;
+      edgeNorm >= MIN_EDGE_WEATHER;
 
-    if (!isMediumEligible) continue;
+    if (!isEligible) continue;
 
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
@@ -301,81 +215,61 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    // Weather temperature markets have $400-$2K liquidity — allow a lower floor for them
-    // since Phase 2 statistical analysis requires no LLM and the edge is pure math.
-    const liquidityFloor = analysis.category === 'weather' ? 400 : MIN_LIQUIDITY;
-    if (currentMarket.liquidity_usd < liquidityFloor) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd} (floor $${liquidityFloor})`);
+    if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd} (floor $${MIN_LIQUIDITY})`);
       continue;
     }
 
-    // Check time remaining — require at least 4h for weather/crypto, 2h for others
+    // ── Timing Validation (Whale Insight) ─────────────────────
+    // Optimal entry is 24-48h before resolution. Too early = uncertainty.
+    // Too late = market has converged on the right answer.
     if (currentMarket.resolution_date) {
       const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
-      const minHours = (analysis.category === 'weather' || analysis.category === 'crypto') ? 4 : 2;
-      if (hoursLeft < minHours) {
-        console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${minHours}h for ${analysis.category})`);
+
+      if (hoursLeft < MIN_HOURS_BEFORE_RESOLUTION) {
+        console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${MIN_HOURS_BEFORE_RESOLUTION}h)`);
         continue;
+      }
+
+      // Log timing quality for analytics
+      const timingQuality = (hoursLeft >= OPTIMAL_HOURS_MIN && hoursLeft <= OPTIMAL_HOURS_MAX)
+        ? 'OPTIMAL' : hoursLeft < OPTIMAL_HOURS_MIN ? 'LATE' : 'EARLY';
+      if (timingQuality !== 'OPTIMAL') {
+        console.log(`[place-bets] Timing ${timingQuality} for ${analysis.market_id.substring(0, 8)}: ${hoursLeft.toFixed(1)}h left (sweet spot: ${OPTIMAL_HOURS_MIN}-${OPTIMAL_HOURS_MAX}h)`);
       }
     }
 
-    // Spread-aware edge filter: edge must be 2x estimated spread
-    // Weather markets get a pass on spread requirements — they have
-    // natural liquidity from the bracket structure and our edge comes
-    // from ensemble forecast data, not market-making dynamics.
-    const estimatedSpread = currentMarket.liquidity_usd > 50000 ? 0.005 :
-      currentMarket.liquidity_usd > 20000 ? 0.01 :
-      currentMarket.liquidity_usd > 10000 ? 0.015 : 0.025;
+    // ── Tail Bet Detection (Whale Strategy) ───────────────────
+    // The #1 edge on Polymarket weather: buy Yes at <15¢ when
+    // ensemble forecasts show 8%+ higher probability than market.
+    // gopfan2 made $2M+ mostly from these. Math: true prob 12%,
+    // market at 4% = 25x payout with 3x edge.
+    const isTailBet = (analysis.market_price ?? 0) > 0 && (analysis.market_price ?? 0) < 0.15;
 
-    const spreadMultiplier = analysis.category === 'weather' ? 1.0 : 2.0;  // relaxed for weather
-    if (edgeNorm < estimatedSpread * spreadMultiplier) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — edge < ${spreadMultiplier}x spread`);
-      continue;
-    }
-
-    // ── Tail Bet Detection ─────────────────────────────────────
-    // Weather tail bets (entry < 15¢) are the #1 edge on Polymarket.
-    // One trader made $2M+ mostly from these. The math: if true prob
-    // is 12% but market says 4%, you get 25x payout with 3x edge.
-    const isTailBet = analysis.category === 'weather' &&
-      (analysis.market_price ?? 0) > 0 && (analysis.market_price ?? 0) < 0.15;
-
-    // Calculate bet size using 1/8th Kelly (professional standard).
-    // Cap kelly_fraction at 0.03 before applying confidence multiplier to prevent
-    // stale inflated-edge analyses (e.g. weather avg 0.665) from sizing to the
-    // 3% bankroll limit on every single bet. Real 8-20% edges get normal sizing.
+    // ── Kelly Sizing ──────────────────────────────────────────
+    // 1/8th Kelly with confidence scaling. Tail bets get 1.5x boost
+    // because asymmetric payout justifies slightly larger positions.
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
-      const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
-      // Tail bets get a sizing boost — the asymmetric payout justifies slightly
-      // larger positions when model consensus is strong
+      const confMult = analysis.confidence === 'HIGH' ? 0.8 : 0.5; // MEDIUM
       const tailBoost = isTailBet ? 1.5 : 1.0;
-      // Cap kelly_fraction at what a realistic 35% edge would produce before multiplying.
-      // Analyses already store kelly at 1/8 scale, so no further Kelly reduction needed here.
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
       const adjustedKelly = Math.min(cappedKelly * confMult * tailBoost, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
     }
 
-    // Fallback: 0.2% of bankroll (e.g. $10 on $5K bankroll) when kelly_fraction unavailable.
-    // Weather tail bets get a slightly higher floor to ensure meaningful positions.
+    // Fallback sizing
     if (betAmount <= 0) {
       betAmount = isTailBet
-        ? Math.max(5, Math.round(bankroll * 0.003))  // 0.3% for tail bets ($15 on $5K)
+        ? Math.max(5, Math.round(bankroll * 0.003))  // 0.3% for tail bets
         : Math.max(5, Math.round(bankroll * 0.002));  // 0.2% standard
     }
-
-    // Politics bets: enforce $5 minimum to prevent micro-bet clutter.
-    // Very low entry prices (0.5–1.5%) produce tiny kelly sizes — floor at $5.
-    if (analysis.category === 'politics' && betAmount < 5) betAmount = 5;
 
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
     if (betAmount < 1) break;
 
-    // Liquidity cap: never deploy more than 5% of the market's total liquidity.
-    // On paper this doesn't matter, but protects us when live trading starts —
-    // a $120 bet into a $400 market would move the price 15-20% on execution.
+    // Liquidity cap: never deploy more than 5% of market's liquidity
     const maxByLiquidity = Math.max(1, (currentMarket.liquidity_usd || 0) * 0.05);
     if (betAmount > maxByLiquidity) {
       console.log(`[place-bets] Capping ${analysis.market_id.substring(0, 8)} bet from $${betAmount.toFixed(0)} to $${maxByLiquidity.toFixed(0)} (5% of $${currentMarket.liquidity_usd} liquidity)`);
@@ -384,67 +278,25 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (betAmount < 1) continue;
 
     // Determine outcome label and entry price
-    let outcomeLabel: string | null = null;
-    let entryPrice: number | null = null;
+    const outcomeLabel = analysis.best_outcome_label || null;
+    let entryPrice: number | null = analysis.market_price || null;
 
-    if (analysis.category === 'weather') {
-      outcomeLabel = analysis.best_outcome_label || null;
-      entryPrice = analysis.market_price || null;
-    } else if (analysis.category === 'sports') {
-      outcomeLabel = analysis.event_description || null;
-      entryPrice = analysis.polymarket_price || analysis.market_price || null;
-    } else if (analysis.category === 'crypto') {
-      outcomeLabel = analysis.target_bracket || analysis.asset || null;
-      entryPrice = analysis.market_price || null;
-    } else if (analysis.category === 'politics') {
-      // Politics analyses use best_outcome_label + market_price (same structure as weather)
-      outcomeLabel = analysis.best_outcome_label || null;
-      entryPrice = analysis.market_price || null;
-    } else if (analysis.category === 'opportunity') {
-      // Opportunity analyses: direction determines YES/NO label
-      outcomeLabel = analysis.direction === 'BUY_YES' ? 'YES' : 'NO';
-      entryPrice = analysis.market_price || null;
-    }
-
-    // Entry price is already normalized above via normalizeProb
-    // For BUY_NO bets, market_price stores the YES price of the target bracket.
-    // Our actual cost = 1 - YES_price (the NO share price).
-    // Example: YES = 66¢ → NO costs 34¢. YES = 38¢ → NO costs 62¢.
-    //
-    // BUG FIX: The old code only flipped when market_price < 0.5, which meant
-    // when YES > 50¢ (our most common BUY_NO case — betting against likely outcomes),
-    // it used the raw YES price as entry, which then got blocked by the 40¢ cap.
-    // This was blocking ALL high-value BUY_NO bets (440+ per day).
+    // For BUY_NO: our cost = 1 - YES_price
     if (analysis.direction === 'BUY_NO' && entryPrice !== null) {
       entryPrice = 1 - entryPrice;
     }
 
-    // Need a valid entry price — must be strictly above 2% and below max cap.
-    // Minimum entry price: 2% floor (professional standard).
-    // Below 2% adverse selection dominates — if the market prices YES at <2%,
-    // there's almost certainly smarter money on the other side. Also blocks
-    // near-certain losers like "BTC $90K in 4 days" at 0.4%.
-    //
-    // Maximum entry price: 40% cap. Empirical data from 23 resolved bets shows:
-    //   - ALL bets with entry price > 0.40 have LOST (22/22 = 100% loss rate)
-    //   - The ONLY verified win (NYC ≥74°F Mar 31) had entry price 0.0355
-    //   - High entry prices pay a lot to win a little (0.4x-0.8x payout)
-    //   - Low entry prices have massive asymmetric upside (10x-27x payout)
-    // This single rule eliminates all historical losses while preserving the win.
-    const MIN_ENTRY_PRICE = 0.02;
-    const MAX_ENTRY_PRICE = 0.40;
+    // Validate entry price bounds
     if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
+      console.log(`[place-bets] Skipping ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} outside bounds`);
       continue;
     }
     if (entryPrice > MAX_ENTRY_PRICE) {
-      console.log(`[place-bets] Skipping analysis ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap (bad risk/reward)`);
+      console.log(`[place-bets] Skipping ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap`);
       continue;
     }
 
-    // Real-time orderbook validation — check actual spread and slippage
-    // before committing to a bet. Stale prices kill edge.
-    // Advisory check only — wrapped in try/catch so failures don't block bets.
+    // Real-time orderbook validation (advisory — fails silently)
     if (orderbookChecks < MAX_ORDERBOOK_CHECKS) {
       try {
         const { data: marketData } = await supabase
@@ -457,7 +309,7 @@ export const handler = schedule('*/15 * * * *', async () => {
           const book = await getOrderbookDepth(marketData.condition_id);
           if (book) {
             const spreadPct = computeSpread(book);
-            const isBuyOrder = analysis.direction === 'BUY_YES' || analysis.direction === 'BUY_NO';
+            const isBuyOrder = true;
             const slippagePct = estimateSlippage(book, betAmount, isBuyOrder);
 
             // Skip if spread eats more than 40% of our edge
@@ -467,20 +319,18 @@ export const handler = schedule('*/15 * * * *', async () => {
               continue;
             }
 
-            // Skip if slippage would cost more than 20% of bet amount
+            // Skip if slippage > 20% of bet amount
             const slippageDollar = (slippagePct / 100) * betAmount;
             if (slippageDollar > betAmount * 0.20) {
-              console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — estimated slippage $${slippageDollar.toFixed(2)} on $${betAmount.toFixed(2)} bet (exceeds 20%)`);
+              console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — slippage $${slippageDollar.toFixed(2)} on $${betAmount.toFixed(2)} bet`);
               orderbookChecks++;
               continue;
             }
 
-            // Use real-time best price instead of stale analysis price
-            const realPrice = isBuyOrder && analysis.direction === 'BUY_YES'
+            // Use real-time best price if significantly different
+            const realPrice = analysis.direction === 'BUY_YES'
               ? book.bestAsk
-              : isBuyOrder && analysis.direction === 'BUY_NO'
-              ? 1 - book.bestBid
-              : book.bestBid;
+              : 1 - book.bestBid;
 
             if (realPrice && Math.abs(realPrice - entryPrice) > 0.03) {
               console.log(`[place-bets] Price moved: analysis=${entryPrice.toFixed(3)}, live=${realPrice.toFixed(3)} — using live price`);
@@ -491,30 +341,17 @@ export const handler = schedule('*/15 * * * *', async () => {
           }
         }
       } catch (e) {
-        // Orderbook check is advisory — don't block bets if it fails
         console.log(`[place-bets] Orderbook check failed (non-blocking): ${e}`);
       }
     }
 
-    // Near-expiry filter for crypto: don't bet on monthly/quarterly crypto targets
-    // in the final 7 days when the price gap is clearly insurmountable.
-    // e.g. "BTC hits $90K by March 31" on March 27 at 0.004 = throwing money away.
-    if (analysis.category === 'crypto' && currentMarket.resolution_date) {
-      const daysLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 86400000;
-      if (daysLeft < 7 && entryPrice < 0.10) {
-        console.log(`[place-bets] Skipping near-expiry crypto: ${daysLeft.toFixed(1)} days left, price=${entryPrice?.toFixed(3)} — too late`);
-        continue;
-      }
-    }
-
-    // Execute the bet — paper or live depending on config/guardrails
-    // executeBet handles the paper/live decision internally
+    // Execute the bet
     const execResult = await executeBet(
       supabase,
       {
         market_id: analysis.market_id,
-        analysis_id: analysis.id,  // always link — was wrongly null for crypto/sports/politics
-        category: analysis.category,
+        analysis_id: analysis.id,
+        category: 'weather',
         direction: analysis.direction,
         outcome_label: outcomeLabel,
         entry_price: entryPrice,
@@ -523,8 +360,7 @@ export const handler = schedule('*/15 * * * *', async () => {
         confidence: analysis.confidence || null,
       },
       config,
-      // Only count live exposure for live order validation
-      0 // todayLiveExposure — TODO: track separately when live trading is active
+      0
     );
 
     if (!execResult.success && !execResult.bet_id) {
@@ -540,15 +376,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     totalDeployed += betAmount;
     openMarketIds.add(analysis.market_id);
     existingMarketIds.add(analysis.market_id);
-    categoryExposure[analysis.category] = (categoryExposure[analysis.category] || 0) + betAmount;
 
+    const tailTag = isTailBet ? ' [TAIL]' : '';
     console.log(
-      `[place-bets] Placed ${analysis.category} bet: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${edgeNorm.toFixed(3)} conf=${analysis.confidence}`
+      `[place-bets] Placed weather bet${tailTag}: $${betAmount.toFixed(2)} on "${(outcomeLabel || '').substring(0, 60)}" @ ${entryPrice.toFixed(3)} | edge=${edgeNorm.toFixed(3)} conf=${analysis.confidence}`
     );
 
-    // Send email notification (non-blocking, fails silently)
+    // Send email notification (non-blocking)
     notifyBetPlaced({
-      category: analysis.category,
+      category: 'weather',
       direction: analysis.direction,
       outcomeLabel,
       entryPrice,
@@ -557,10 +393,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       isPaper: execResult.is_paper,
       edge: analysis.edge,
       confidence: analysis.confidence,
-    }).catch(() => {}); // fire-and-forget
+    }).catch(() => {});
   }
 
-  // Update paper_trade_start_date if this is the first-ever bet
+  // Update paper_trade_start_date if first-ever bet
   if (placed > 0 && !config.paper_trade_start_date) {
     await supabase
       .from('system_config')
@@ -569,7 +405,6 @@ export const handler = schedule('*/15 * * * *', async () => {
         updated_at: new Date().toISOString(),
       })
       .eq('key', 'paper_trade_start_date');
-
     console.log('[place-bets] Started paper trading clock');
   }
 
@@ -589,7 +424,7 @@ export const handler = schedule('*/15 * * * *', async () => {
   }
 
   const elapsed = Date.now() - startTime;
-  console.log(`[place-bets] Done in ${elapsed}ms. Placed ${placed} new bets, total deployed today: $${totalDeployed.toFixed(2)}`);
+  console.log(`[place-bets] Done in ${elapsed}ms. Placed ${placed} weather bets, total deployed today: $${totalDeployed.toFixed(2)}`);
 
   return { statusCode: 200 };
 });

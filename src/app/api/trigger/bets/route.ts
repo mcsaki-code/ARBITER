@@ -60,7 +60,7 @@ export async function GET() {
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value')
-      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v2_start_date']);
+      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -69,12 +69,12 @@ export async function GET() {
     const maxSingleBet = bankroll * MAX_SINGLE_BET_PCT;
     const maxDailyExposure = bankroll * MAX_DAILY_EXPOSURE_PCT;
 
-    // Today's existing bets — use v2_start_date as floor so pre-v2 bets
-    // don't count against today's limits (only matters on day 1 of v2)
+    // Today's existing bets — use v3_start_date as floor so pre-v3 bets
+    // don't count against today's limits (only matters on day 1 of v3)
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
-    const v2Start = config.v2_start_date ? new Date(config.v2_start_date) : null;
-    const effectiveTodayStart = v2Start && v2Start > todayStart ? v2Start : todayStart;
+    const v3Start = config.v3_start_date ? new Date(config.v3_start_date) : null;
+    const effectiveTodayStart = v3Start && v3Start > todayStart ? v3Start : todayStart;
 
     const { data: todaysBets } = await supabase
       .from('bets')
