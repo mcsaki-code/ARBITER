@@ -267,6 +267,16 @@ export const handler = schedule('*/15 * * * *', async () => {
     const edgeNorm = normalizeEdge(analysis.edge);
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
 
+    // ── BUY_NO BLOCK (learned from backtest: 0/11 win rate) ────
+    // Weather binary markets: Claude's BUY_NO calls are systematically
+    // wrong. BUY_YES is 21/21, BUY_NO is 0/11 across all resolved data.
+    // The 0.40 entry price cap naturally blocks most BUY_NO bets, but
+    // this explicit check prevents edge cases from leaking through.
+    if (analysis.direction === 'BUY_NO') {
+      console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — BUY_NO disabled (0% historical win rate)`);
+      continue;
+    }
+
     // Eligibility: confidence >= MEDIUM AND edge >= MIN_EDGE_WEATHER
     const isEligible =
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&

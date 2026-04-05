@@ -360,9 +360,26 @@ export const handler = schedule('*/20 * * * *', async () => {
 
       // Apply city-based calibration multiplier upstream (before place-bets sees the edge)
       // Tier 1 cities (most reliable) get 1.0x, Tier 4 cities get 0.5x
+      // Learning agent can override with dynamic weights in system_config
       let adjustedEdge = rawEdge;
       if (rawEdge !== null && rawEdge > 0) {
-        const edgeMultiplier = getEdgeMultiplier(city.name);
+        let edgeMultiplier = getEdgeMultiplier(city.name);
+
+        // Check for learning agent's dynamic override
+        const dynamicKey = `calibration_${city.name.toLowerCase().replace(/\s+/g, '_')}`;
+        const { data: dynamicCal } = await supabase
+          .from('system_config')
+          .select('value')
+          .eq('key', dynamicKey)
+          .single();
+        if (dynamicCal?.value) {
+          const dynamicMult = parseFloat(dynamicCal.value);
+          if (!isNaN(dynamicMult) && dynamicMult > 0) {
+            edgeMultiplier = dynamicMult;
+            console.log(`[analyze-weather-v2] ${city.name} using LEARNED calibration: ${dynamicMult.toFixed(4)}`);
+          }
+        }
+
         adjustedEdge = rawEdge * edgeMultiplier;
         if (edgeMultiplier !== 1.0) {
           console.log(
