@@ -65,9 +65,9 @@ export const handler = schedule('*/20 * * * *', async () => {
   });
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 20)) {
-    // Time guard: 120s — Netlify scheduled functions have 15-min timeout, not 10s sync limit
-    if (Date.now() - startTime > 120000) break;
+  for (const market of sortedMarkets.slice(0, 8)) {
+    // Time guard: 26s — Phase 2 statistical analysis now runs in its own function
+    if (Date.now() - startTime > 26000) break;
 
     const city = market.weather_cities;
     if (!city) continue;
@@ -363,11 +363,17 @@ export const handler = schedule('*/20 * * * *', async () => {
       let trueProb = analysis.best_bet?.true_prob ?? null;
       if (trueProb !== null && trueProb > 1) trueProb = trueProb / 100;
 
+      // Derive analysis_date from market resolution_date (the weather event date)
+      const analysisDate = market.resolution_date
+        ? new Date(market.resolution_date).toISOString().split('T')[0]
+        : null;
+
       // Store analysis
       await supabase.from('weather_analyses').insert({
         market_id: market.id,
         city_id: city.id,
         consensus_id: consensus.id,
+        analysis_date: analysisDate,
         model_high_f: consensus.consensus_high_f,
         model_spread_f: consensus.model_spread_f,
         model_agreement: consensus.agreement,
