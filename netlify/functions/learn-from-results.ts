@@ -98,7 +98,7 @@ interface ResolvedBetWithAnalysis {
   // From weather_analyses join
   edge?: number;
   model_agreement?: string;
-  model_prob?: number;   // our probability estimate
+  true_prob?: number;   // our probability estimate (true_prob from weather_analyses)
   reasoning?: string;
   // From markets join
   resolution_date?: string;
@@ -138,7 +138,7 @@ export const handler = schedule('0 6 * * *', async () => {
   const analysisIds = rawBets.map(b => b.analysis_id).filter(Boolean);
   const { data: analyses } = await supabase
     .from('weather_analyses')
-    .select('id, edge, model_agreement, model_prob, reasoning, confidence')
+    .select('id, edge, model_agreement, true_prob, reasoning, confidence')
     .in('id', analysisIds);
 
   const analysisMap = new Map(analyses?.map(a => [a.id, a]) ?? []);
@@ -158,7 +158,7 @@ export const handler = schedule('0 6 * * *', async () => {
       analysis_id: b.analysis_id,
       edge: analysis?.edge,
       model_agreement: analysis?.model_agreement,
-      model_prob: analysis?.model_prob,
+      true_prob: analysis?.true_prob,
       reasoning: analysis?.reasoning,
       resolution_date: market?.resolution_date,
       question: market?.question,
@@ -229,8 +229,8 @@ export const handler = schedule('0 6 * * *', async () => {
 
     // Track implied sigma multiplier need:
     // If win rate << expected, our sigma is too tight (we're over-confident).
-    // Expected win rate when we bet: avg(model_prob) for won + 1-avg(model_prob) for lost
-    const avgModelProb = avg(group.filter(b => b.model_prob != null), b => b.model_prob || b.entry_price);
+    // Expected win rate when we bet: avg(true_prob) for won + 1-avg(true_prob) for lost
+    const avgModelProb = avg(group.filter(b => b.true_prob != null), b => b.true_prob || b.entry_price);
     const sigmaAccuracy = avgModelProb > 0 ? wr / avgModelProb : 1.0;
     sigmaInsights[city] = { multiplier: Math.max(0.5, Math.min(2.0, sigmaAccuracy)), win_rate: wr, n: group.length };
 
@@ -253,12 +253,12 @@ export const handler = schedule('0 6 * * *', async () => {
   // DIMENSION 3: Implied Multiplier Analysis (THE KEY ALPHA SIGNAL)
   // our_probability / market_price — how much we're getting vs paying
   // ============================================================
-  const betsWithModelProb = bets.filter(b => b.model_prob != null && b.model_prob > 0 && b.entry_price > 0);
+  const betsWithModelProb = bets.filter(b => b.true_prob != null && b.true_prob > 0 && b.entry_price > 0);
   if (betsWithModelProb.length > 0) {
     // Compute implied multiplier for each bet
     const withMultiplier = betsWithModelProb.map(b => ({
       ...b,
-      implied_mult: (b.model_prob || b.entry_price) / b.entry_price,
+      implied_mult: (b.true_prob || b.entry_price) / b.entry_price,
     }));
 
     const multBuckets = [

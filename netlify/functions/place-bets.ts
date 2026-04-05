@@ -248,23 +248,33 @@ export const handler = schedule('*/15 * * * *', async () => {
   let totalDeployed = todayExposure;
   let orderbookChecks = 0;
   const MAX_ORDERBOOK_CHECKS = 8;
+  // NOTE: Netlify scheduled functions have a 15-minute timeout.
+  // 55s guard leaves buffer while allowing full candidate processing.
+  const LOOP_TIMEOUT_MS = 55000;
 
   for (const analysis of candidates) {
+    const elapsed = Date.now() - startTime;
     // Stop conditions
-    if (totalDeployed >= maxDailyExposure) break;
-    if (todayBetCount + placed >= MAX_BETS_PER_DAY) break;
-    if (Date.now() - startTime > 20000) break;
+    if (totalDeployed >= maxDailyExposure) { console.log(`[place-bets] Daily exposure limit reached ($${totalDeployed.toFixed(2)}/$${maxDailyExposure.toFixed(2)})`); break; }
+    if (todayBetCount + placed >= MAX_BETS_PER_DAY) { console.log(`[place-bets] Daily bet count limit reached (${todayBetCount + placed}/${MAX_BETS_PER_DAY})`); break; }
+    if (elapsed > LOOP_TIMEOUT_MS) { console.log(`[place-bets] Loop timeout after ${elapsed}ms — stopping`); break; }
+
+    const shortId = String(analysis.market_id).substring(0, 8);
+    const edgeNorm = normalizeEdge(analysis.edge);
+    console.log(`[place-bets] Evaluating ${shortId} dir=${analysis.direction} conf=${analysis.confidence} edge=${edgeNorm.toFixed(3)} price=${analysis.market_price}`);
 
     // Skip if we already have an open bet on this market
     if (openMarketIds.has(analysis.market_id)) {
-      console.log(`[place-bets] Skipping ${String(analysis.market_id).substring(0, 8)} — already have open position`);
+      console.log(`[place-bets] SKIP ${shortId} — already have open position`);
       continue;
     }
 
     // Skip if already bet on this market today
-    if (existingMarketIds.has(analysis.market_id)) continue;
+    if (existingMarketIds.has(analysis.market_id)) {
+      console.log(`[place-bets] SKIP ${shortId} — already bet today`);
+      continue;
+    }
 
-    const edgeNorm = normalizeEdge(analysis.edge);
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
 
     // ── BUY_NO BLOCK (learned from backtest: 0/11 win rate) ────
@@ -273,7 +283,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     // The 0.40 entry price cap naturally blocks most BUY_NO bets, but
     // this explicit check prevents edge cases from leaking through.
     if (analysis.direction === 'BUY_NO') {
-      console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — BUY_NO disabled (0% historical win rate)`);
+      console.log(`[place-bets] SKIP ${shortId} — BUY_NO disabled (0% historical win rate)`);
       continue;
     }
 
@@ -282,7 +292,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
       edgeNorm >= MIN_EDGE_WEATHER;
 
-    if (!isEligible) continue;
+    if (!isEligible) {
+      console.log(`[place-bets] SKIP ${shortId} — not eligible: conf=${analysis.confidence} edge=${edgeNorm.toFixed(3)}`);
+      continue;
+    }
 
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
@@ -292,12 +305,12 @@ export const handler = schedule('*/15 * * * *', async () => {
       .single();
 
     if (!currentMarket || !currentMarket.is_active) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — market inactive`);
+      console.log(`[place-bets] SKIP ${shortId} — market not found or inactive (found=${!!currentMarket} active=${currentMarket?.is_active})`);
       continue;
     }
 
     if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — low liquidity $${currentMarket.liquidity_usd} (floor $${MIN_LIQUIDITY})`);
+      console.log(`[place-bets] SKIP ${shortId} — low liquidity $${currentMarket.liquidity_usd} (floor $${MIN_LIQUIDITY})`);
       continue;
     }
 
@@ -307,14 +320,14 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Weather bets MUST have a resolution_date — without it we can't
     // validate timing or know when the market settles.
     if (!currentMarket.resolution_date) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — no resolution_date`);
+      console.log(`[place-bets] SKIP ${shortId} — no resolution_date`);
       continue;
     }
 
     const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
 
     if (hoursLeft < MIN_HOURS_BEFORE_RESOLUTION) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — only ${hoursLeft.toFixed(1)}h left (min ${MIN_HOURS_BEFORE_RESOLUTION}h)`);
+      console.log(`[place-bets] SKIP ${shortId} — only ${hoursLeft.toFixed(1)}h left (min ${MIN_HOURS_BEFORE_RESOLUTION}h)`);
       continue;
     }
 
@@ -360,15 +373,15 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
-    if (betAmount < 1) break;
+    if (betAmount < 1) { console.log(`[place-bets] BREAK ${shortId} — betAmount ${betAmount.toFixed(2)} < $1 (maxSingle=${maxSingleBet.toFixed(2)} remaining=${(maxDailyExposure - totalDeployed).toFixed(2)})`); break; }
 
     // Liquidity cap: never deploy more than 5% of market's liquidity
     const maxByLiquidity = Math.max(1, (currentMarket.liquidity_usd || 0) * 0.05);
     if (betAmount > maxByLiquidity) {
-      console.log(`[place-bets] Capping ${analysis.market_id.substring(0, 8)} bet from $${betAmount.toFixed(0)} to $${maxByLiquidity.toFixed(0)} (5% of $${currentMarket.liquidity_usd} liquidity)`);
+      console.log(`[place-bets] Capping ${shortId} bet from $${betAmount.toFixed(0)} to $${maxByLiquidity.toFixed(0)} (5% of $${currentMarket.liquidity_usd} liquidity)`);
       betAmount = Math.round(maxByLiquidity * 100) / 100;
     }
-    if (betAmount < 1) continue;
+    if (betAmount < 1) { console.log(`[place-bets] SKIP ${shortId} — betAmount ${betAmount.toFixed(2)} < $1 after liquidity cap`); continue; }
 
     // Determine outcome label and entry price
     const outcomeLabel = analysis.best_outcome_label || null;
@@ -381,13 +394,14 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Validate entry price bounds
     if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
-      console.log(`[place-bets] Skipping ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice?.toFixed(4)} outside bounds`);
+      console.log(`[place-bets] SKIP ${shortId} — entry price ${entryPrice?.toFixed(4)} outside [${MIN_ENTRY_PRICE}, 0.997) bounds (market_price=${analysis.market_price})`);
       continue;
     }
     if (entryPrice > MAX_ENTRY_PRICE) {
-      console.log(`[place-bets] Skipping ${String(analysis.id).substring(0, 8)} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap`);
+      console.log(`[place-bets] SKIP ${shortId} — entry price ${entryPrice.toFixed(4)} exceeds ${MAX_ENTRY_PRICE} cap`);
       continue;
     }
+    console.log(`[place-bets] PRE-EXECUTE ${shortId}: $${betAmount.toFixed(2)} @ ${entryPrice.toFixed(3)}, ${hoursLeft.toFixed(1)}h left, conf=${analysis.confidence}`);
 
     // Real-time orderbook validation (advisory — fails silently)
     if (orderbookChecks < MAX_ORDERBOOK_CHECKS) {
