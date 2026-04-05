@@ -8,6 +8,7 @@
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
+import { getCityCalibration, getEdgeMultiplier, getBiasCorrection, getCalibrationContext } from '../../src/lib/calibration';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -357,6 +358,19 @@ export const handler = schedule('*/20 * * * *', async () => {
       // and ensures calibration metrics stay meaningful.
       if (rawEdge !== null && rawEdge > 0.35) rawEdge = 0.35;
 
+      // Apply city-based calibration multiplier upstream (before place-bets sees the edge)
+      // Tier 1 cities (most reliable) get 1.0x, Tier 4 cities get 0.5x
+      let adjustedEdge = rawEdge;
+      if (rawEdge !== null && rawEdge > 0) {
+        const edgeMultiplier = getEdgeMultiplier(city.name);
+        adjustedEdge = rawEdge * edgeMultiplier;
+        if (edgeMultiplier !== 1.0) {
+          console.log(
+            `[analyze-weather-v2] ${city.name} edge calibration: raw=${rawEdge.toFixed(4)} × ${edgeMultiplier.toFixed(2)} = adjusted=${adjustedEdge.toFixed(4)}`
+          );
+        }
+      }
+
       // Also normalize market_price and true_prob if they look like percentages
       let mktPrice = analysis.best_bet?.market_price ?? null;
       if (mktPrice !== null && mktPrice > 1) mktPrice = mktPrice / 100;
@@ -368,7 +382,7 @@ export const handler = schedule('*/20 * * * *', async () => {
         ? new Date(market.resolution_date).toISOString().split('T')[0]
         : null;
 
-      // Store analysis
+      // Store analysis — use adjusted edge (post-calibration)
       await supabase.from('weather_analyses').insert({
         market_id: market.id,
         city_id: city.id,
@@ -382,7 +396,7 @@ export const handler = schedule('*/20 * * * *', async () => {
         best_outcome_label: analysis.best_bet?.outcome_label ?? null,
         market_price: mktPrice,
         true_prob: trueProb,
-        edge: rawEdge,
+        edge: adjustedEdge,  // Use calibration-adjusted edge
         direction: analysis.best_bet?.direction ?? 'PASS',
         confidence: analysis.best_bet?.confidence ?? 'LOW',
         kelly_fraction: kellyFraction,
@@ -400,7 +414,7 @@ export const handler = schedule('*/20 * * * *', async () => {
       processed++;
       const usedEnsemble = ensembleData ? `ensemble(${ensembleData.used_models.join(',')})` : 'claude-only';
       console.log(
-        `[analyze-weather-v2] ${city.name} (${marketType}): edge=${analysis.best_bet?.edge ?? 0}, used=${usedEnsemble}, confidence=${analysis.best_bet?.confidence ?? 'PASS'}`
+        `[analyze-weather-v2] ${city.name} (${marketType}): edge=${adjustedEdge?.toFixed(4) ?? 0} (calibrated), used=${usedEnsemble}, confidence=${analysis.best_bet?.confidence ?? 'PASS'}`
       );
     } catch (err) {
       console.error(`[analyze-weather-v2] Analysis failed for ${city.name}:`, err);
@@ -473,10 +487,13 @@ The ensemble is more reliable than any single model for bracket pricing.
   }
 
   if (marketType === 'precipitation') {
+    const calibrationContext = getCalibrationContext(city.name);
     return `You are ARBITER's weather analyst specializing in PRECIPITATION markets. Precipitation markets are less efficient than temperature — humans overestimate rain probability (wet bias).
 
 CITY: ${city.name}
 DATE: ${date}
+
+${calibrationContext}
 
 PRECIPITATION FORECASTS:
 - NWS precip probability: ${models.nws?.precip_prob ?? 'N/A'}%, amount: ${models.nws?.precip_mm ?? 'N/A'}mm
@@ -528,10 +545,13 @@ Respond ONLY in JSON:
   }
 
   if (marketType === 'snowfall') {
+    const calibrationContext = getCalibrationContext(city.name);
     return `You are ARBITER's weather analyst specializing in SNOWFALL markets. Snowfall is the hardest weather variable to predict — markets are often wildly mispriced.
 
 CITY: ${city.name}
 DATE: ${date}
+
+${calibrationContext}
 
 SNOWFALL FORECASTS:
 - GFS: ${models.gfs?.snowfall_cm ?? 'N/A'}cm
@@ -579,12 +599,15 @@ Respond ONLY in JSON:
   const tempValue = marketType === 'temperature_low'
     ? (consensus.consensus_low_f ?? consensus.consensus_high_f - 15)
     : consensus.consensus_high_f;
+  const calibrationContext = getCalibrationContext(city.name);
 
   return `You are ARBITER's expert meteorological analyst. Compare multi-model forecast ensemble to Polymarket temperature brackets and identify mispricings.
 
 CITY: ${city.name}
 DATE: ${date}
 MARKET TYPE: Daily ${tempField} Temperature
+
+${calibrationContext}
 
 DETERMINISTIC FORECAST MODELS:
 - NWS official:  ${models.nws?.temp_high_f ?? 'N/A'}°F high / ${models.nws?.temp_low_f ?? 'N/A'}°F low

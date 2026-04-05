@@ -45,53 +45,6 @@ function IconTracker({ className = '' }: { className?: string }) {
   );
 }
 
-function IconArb({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path fillRule="evenodd" d="M4 4a2 2 0 00-2 2v4a2 2 0 002 2V6h10a2 2 0 00-2-2H4zm2 6a2 2 0 012-2h8a2 2 0 012 2v4a2 2 0 01-2 2H8a2 2 0 01-2-2v-4zm6 4a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function IconSports({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function IconCrypto({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path d="M10 2a8 8 0 100 16 8 8 0 000-16zm1 4.5V5a1 1 0 10-2 0v1.5A2.5 2.5 0 007.5 9a2.5 2.5 0 002.5 2.5V14a1 1 0 01-1 1H8a1 1 0 100 2h1a1 1 0 001-1v-.5A2.5 2.5 0 0012.5 13a2.5 2.5 0 00-2.5-2.5V8a1 1 0 011-1h1a1 1 0 100-2h-1z" />
-    </svg>
-  );
-}
-
-function IconAnalytics({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path d="M2 11a1 1 0 011-1h2a1 1 0 011 1v5a1 1 0 01-1 1H3a1 1 0 01-1-1v-5zm6-4a1 1 0 011-1h2a1 1 0 011 1v9a1 1 0 01-1 1H9a1 1 0 01-1-1V7zm6-3a1 1 0 011-1h2a1 1 0 011 1v12a1 1 0 01-1 1h-2a1 1 0 01-1-1V4z" />
-    </svg>
-  );
-}
-
-function IconPolitics({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path fillRule="evenodd" d="M3 6a3 3 0 013-3h8a3 3 0 013 3v8a3 3 0 01-3 3H6a3 3 0 01-3-3V6zm4 0a1 1 0 00-1 1v1a1 1 0 002 0V7a1 1 0 00-1-1zm4 0a1 1 0 00-1 1v1a1 1 0 002 0V7a1 1 0 00-1-1zm-4 5a1 1 0 000 2h4a1 1 0 000-2H7z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function IconSentiment({ className = '' }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 20 20" fill="currentColor" width="18" height="18">
-      <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clipRule="evenodd" />
-    </svg>
-  );
-}
 
 const NAV_ITEMS = [
   { href: '/', label: 'Dashboard', Icon: IconHome },

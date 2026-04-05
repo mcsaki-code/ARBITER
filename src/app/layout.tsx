@@ -3,8 +3,8 @@ import './globals.css';
 import { NavShell } from '@/components/NavShell';
 
 export const metadata: Metadata = {
-  title: 'ARBITER — Read the world. Beat the market.',
-  description: 'Intelligence platform & prediction market edge system',
+  title: 'ARBITER — Weather Prediction Markets',
+  description: 'AI-powered weather prediction market scanner and analyzer',
 };
 
 export default function RootLayout({

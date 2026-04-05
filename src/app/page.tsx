@@ -73,7 +73,7 @@ function getBetDisplayName(bet: Bet): string {
   if (bet.outcome_label && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label)) {
     return bet.outcome_label;
   }
-  return bet.category === 'weather' ? 'Weather Market' : bet.category === 'sports' ? 'Sports Market' : bet.category === 'crypto' ? 'Crypto Market' : 'Market';
+  return 'Weather Market';
 }
 
 function formatAdvantage(edge: number): string {
@@ -93,11 +93,8 @@ function getConfidenceDots(level: string | null): string {
 }
 
 function getCategoryBadge(category: string | null): React.ReactNode {
-  if (!category || category === 'general') return <div className="w-2 h-2 bg-slate-400 rounded-full" />;
-  if (category === 'weather') return <div className="w-2 h-2 bg-yellow-400 rounded-full" />;
-  if (category === 'sports') return <div className="w-2 h-2 bg-blue-400 rounded-full" />;
-  if (category === 'crypto') return <div className="w-2 h-2 bg-orange-400 rounded-full" />;
-  return <div className="w-2 h-2 bg-slate-400 rounded-full" />;
+  // Always weather-only
+  return <div className="w-2 h-2 bg-yellow-400 rounded-full" />;
 }
 
 // ============================================================

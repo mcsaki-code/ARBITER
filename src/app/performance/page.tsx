@@ -26,7 +26,7 @@ function getBetDisplayName(bet: Bet): string {
   if (bet.outcome_label && !['Yes', 'No', 'yes', 'no'].includes(bet.outcome_label)) {
     return bet.outcome_label;
   }
-  return bet.category === 'weather' ? 'Weather Market' : bet.category === 'sports' ? 'Sports Market' : bet.category === 'crypto' ? 'Crypto Market' : 'Market';
+  return 'Weather Market';
 }
 
 // ============================================================
@@ -125,7 +125,7 @@ export default function PerformancePage() {
   const entryBuckets = analyzeEntryPriceBuckets(bets);
 
   // Category stats
-  const categories = ['weather', 'sports', 'crypto'];
+  const categories = ['weather'];
   const categoryStats: Record<string, CategoryStats> = {};
   for (const cat of categories) {
     categoryStats[cat] = calculateCategoryStats(bets, cat);
