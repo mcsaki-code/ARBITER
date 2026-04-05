@@ -215,12 +215,18 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
       .from('markets')
-      .select('question, liquidity_usd, is_active, resolution_date')
+      .select('question, liquidity_usd, is_active, resolution_date, gamma_market_id')
       .eq('id', analysis.market_id)
       .single();
 
     if (!currentMarket || !currentMarket.is_active) {
       console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — market inactive`);
+      continue;
+    }
+
+    // gamma_market_id is REQUIRED for resolution — without it, bets are unresolvable
+    if (!currentMarket.gamma_market_id) {
+      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — no gamma_market_id (unresolvable)`);
       continue;
     }
 
