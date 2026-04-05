@@ -403,7 +403,12 @@ export const handler = schedule('*/15 * * * *', async () => {
     }
     console.log(`[place-bets] PRE-EXECUTE ${shortId}: $${betAmount.toFixed(2)} @ ${entryPrice.toFixed(3)}, ${hoursLeft.toFixed(1)}h left, conf=${analysis.confidence}`);
 
-    // Real-time orderbook validation (advisory — fails silently)
+    // Real-time orderbook validation (advisory — only applied when CLOB returns real data)
+    // BUG FIX: getOrderbookDepth() never returns null — on API failure it returns
+    // {bestBid: 0, bestAsk: 1, spread: 1.0} as a fallback. computeSpread() turns
+    // that into 200%, which caused the spread check to block EVERY bet.
+    // Fix: only apply spread/slippage gates when bestBid > 0 (real data received).
+    // When CLOB API fails, skip the check and proceed to execute the bet.
     if (orderbookChecks < MAX_ORDERBOOK_CHECKS) {
       try {
         const { data: marketData } = await supabase
@@ -414,7 +419,12 @@ export const handler = schedule('*/15 * * * *', async () => {
 
         if (marketData?.condition_id) {
           const book = await getOrderbookDepth(marketData.condition_id);
-          if (book) {
+          orderbookChecks++;
+
+          // Only apply spread/slippage gates when API returned real data (bestBid > 0).
+          // bestBid == 0 means API failed and returned the fallback sentinel values —
+          // applying spread checks against fake 100% spread would block valid bets.
+          if (book && book.bestBid > 0) {
             const spreadPct = computeSpread(book);
             const isBuyOrder = true;
             const slippagePct = estimateSlippage(book, betAmount, isBuyOrder);
@@ -422,7 +432,6 @@ export const handler = schedule('*/15 * * * *', async () => {
             // Skip if spread eats more than 40% of our edge
             if (spreadPct > edgeNorm * 100 * 0.4) {
               console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — spread ${spreadPct.toFixed(1)}% eats ${((spreadPct / (edgeNorm * 100)) * 100).toFixed(0)}% of edge`);
-              orderbookChecks++;
               continue;
             }
 
@@ -430,7 +439,6 @@ export const handler = schedule('*/15 * * * *', async () => {
             const slippageDollar = (slippagePct / 100) * betAmount;
             if (slippageDollar > betAmount * 0.20) {
               console.log(`[place-bets] Skip ${String(analysis.id).substring(0, 8)} — slippage $${slippageDollar.toFixed(2)} on $${betAmount.toFixed(2)} bet`);
-              orderbookChecks++;
               continue;
             }
 
@@ -443,8 +451,8 @@ export const handler = schedule('*/15 * * * *', async () => {
               console.log(`[place-bets] Price moved: analysis=${entryPrice.toFixed(3)}, live=${realPrice.toFixed(3)} — using live price`);
               entryPrice = realPrice;
             }
-
-            orderbookChecks++;
+          } else if (book) {
+            console.log(`[place-bets] Orderbook API returned no data for ${String(analysis.market_id).substring(0, 8)} — skipping spread check, proceeding to execute`);
           }
         }
       } catch (e) {
