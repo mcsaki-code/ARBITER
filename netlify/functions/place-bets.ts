@@ -199,6 +199,21 @@ export const handler = schedule('*/15 * * * *', async () => {
 
   const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
 
+  // Track today's LIVE exposure separately for guardrails validation.
+  // This was previously hardcoded to 0, which bypassed the daily live limit.
+  let todayLiveExposure = 0;
+  if (config.live_trading_enabled === 'true') {
+    const { data: todayLiveBets } = await supabase
+      .from('bets')
+      .select('amount_usd')
+      .eq('is_paper', false)
+      .gte('placed_at', effectiveTodayStart.toISOString());
+    todayLiveExposure = todayLiveBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
+    if (todayLiveExposure > 0) {
+      console.log(`[place-bets] Live exposure today: $${todayLiveExposure.toFixed(2)}`);
+    }
+  }
+
   // Fetch eligible weather analyses — only category we trade now
   const weatherCutoff = new Date(Date.now() - MAX_ANALYSIS_AGE).toISOString();
 
@@ -431,7 +446,7 @@ export const handler = schedule('*/15 * * * *', async () => {
           confidence: analysis.confidence || null,
         },
         config,
-        0
+        todayLiveExposure
       );
     } catch (err) {
       console.error(`[place-bets] Exception during executeBet for ${String(analysis.id).substring(0, 8)}:`, err);
@@ -445,6 +460,7 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     if (!execResult.is_paper) {
       console.log(`[place-bets] LIVE order placed: ${execResult.clob_order_id} status=${execResult.order_status}`);
+      todayLiveExposure += betAmount;
     }
 
     placed++;

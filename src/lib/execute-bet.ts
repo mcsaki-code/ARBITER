@@ -168,6 +168,39 @@ export async function executeBet(
   // ========================================
   addLog(`[live] Executing LIVE order: ${params.direction} $${params.amount_usd.toFixed(2)} on ${params.market_id.substring(0, 8)}`);
 
+  // Pre-flight: Check USDC balance before submitting to CLOB.
+  // validateWalletFunds() exists in wallet.ts but was never called — orders
+  // would fail with "insufficient balance" on CLOB and waste API quota.
+  try {
+    const { validateWalletFunds } = await import('./wallet');
+    const walletCheck = await validateWalletFunds(params.amount_usd);
+    if (!walletCheck.ok) {
+      addLog(`[live] Wallet check failed: ${walletCheck.errors.join(', ')} — falling back to paper`);
+      // Fall through to paper bet
+      const { data } = await supabase.from('bets').insert({
+        market_id: params.market_id,
+        analysis_id: params.analysis_id,
+        category: params.category,
+        direction: params.direction,
+        outcome_label: params.outcome_label,
+        entry_price: params.entry_price,
+        amount_usd: params.amount_usd,
+        is_paper: true,
+        status: 'OPEN',
+        order_status: 'NONE',
+        edge: params.edge ?? null,
+        confidence: params.confidence ?? null,
+        placed_at: new Date().toISOString(),
+        notes: `Live order skipped: ${walletCheck.errors.join('; ')}`,
+      }).select('id').single();
+      return { success: !!data, is_paper: true, bet_id: data?.id, error: walletCheck.errors.join('; ') };
+    }
+    addLog(`[live] Wallet OK: $${walletCheck.usdcBalance.toFixed(2)} USDC, ${walletCheck.maticBalance.toFixed(4)} MATIC`);
+  } catch (err) {
+    addLog(`[live] Wallet check error (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
+    // Continue anyway — let CLOB reject if funds insufficient
+  }
+
   // We need the condition_id to place a CLOB order
   let conditionId = params.condition_id;
 
@@ -273,16 +306,72 @@ export async function executeBet(
     return { success: false, is_paper: true, bet_id: data?.id, error: orderResult.errorMessage };
   }
 
-  // SUCCESS — insert as a LIVE bet
-  addLog(`[live] Order placed! ID: ${orderResult.orderId}`);
+  // SUCCESS — poll for fill confirmation before recording
+  addLog(`[live] Order submitted! ID: ${orderResult.orderId} — polling for fill...`);
 
+  // Poll order status for up to 15 seconds to confirm fill.
+  // GTC orders may not fill immediately if the price moved.
+  let finalStatus = orderResult.status || 'SUBMITTED';
+  let filledSize: number | undefined;
+  let avgPrice: number | undefined;
+
+  if (orderResult.orderId) {
+    const pollStart = Date.now();
+    const POLL_TIMEOUT_MS = 15000;
+    const POLL_INTERVAL_MS = 2000;
+
+    while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const status = await clob.getOrderStatus(orderResult.orderId);
+        if (status) {
+          finalStatus = status.status;
+          filledSize = status.filledSize;
+          avgPrice = status.avgPrice;
+          addLog(`[live] Poll: status=${finalStatus}, filled=${filledSize ?? 'unknown'}`);
+          // Terminal states: MATCHED (filled), CANCELLED, EXPIRED
+          if (['MATCHED', 'CANCELLED', 'EXPIRED', 'FILLED'].includes(finalStatus.toUpperCase())) {
+            break;
+          }
+        }
+      } catch {
+        // Non-fatal — keep polling
+      }
+    }
+  }
+
+  // If order was cancelled or expired and nothing filled, fall back to paper
+  const isFilled = finalStatus.toUpperCase() === 'MATCHED' || finalStatus.toUpperCase() === 'FILLED' || (filledSize && filledSize > 0);
+  if (!isFilled && ['CANCELLED', 'EXPIRED'].includes(finalStatus.toUpperCase())) {
+    addLog(`[live] Order ${finalStatus} with no fills — falling back to paper`);
+    const { data } = await supabase.from('bets').insert({
+      market_id: params.market_id,
+      analysis_id: params.analysis_id,
+      category: params.category,
+      direction: params.direction,
+      outcome_label: params.outcome_label,
+      entry_price: params.entry_price,
+      amount_usd: params.amount_usd,
+      is_paper: true,
+      status: 'OPEN',
+      order_status: 'NONE',
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
+      placed_at: new Date().toISOString(),
+      notes: `Live order ${finalStatus}: ${orderResult.orderId}`,
+    }).select('id').single();
+    return { success: false, is_paper: true, bet_id: data?.id, error: `Order ${finalStatus}` };
+  }
+
+  // Record as LIVE bet — use actual fill price if available
+  const recordedPrice = avgPrice || params.entry_price;
   const { data, error } = await supabase.from('bets').insert({
     market_id: params.market_id,
     analysis_id: params.analysis_id,
     category: params.category,
     direction: params.direction,
     outcome_label: params.outcome_label,
-    entry_price: params.entry_price,
+    entry_price: recordedPrice,
     amount_usd: params.amount_usd,
     is_paper: false,
     status: 'OPEN',
@@ -290,7 +379,7 @@ export async function executeBet(
     edge: params.edge ?? null,
     confidence: params.confidence ?? null,
     clob_order_id: orderResult.orderId || null,
-    order_status: orderResult.status || 'PENDING',
+    order_status: finalStatus,
     placed_at: new Date().toISOString(),
   }).select('id').single();
 
@@ -300,16 +389,17 @@ export async function executeBet(
       success: true, // Order WAS placed on CLOB
       is_paper: false,
       clob_order_id: orderResult.orderId,
-      order_status: orderResult.status,
+      order_status: finalStatus,
       error: `Order placed but DB insert failed: ${error.message}`,
     };
   }
 
+  addLog(`[live] Order confirmed: ${finalStatus}, filled=${filledSize ?? 'pending'}, price=${recordedPrice.toFixed(4)}`);
   return {
     success: true,
     is_paper: false,
     bet_id: data?.id,
     clob_order_id: orderResult.orderId,
-    order_status: orderResult.status,
+    order_status: finalStatus,
   };
 }

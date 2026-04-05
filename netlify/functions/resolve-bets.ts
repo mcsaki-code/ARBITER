@@ -120,7 +120,8 @@ export const handler = schedule('0 * * * *', async () => {
 
   let resolved = 0;
   let totalPnl = 0;       // ALL resolved P&L (for logging)
-  let v3Pnl = 0;          // Only v3 bets P&L (for bankroll updates)
+  let v3Pnl = 0;          // Only v3 PAPER bets P&L (for paper bankroll updates)
+  let livePnl = 0;        // Live bets P&L (tracked separately, does NOT affect paper bankroll)
 
   for (const bet of openBets) {
     const market = bet.markets;
@@ -260,13 +261,20 @@ export const handler = schedule('0 * * * *', async () => {
     resolved++;
     totalPnl += pnl;
 
-    // Only count v3 bets toward bankroll updates
-    const betPlacedAt = bet.placed_at ? new Date(bet.placed_at) : null;
-    const isV3Bet = !v3StartDate || (betPlacedAt && betPlacedAt >= v3StartDate);
-    if (isV3Bet) {
-      v3Pnl += pnl;
+    // Separate tracking: live bets never touch paper_bankroll
+    const isLiveBet = bet.is_paper === false;
+    if (isLiveBet) {
+      livePnl += pnl;
+      console.log(`[resolve-bets] LIVE bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — tracked separately from paper bankroll`);
     } else {
-      console.log(`[resolve-bets] Pre-v3 bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — excluded from bankroll`);
+      // Only count v3 paper bets toward paper bankroll updates
+      const betPlacedAt = bet.placed_at ? new Date(bet.placed_at) : null;
+      const isV3Bet = !v3StartDate || (betPlacedAt && betPlacedAt >= v3StartDate);
+      if (isV3Bet) {
+        v3Pnl += pnl;
+      } else {
+        console.log(`[resolve-bets] Pre-v3 bet ${bet.id.substring(0, 8)} resolved: $${pnl.toFixed(2)} — excluded from bankroll`);
+      }
     }
 
     // Record outcome for circuit breaker (tracks consecutive losses)
@@ -338,8 +346,25 @@ export const handler = schedule('0 * * * *', async () => {
     console.log(
       `[resolve-bets] Updated bankroll $${bankroll} -> $${newBankroll}, win rate ${winRate}%`
     );
+
+    // Track live P&L separately if any live bets resolved
+    if (livePnl !== 0) {
+      const { data: livePnlRow } = await supabase
+        .from('system_config')
+        .select('value')
+        .eq('key', 'live_total_pnl')
+        .single();
+      const currentLivePnl = parseFloat(livePnlRow?.value || '0');
+      const newLivePnl = Math.round((currentLivePnl + livePnl) * 100) / 100;
+      await supabase.from('system_config').upsert({
+        key: 'live_total_pnl',
+        value: newLivePnl.toString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'key' });
+      console.log(`[resolve-bets] Live P&L updated: $${currentLivePnl} -> $${newLivePnl} (session: $${livePnl.toFixed(2)})`);
+    }
   }
 
-  console.log(`[resolve-bets] Done. Resolved ${resolved} bets, PnL $${totalPnl.toFixed(2)}`);
+  console.log(`[resolve-bets] Done. Resolved ${resolved} bets, PnL $${totalPnl.toFixed(2)} (paper: $${v3Pnl.toFixed(2)}, live: $${livePnl.toFixed(2)})`);
   return { statusCode: 200 };
 });
