@@ -23,6 +23,13 @@ export async function GET() {
         'learning_summary',
         'v3_start_date',
         'paper_bankroll',
+        // V2 expert dimensions
+        'kelly_boost_high_high',
+        'kelly_boost_medium_high',
+        'kelly_boost_low_high',
+        'learning_sigma_accuracy',
+        'forecast_next_cycle',
+        'sigma_adjustments',
       ]);
 
     const config: Record<string, { value: string; updated_at: string }> = {};
@@ -172,12 +179,39 @@ export async function GET() {
       question: (b.markets as any)?.question || 'Unknown market',
     }));
 
+    // Parse V2 expert fields
+    let sigmaAccuracy: Record<string, { multiplier: number; win_rate: number; n: number }> | null = null;
+    if (config.learning_sigma_accuracy?.value) {
+      try { sigmaAccuracy = JSON.parse(config.learning_sigma_accuracy.value); } catch { /* ignore */ }
+    }
+
+    let forecastNextCycle: string[] | null = null;
+    if (config.forecast_next_cycle?.value) {
+      try { forecastNextCycle = JSON.parse(config.forecast_next_cycle.value); } catch { /* ignore */ }
+    }
+
+    let sigmaAdjustments: string[] | null = null;
+    if (config.sigma_adjustments?.value) {
+      try { sigmaAdjustments = JSON.parse(config.sigma_adjustments.value); } catch { /* ignore */ }
+    }
+
+    const kellyBoosts = {
+      high_high: parseFloat(config.kelly_boost_high_high?.value || '1.0'),
+      medium_high: parseFloat(config.kelly_boost_medium_high?.value || '1.0'),
+      low_high: parseFloat(config.kelly_boost_low_high?.value || '1.0'),
+    };
+
     return NextResponse.json({
       // Learning agent outputs
       insights,
       summary,
       calibrations,
       lastLearningRun: config.learning_insights?.updated_at || null,
+      // V2 expert outputs
+      sigmaAccuracy,
+      forecastNextCycle,
+      sigmaAdjustments,
+      kellyBoosts,
 
       // Live computed stats
       liveStats: {

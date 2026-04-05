@@ -63,6 +63,18 @@ interface RecentBet {
   question: string;
 }
 
+interface SigmaCity {
+  multiplier: number;
+  win_rate: number;
+  n: number;
+}
+
+interface KellyBoosts {
+  high_high: number;
+  medium_high: number;
+  low_high: number;
+}
+
 interface LearningData {
   insights: { generated_at: string; total_insights: number; insights: Insight[] } | null;
   summary: {
@@ -75,6 +87,11 @@ interface LearningData {
   } | null;
   calibrations: Calibration[];
   lastLearningRun: string | null;
+  // V2 expert fields
+  sigmaAccuracy: Record<string, SigmaCity> | null;
+  forecastNextCycle: string[] | null;
+  sigmaAdjustments: string[] | null;
+  kellyBoosts: KellyBoosts;
   liveStats: {
     totalResolved: number;
     totalOpen: number;
@@ -207,6 +224,27 @@ function InsightRow({ insight }: { insight: Insight }) {
   );
 }
 
+function KellyBoostCard({ label, value, conf, agree }: {
+  label: string; value: number; conf: string; agree: string;
+}) {
+  const color = value >= 1.2 ? 'text-arbiter-green' : value <= 0.9 ? 'text-arbiter-red' : 'text-arbiter-amber';
+  const barColor = value >= 1.2 ? 'bg-arbiter-green/70' : value <= 0.9 ? 'bg-arbiter-red/70' : 'bg-arbiter-amber/70';
+  return (
+    <div className="bg-arbiter-elevated border border-arbiter-border/50 rounded-md p-3">
+      <div className="flex items-center justify-between mb-1.5">
+        <div>
+          <span className="text-xs font-medium text-arbiter-text">{label}</span>
+          <div className="text-[10px] text-arbiter-text-3">{conf} conf × {agree} agree</div>
+        </div>
+        <span className={`text-lg font-mono font-semibold ${color}`}>{value.toFixed(2)}x</span>
+      </div>
+      <div className="h-1.5 bg-arbiter-card rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${barColor}`} style={{ width: `${Math.min(100, (value / 1.4) * 100)}%` }} />
+      </div>
+    </div>
+  );
+}
+
 // ============================================================
 // Main Page
 // ============================================================
@@ -214,7 +252,7 @@ function InsightRow({ insight }: { insight: Insight }) {
 export default function LearningPage() {
   const [data, setData] = useState<LearningData | null>(null);
   const [state, setState] = useState<DataState>('loading');
-  const [tab, setTab] = useState<'overview' | 'insights' | 'calibration'>('overview');
+  const [tab, setTab] = useState<'overview' | 'insights' | 'calibration' | 'forecast'>('overview');
 
   const fetchData = useCallback(async () => {
     try {
@@ -239,6 +277,7 @@ export default function LearningPage() {
     { id: 'overview' as const, label: 'Overview' },
     { id: 'insights' as const, label: 'Insights' },
     { id: 'calibration' as const, label: 'Calibration' },
+    { id: 'forecast' as const, label: 'Forecast' },
   ];
 
   return (
@@ -280,6 +319,7 @@ export default function LearningPage() {
         {data && tab === 'overview' && <OverviewTab data={data} />}
         {data && tab === 'insights' && <InsightsTab data={data} />}
         {data && tab === 'calibration' && <CalibrationTab data={data} />}
+        {data && tab === 'forecast' && <ForecastTab data={data} />}
       </DataStateWrapper>
     </div>
   );
@@ -320,6 +360,24 @@ function OverviewTab({ data }: { data: LearningData }) {
           color="text-arbiter-amber"
         />
       </div>
+
+      {/* Kelly Boosts — V2 */}
+      {(data.kellyBoosts.high_high !== 1.0 || data.kellyBoosts.medium_high !== 1.0) && (
+        <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+          <h3 className="text-sm font-medium text-arbiter-text mb-1 flex items-center gap-2">
+            <span className="w-2 h-2 bg-arbiter-amber rounded-full" />
+            Kelly Size Multipliers
+          </h3>
+          <p className="text-xs text-arbiter-text-3 mb-3">
+            Learned from confidence × model agreement interactions. 1.0x = baseline Kelly.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <KellyBoostCard label="Strong Signal" value={data.kellyBoosts.high_high} conf="HIGH" agree="HIGH" />
+            <KellyBoostCard label="Confident" value={data.kellyBoosts.medium_high} conf="MEDIUM" agree="HIGH" />
+            <KellyBoostCard label="Uncertain" value={data.kellyBoosts.low_high} conf="LOW" agree="HIGH" />
+          </div>
+        </div>
+      )}
 
       {/* Key Findings from last learning run */}
       {data.summary?.key_findings && data.summary.key_findings.length > 0 && (
@@ -476,7 +534,10 @@ function OverviewTab({ data }: { data: LearningData }) {
 
 function InsightsTab({ data }: { data: LearningData }) {
   const insights = data.insights?.insights || [];
-  const categories = ['direction', 'city', 'confidence', 'entry_price', 'timing'];
+  const categories = [
+    'direction', 'city', 'implied_multiplier', 'confidence',
+    'confidence_agreement', 'brier_score', 'sigma_accuracy', 'entry_price', 'timing',
+  ];
 
   if (insights.length === 0) {
     return (
@@ -622,6 +683,21 @@ function CalibrationTab({ data }: { data: LearningData }) {
         )}
       </div>
 
+      {/* Sigma Adjustments alert — V2 */}
+      {data.sigmaAdjustments && data.sigmaAdjustments.length > 0 && (
+        <div className="bg-arbiter-elevated border border-arbiter-amber/30 rounded-lg p-4">
+          <h3 className="text-sm font-medium text-arbiter-amber mb-2 flex items-center gap-2">
+            <span className="w-2 h-2 bg-arbiter-amber rounded-full animate-pulse" />
+            Sigma Recalibration Recommended
+          </h3>
+          <div className="space-y-1">
+            {data.sigmaAdjustments.map((adj, i) => (
+              <div key={i} className="text-xs text-arbiter-text-2 pl-3 border-l-2 border-arbiter-amber/40">{adj}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Static tiers reference */}
       <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
         <h3 className="text-sm font-medium text-arbiter-text mb-3">Static Tier Baseline</h3>
@@ -638,8 +714,50 @@ function CalibrationTab({ data }: { data: LearningData }) {
               <span className="text-sm font-mono text-arbiter-text-2">{tier.mult}</span>
             </div>
           ))}
+
         </div>
       </div>
+
+      {/* Sigma Accuracy per city — V2 */}
+      {data.sigmaAccuracy && Object.keys(data.sigmaAccuracy).length > 0 && (
+        <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+          <h3 className="text-sm font-medium text-arbiter-text mb-1 flex items-center gap-2">
+            <span className="w-2 h-2 bg-arbiter-amber rounded-full" />
+            Per-City Sigma Accuracy
+          </h3>
+          <p className="text-xs text-arbiter-text-3 mb-3">
+            Compares realized win rate to model_prob predictions. &gt;1.0x = model underestimating edge; &lt;1.0x = overconfident.
+          </p>
+          <div className="space-y-2">
+            {Object.entries(data.sigmaAccuracy)
+              .sort(([, a], [, b]) => b.multiplier - a.multiplier)
+              .map(([city, info]) => (
+                <div key={city} className="flex items-center justify-between py-2 border-b border-arbiter-border/30 last:border-0">
+                  <div>
+                    <span className="text-sm text-arbiter-text capitalize">{city}</span>
+                    <span className="text-xs text-arbiter-text-3 ml-2">
+                      {pct(info.win_rate)} WR · n={info.n}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-20 h-1.5 bg-arbiter-elevated rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${
+                          info.multiplier >= 1.1 ? 'bg-arbiter-green/70' :
+                          info.multiplier <= 0.8 ? 'bg-arbiter-red/70' : 'bg-arbiter-amber/70'
+                        }`}
+                        style={{ width: `${Math.min(100, (info.multiplier / 2.0) * 100)}%` }}
+                      />
+                    </div>
+                    <span className={`text-sm font-mono font-medium ${multiplierColor(info.multiplier)}`}>
+                      {info.multiplier.toFixed(2)}x
+                    </span>
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Learning cycle explanation */}
       <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
@@ -647,10 +765,11 @@ function CalibrationTab({ data }: { data: LearningData }) {
         <div className="flex flex-col gap-2">
           {[
             { step: '1', label: 'Resolve', desc: 'Bets settle against actual outcomes' },
-            { step: '2', label: 'Analyze', desc: 'Learning agent evaluates 5 dimensions daily at 6 AM UTC' },
-            { step: '3', label: 'Calibrate', desc: 'City multipliers adjusted ±10% based on win rate' },
-            { step: '4', label: 'Apply', desc: 'Next analysis cycle uses updated weights' },
-            { step: '5', label: 'Bet', desc: 'Place-bets uses ensemble Kelly with calibrated sizing' },
+            { step: '2', label: 'Analyze', desc: 'Learning agent evaluates 8 dimensions daily at 6 AM UTC' },
+            { step: '3', label: 'Calibrate', desc: 'City multipliers adjusted ±10% based on win rate vs model_prob' },
+            { step: '4', label: 'Kelly Tune', desc: 'Confidence × agreement interactions auto-adjust bet sizing' },
+            { step: '5', label: 'Apply', desc: 'Next analysis cycle uses updated weights' },
+            { step: '6', label: 'Bet', desc: 'Place-bets uses ensemble Kelly with calibrated sizing' },
           ].map((item) => (
             <div key={item.step} className="flex items-center gap-3">
               <div className="w-6 h-6 rounded-full bg-arbiter-elevated border border-arbiter-border flex items-center justify-center text-xs font-mono text-arbiter-amber shrink-0">
@@ -659,6 +778,112 @@ function CalibrationTab({ data }: { data: LearningData }) {
               <div>
                 <span className="text-sm text-arbiter-text">{item.label}</span>
                 <span className="text-xs text-arbiter-text-3 ml-2">{item.desc}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Forecast Tab — V2 Expert Edition
+// ============================================================
+
+function ForecastTab({ data }: { data: LearningData }) {
+  const forecast = data.forecastNextCycle;
+  const insights = data.insights?.insights || [];
+  const impliedInsights = insights.filter((i) => i.category === 'implied_multiplier');
+  const brierInsights = insights.filter((i) => i.category === 'brier_score');
+
+  return (
+    <div className="space-y-6">
+      {/* Next Cycle Forecast */}
+      <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+        <h3 className="text-sm font-medium text-arbiter-text mb-1 flex items-center gap-2">
+          <span className="w-2 h-2 bg-arbiter-amber rounded-full" />
+          AI Forecast — Next Learning Cycle
+        </h3>
+        <p className="text-xs text-arbiter-text-3 mb-4">
+          Generated by the learning agent based on current patterns. Updated at 6 AM UTC daily.
+        </p>
+
+        {!forecast || forecast.length === 0 ? (
+          <div className="text-center py-8">
+            <div className="text-sm text-arbiter-text-2 mb-2">No forecast available yet</div>
+            <div className="text-xs text-arbiter-text-3">
+              The learning agent needs at least 10 resolved bets to generate a forecast.
+              Once enough bets resolve, predictions about calibration changes, edge patterns,
+              and recommended focus areas will appear here.
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {forecast.map((line, i) => (
+              <div key={i} className="flex items-start gap-3 py-2 border-b border-arbiter-border/30 last:border-0">
+                <div className="w-6 h-6 rounded-full bg-arbiter-elevated border border-arbiter-amber/40 flex items-center justify-center text-xs font-mono text-arbiter-amber shrink-0 mt-0.5">
+                  {i + 1}
+                </div>
+                <div className="text-sm text-arbiter-text-2 leading-relaxed">{line}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Implied Multiplier sweet spots */}
+      {impliedInsights.length > 0 && (
+        <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+          <h3 className="text-sm font-medium text-arbiter-text mb-1">Implied Multiplier Sweet Spots</h3>
+          <p className="text-xs text-arbiter-text-3 mb-3">
+            our_probability ÷ market_price. High multiplier = market severely underpricing us.
+          </p>
+          <div className="space-y-0">
+            {impliedInsights.map((insight, i) => (
+              <InsightRow key={i} insight={insight} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Brier Score Calibration */}
+      {brierInsights.length > 0 && (
+        <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+          <h3 className="text-sm font-medium text-arbiter-text mb-1">Brier Score Calibration</h3>
+          <p className="text-xs text-arbiter-text-3 mb-3">
+            Measures probability accuracy. Lower = better. 0.0 = perfect, 0.25 = random coin flip.
+            Overconfident means we assign too much probability and lose more than expected.
+          </p>
+          <div className="space-y-0">
+            {brierInsights.map((insight, i) => (
+              <InsightRow key={i} insight={insight} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* What the agent looks for */}
+      <div className="bg-arbiter-card border border-arbiter-border rounded-lg p-4">
+        <h3 className="text-sm font-medium text-arbiter-text mb-3">8 Dimensions Analyzed</h3>
+        <div className="space-y-2">
+          {[
+            { num: '1', name: 'Direction', desc: 'BUY_YES vs BUY_NO win rate — currently BUY_NO is blocked (0% WR)' },
+            { num: '2', name: 'City Calibration', desc: 'Per-city edge multipliers based on historical win rates (±10%/cycle)' },
+            { num: '3', name: 'Implied Multiplier', desc: 'our_prob ÷ market_price — the primary alpha signal for market mispricing' },
+            { num: '4', name: 'Confidence Tier', desc: 'HIGH/MEDIUM/LOW tier performance and expected vs realized accuracy' },
+            { num: '5', name: 'Entry Price', desc: 'Sweet spots in entry price distribution — some ranges outperform systematically' },
+            { num: '6', name: 'Conf × Agreement', desc: 'Interaction of confidence tier × model agreement → auto-tunes Kelly size' },
+            { num: '7', name: 'Brier Score', desc: 'Probability calibration per tier — catches overconfidence before it bleeds' },
+            { num: '8', name: 'Sigma Accuracy', desc: 'Realized win rate vs model_prob expectations per city (σ recalibration)' },
+          ].map((dim) => (
+            <div key={dim.num} className="flex items-start gap-3 py-1.5">
+              <div className="w-5 h-5 rounded bg-arbiter-elevated border border-arbiter-border flex items-center justify-center text-[10px] font-mono text-arbiter-amber shrink-0 mt-0.5">
+                {dim.num}
+              </div>
+              <div>
+                <span className="text-sm text-arbiter-text">{dim.name}</span>
+                <span className="text-xs text-arbiter-text-3 ml-2">{dim.desc}</span>
               </div>
             </div>
           ))}
