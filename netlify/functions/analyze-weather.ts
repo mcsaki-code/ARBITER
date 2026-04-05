@@ -38,7 +38,7 @@ export const handler = schedule('*/20 * * * *', async () => {
     .select('*, weather_cities(*)')
     .eq('is_active', true)
     .not('city_id', 'is', null)
-    .neq('category', 'temperature')   // temperature markets handled by Phase 2 statistical analysis
+    .in('category', ['temperature', 'precipitation', 'snowfall', 'weather'])  // V3: analyze ALL weather categories
     .gt('resolution_date', minResolutionDate);
 
   if (!markets || markets.length === 0) {
@@ -116,9 +116,36 @@ export const handler = schedule('*/20 * * * *', async () => {
       console.log(`[analyze-weather-v2] Skip ${city.name} — ${hoursRemaining < 0 ? 'already resolved' : `only ${hoursRemaining.toFixed(1)}h left`}`);
       continue;
     }
-    if (market.liquidity_usd < 5000) {
+    if (market.liquidity_usd < 400) {
       console.log(`[analyze-weather-v2] Skip ${city.name} — low liquidity $${market.liquidity_usd}`);
       continue;
+    }
+
+    // Refresh market prices from Gamma API — DB prices can be 30+ minutes stale
+    if (market.gamma_market_id) {
+      try {
+        const freshRes = await fetch(`https://gamma-api.polymarket.com/markets/${market.gamma_market_id}`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (freshRes.ok) {
+          const freshData = await freshRes.json() as { outcomePrices?: string; liquidity?: string };
+          if (freshData.outcomePrices) {
+            try {
+              const freshPrices = JSON.parse(freshData.outcomePrices).map((p: string) => parseFloat(p));
+              if (freshPrices.length === market.outcome_prices.length) {
+                market.outcome_prices = freshPrices;
+                console.log(`[analyze-weather-v2] Refreshed prices for ${city.name}: ${freshPrices.map((p: number) => p.toFixed(3)).join(', ')}`);
+              }
+            } catch { /* keep DB prices */ }
+          }
+          if (freshData.liquidity) {
+            const freshLiq = parseFloat(freshData.liquidity);
+            if (!isNaN(freshLiq) && freshLiq > 0) market.liquidity_usd = freshLiq;
+          }
+        }
+      } catch {
+        console.log(`[analyze-weather-v2] Price refresh failed for ${city.name} — using DB prices`);
+      }
     }
 
     const outcomesList = market.outcomes
