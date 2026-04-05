@@ -79,6 +79,53 @@ interface AnalysisRow {
   best_outcome_label?: string | null;
   market_price?: number | null;
   model_agreement?: string | null;
+  ensemble_agreement_score?: number | null;
+}
+
+/** Dynamic sigma scaling — must match analyze-weather.ts getDynamicSigma() */
+function getDynamicSigma(hoursRemaining: number): number {
+  if (hoursRemaining <= 6) return 0.8;
+  if (hoursRemaining <= 12) return 1.2;
+  if (hoursRemaining <= 24) return 1.8;
+  if (hoursRemaining <= 48) return 2.5;
+  if (hoursRemaining <= 72) return 3.2;
+  if (hoursRemaining <= 120) return 4.0;
+  if (hoursRemaining <= 168) return 4.8;
+  return 5.5;
+}
+
+/**
+ * Ensemble-driven Kelly multiplier.
+ * - Model agreement HIGH + short lead time → boost (up to 1.3x)
+ * - Model agreement LOW or long lead time → reduce (down to 0.6x)
+ * - Tighter sigma = more certainty = larger position justified
+ */
+function getEnsembleKellyMultiplier(
+  modelAgreement: string | null | undefined,
+  hoursRemaining: number
+): number {
+  const sigma = getDynamicSigma(hoursRemaining);
+
+  // Base multiplier from model agreement
+  let agreementMult = 1.0;
+  if (modelAgreement === 'HIGH') agreementMult = 1.2;
+  else if (modelAgreement === 'LOW') agreementMult = 0.7;
+  // MEDIUM stays at 1.0
+
+  // Sigma-based scaling: tighter sigma → boost, wider → reduce
+  // sigma ≤ 1.5°F (strong agreement, short lead) → 1.3x
+  // sigma 1.5-3.0°F → 1.0x (neutral)
+  // sigma > 3.5°F → 0.7x (wide uncertainty, shrink position)
+  let sigmaMult = 1.0;
+  if (sigma <= 1.5) sigmaMult = 1.3;
+  else if (sigma <= 2.0) sigmaMult = 1.15;
+  else if (sigma <= 3.0) sigmaMult = 1.0;
+  else if (sigma <= 4.0) sigmaMult = 0.85;
+  else sigmaMult = 0.7;
+
+  // Combine: agreement × sigma, capped at [0.6, 1.4]
+  const combined = agreementMult * sigmaMult;
+  return Math.max(0.6, Math.min(1.4, combined));
 }
 
 export const handler = schedule('*/15 * * * *', async () => {
@@ -191,7 +238,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Stop conditions
     if (totalDeployed >= maxDailyExposure) break;
     if (todayBetCount + placed >= MAX_BETS_PER_DAY) break;
-    if (Date.now() - startTime > 120000) break;
+    if (Date.now() - startTime > 20000) break;
 
     // Skip if we already have an open bet on this market
     if (openMarketIds.has(analysis.market_id)) {
@@ -215,18 +262,12 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
       .from('markets')
-      .select('question, liquidity_usd, is_active, resolution_date, gamma_market_id')
+      .select('question, liquidity_usd, is_active, resolution_date')
       .eq('id', analysis.market_id)
       .single();
 
     if (!currentMarket || !currentMarket.is_active) {
       console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — market inactive`);
-      continue;
-    }
-
-    // gamma_market_id is REQUIRED for resolution — without it, bets are unresolvable
-    if (!currentMarket.gamma_market_id) {
-      console.log(`[place-bets] Skip ${analysis.market_id.substring(0, 8)} — no gamma_market_id (unresolvable)`);
       continue;
     }
 
@@ -269,13 +310,20 @@ export const handler = schedule('*/15 * * * *', async () => {
     // ── Kelly Sizing ──────────────────────────────────────────
     // 1/8th Kelly with confidence scaling. Tail bets get 1.5x boost
     // because asymmetric payout justifies slightly larger positions.
+    // V3.1: Ensemble-driven Kelly multiplier — tighter sigma + high
+    // agreement = larger position, wide sigma + low agreement = smaller.
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
       const confMult = analysis.confidence === 'HIGH' ? 0.8 : 0.5; // MEDIUM
       const tailBoost = isTailBet ? 1.5 : 1.0;
+      const ensembleMult = getEnsembleKellyMultiplier(analysis.model_agreement, hoursLeft);
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
-      const adjustedKelly = Math.min(cappedKelly * confMult * tailBoost, 0.03);
+      const adjustedKelly = Math.min(cappedKelly * confMult * tailBoost * ensembleMult, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
+
+      if (ensembleMult !== 1.0) {
+        console.log(`[place-bets] Ensemble Kelly: agreement=${analysis.model_agreement}, sigma=${getDynamicSigma(hoursLeft).toFixed(1)}°F, mult=${ensembleMult.toFixed(2)}`);
+      }
     }
 
     // Fallback sizing

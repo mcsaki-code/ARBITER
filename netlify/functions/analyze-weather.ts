@@ -382,6 +382,9 @@ export const handler = schedule('*/20 * * * *', async () => {
         ? new Date(market.resolution_date).toISOString().split('T')[0]
         : null;
 
+      // Compute dynamic sigma for storage (used by place-bets for Kelly scaling)
+      const sigmaForStorage = getDynamicSigma(hoursRemaining);
+
       // Store analysis — use adjusted edge (post-calibration)
       await supabase.from('weather_analyses').insert({
         market_id: market.id,
@@ -425,6 +428,23 @@ export const handler = schedule('*/20 * * * *', async () => {
   // Phase 2 (temperature_statistical) now runs in analyze-temperature.ts (its own scheduled function)
   return { statusCode: 200 };
 });
+
+// ============================================================
+// Dynamic sigma scaling — forecast uncertainty by lead time
+// Derived from top bot strategies (gopfan2, meropi, 1pixel)
+// Short lead = tight sigma = confident bets
+// Long lead = wide sigma = conservative or pass
+// ============================================================
+function getDynamicSigma(hoursRemaining: number): number {
+  if (hoursRemaining <= 6) return 0.8;       // Day-of: very tight
+  if (hoursRemaining <= 12) return 1.2;      // Same-day evening
+  if (hoursRemaining <= 24) return 1.8;      // Next-day morning
+  if (hoursRemaining <= 48) return 2.5;      // 2-day out
+  if (hoursRemaining <= 72) return 3.2;      // 3-day out
+  if (hoursRemaining <= 120) return 4.0;     // 5-day out
+  if (hoursRemaining <= 168) return 4.8;     // 7-day out
+  return 5.5;                                 // 10+ days out
+}
 
 // ============================================================
 // Market type detection from question text
@@ -601,6 +621,18 @@ Respond ONLY in JSON:
     : consensus.consensus_high_f;
   const calibrationContext = getCalibrationContext(city.name);
 
+  // Dynamic sigma scaling — forecast uncertainty grows with lead time
+  // Top bots (gopfan2, meropi) scale from ~0.8°F at <6h to ~5.5°F at 10d+
+  const sigmaF = getDynamicSigma(hoursRemaining);
+  const sigmaSection = `
+FORECAST UNCERTAINTY (dynamic sigma based on ${Math.round(hoursRemaining)}h lead time):
+- 1-sigma uncertainty: ±${sigmaF.toFixed(1)}°F around consensus
+- Use this to scale bracket probability distributions
+- Brackets within 1σ of consensus: higher confidence
+- Brackets beyond 2σ: low probability unless ensemble supports it
+- CRITICAL: shorter lead time = tighter sigma = sharper probability estimates
+`;
+
   return `You are ARBITER's expert meteorological analyst. Compare multi-model forecast ensemble to Polymarket temperature brackets and identify mispricings.
 
 CITY: ${city.name}
@@ -608,8 +640,9 @@ DATE: ${date}
 MARKET TYPE: Daily ${tempField} Temperature
 
 ${calibrationContext}
-
-DETERMINISTIC FORECAST MODELS:
+${ensembleSection}
+${sigmaSection}
+DETERMINISTIC FORECAST MODELS (use as SECONDARY validation, NOT primary):
 - NWS official:  ${models.nws?.temp_high_f ?? 'N/A'}°F high / ${models.nws?.temp_low_f ?? 'N/A'}°F low
 - GFS:          ${models.gfs?.temp_high_f ?? 'N/A'}°F high / ${models.gfs?.temp_low_f ?? 'N/A'}°F low
 - ECMWF:        ${models.ecmwf?.temp_high_f ?? 'N/A'}°F high / ${models.ecmwf?.temp_low_f ?? 'N/A'}°F low
@@ -618,7 +651,7 @@ DETERMINISTIC FORECAST MODELS:
 - Weighted consensus ${tempField.toLowerCase()}: ${tempValue}°F
 - Model spread: ${consensus.model_spread_f}°F
 - Agreement:    ${consensus.agreement}
-${ensembleSection}
+
 POLYMARKET BRACKETS (outcome → current YES price):
 ${outcomesList}
 
@@ -634,14 +667,16 @@ METEOROLOGICAL CONTEXT:
 - Model spread indicates forecast uncertainty: ≤2°F = HIGH confidence, 2-5°F = MEDIUM, >5°F = LOW
 - Weather transitions (fronts passing) create the widest forecast spreads and biggest mispricings
 - Record-breaking temps are systematically underpriced by markets
+- USE DYNAMIC SIGMA (±${sigmaF.toFixed(1)}°F) to scale your probability distribution — do NOT use a fixed uncertainty
 
 TASK:
 1. If ensemble data available: use member distribution as PRIMARY probability estimate for each bracket
-2. If no ensemble: estimate bracket probabilities from deterministic model consensus ± historical error
-3. Calculate edge = true_prob - market_price per bracket
-4. Select the single best bet (highest edge × confidence)
-5. Set auto_eligible = true if agreement=HIGH or MEDIUM, confidence=HIGH or MEDIUM, edge >= 0.04
-6. SKIP if: agreement=LOW, liquidity<$10k, hours_remaining<2, edge<0.02
+2. Use dynamic sigma (±${sigmaF.toFixed(1)}°F) to build probability distribution around consensus
+3. Cross-validate ensemble probs against deterministic models — flag disagreements
+4. Calculate edge = true_prob - market_price per bracket
+5. Select the single best bet (highest edge × confidence)
+6. Set auto_eligible = true if agreement=HIGH or MEDIUM, confidence=HIGH or MEDIUM, edge >= 0.04
+7. SKIP if: agreement=LOW, liquidity<$10k, hours_remaining<2, edge<0.02
 
 Respond ONLY in JSON:
 {
