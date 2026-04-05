@@ -65,9 +65,9 @@ export const handler = schedule('*/20 * * * *', async () => {
   });
 
   let processed = 0;
-  for (const market of sortedMarkets.slice(0, 8)) {
-    // Time guard: 26s — Phase 2 statistical analysis now runs in its own function
-    if (Date.now() - startTime > 26000) break;
+  for (const market of sortedMarkets.slice(0, 20)) {
+    // Time guard: 120s — Netlify scheduled functions have 15-min timeout, not 10s sync limit
+    if (Date.now() - startTime > 120000) break;
 
     const city = market.weather_cities;
     if (!city) continue;

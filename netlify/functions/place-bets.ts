@@ -191,7 +191,7 @@ export const handler = schedule('*/15 * * * *', async () => {
     // Stop conditions
     if (totalDeployed >= maxDailyExposure) break;
     if (todayBetCount + placed >= MAX_BETS_PER_DAY) break;
-    if (Date.now() - startTime > 20000) break;
+    if (Date.now() - startTime > 120000) break;
 
     // Skip if we already have an open bet on this market
     if (openMarketIds.has(analysis.market_id)) {
