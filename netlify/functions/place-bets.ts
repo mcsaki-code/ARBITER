@@ -352,11 +352,13 @@ export const handler = schedule('*/15 * * * *', async () => {
     // agreement = larger position, wide sigma + low agreement = smaller.
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
-      const confMult = analysis.confidence === 'HIGH' ? 0.8 : 0.5; // MEDIUM
+      // NOTE: analysis.kelly_fraction from computeKelly() already includes
+      // confidence multiplier (HIGH=0.8, MEDIUM=0.5, LOW=0.2), calibration
+      // discount, and weather subtype scaling. Do NOT re-apply confMult here.
       const tailBoost = isTailBet ? 1.5 : 1.0;
       const ensembleMult = getEnsembleKellyMultiplier(analysis.model_agreement, hoursLeft);
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
-      const adjustedKelly = Math.min(cappedKelly * confMult * tailBoost * ensembleMult, 0.03);
+      const adjustedKelly = Math.min(cappedKelly * tailBoost * ensembleMult, 0.03);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
 
       if (ensembleMult !== 1.0) {
