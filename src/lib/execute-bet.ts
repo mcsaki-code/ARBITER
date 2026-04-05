@@ -188,6 +188,7 @@ export async function executeBet(
         is_paper: true,
         status: 'OPEN',
         order_status: 'NONE',
+        condition_id: params.condition_id ?? null,
         edge: params.edge ?? null,
         confidence: params.confidence ?? null,
         placed_at: new Date().toISOString(),
@@ -197,8 +198,26 @@ export async function executeBet(
     }
     addLog(`[live] Wallet OK: $${walletCheck.usdcBalance.toFixed(2)} USDC, ${walletCheck.maticBalance.toFixed(4)} MATIC`);
   } catch (err) {
-    addLog(`[live] Wallet check error (non-blocking): ${err instanceof Error ? err.message : String(err)}`);
-    // Continue anyway — let CLOB reject if funds insufficient
+    addLog(`[live] Wallet check error: ${err instanceof Error ? err.message : String(err)} — falling back to paper`);
+    // Wallet check is a blocker — if we can't verify funds, don't risk a CLOB order
+    const { data } = await supabase.from('bets').insert({
+      market_id: params.market_id,
+      analysis_id: params.analysis_id,
+      category: params.category,
+      direction: params.direction,
+      outcome_label: params.outcome_label,
+      entry_price: params.entry_price,
+      amount_usd: params.amount_usd,
+      is_paper: true,
+      status: 'OPEN',
+      order_status: 'NONE',
+      condition_id: params.condition_id ?? null,
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
+      placed_at: new Date().toISOString(),
+      notes: `Live order skipped: wallet check error - ${err instanceof Error ? err.message : String(err)}`,
+    }).select('id').single();
+    return { success: !!data, is_paper: true, bet_id: data?.id, error: `Wallet check error: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   // We need the condition_id to place a CLOB order
@@ -206,12 +225,15 @@ export async function executeBet(
 
   if (!conditionId) {
     // Look it up from markets table
-    const { data: market } = await supabase
+    const { data: market, error: mktErr } = await supabase
       .from('markets')
       .select('condition_id')
       .eq('id', params.market_id)
       .single();
 
+    if (mktErr) {
+      addLog(`[live] condition_id lookup failed: ${mktErr.message}`);
+    }
     conditionId = market?.condition_id;
   }
 
@@ -241,6 +263,29 @@ export async function executeBet(
       bet_id: data?.id,
       error: error?.message,
     };
+  }
+
+  // Validate direction before sending to CLOB
+  if (params.direction !== 'BUY_YES' && params.direction !== 'BUY_NO') {
+    addLog(`[live] Invalid direction "${params.direction}" — falling back to paper`);
+    const { data } = await supabase.from('bets').insert({
+      market_id: params.market_id,
+      analysis_id: params.analysis_id,
+      category: params.category,
+      direction: params.direction,
+      outcome_label: params.outcome_label,
+      entry_price: params.entry_price,
+      amount_usd: params.amount_usd,
+      is_paper: true,
+      status: 'OPEN',
+      order_status: 'NONE',
+      condition_id: conditionId ?? null,
+      edge: params.edge ?? null,
+      confidence: params.confidence ?? null,
+      placed_at: new Date().toISOString(),
+      notes: `Live order skipped: invalid direction "${params.direction}"`,
+    }).select('id').single();
+    return { success: false, is_paper: true, bet_id: data?.id, error: `Invalid direction: ${params.direction}` };
   }
 
   // Dynamically load CLOB module (avoids breaking paper-only deployments)
@@ -274,6 +319,7 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
@@ -297,6 +343,7 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
@@ -355,6 +402,7 @@ export async function executeBet(
       is_paper: true,
       status: 'OPEN',
       order_status: 'NONE',
+      condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
       placed_at: new Date().toISOString(),
