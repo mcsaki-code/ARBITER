@@ -113,12 +113,14 @@ interface LearningData {
 // Helpers
 // ============================================================
 
-function fmt(n: number, decimals?: number): string {
+function fmt(n: number | null | undefined, decimals?: number): string {
+  if (n == null || Number.isNaN(n)) return '0';
   const d = decimals !== undefined ? decimals : (Number.isInteger(n) ? 0 : 2);
   return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 }
 
-function pct(n: number): string {
+function pct(n: number | null | undefined): string {
+  if (n == null || Number.isNaN(n)) return '0%';
   return `${(n * 100).toFixed(0)}%`;
 }
 
@@ -515,8 +517,8 @@ function OverviewTab({ data }: { data: LearningData }) {
                 </div>
                 <div className="flex items-center gap-3 shrink-0 ml-2">
                   <span className="text-xs text-arbiter-text-3 font-mono">{bet.direction}</span>
-                  <span className={`text-sm font-mono ${pnlColor(bet.pnl)}`}>
-                    {bet.pnl >= 0 ? '+' : ''}${fmt(bet.pnl)}
+                  <span className={`text-sm font-mono ${pnlColor(bet.pnl ?? 0)}`}>
+                    {(bet.pnl ?? 0) >= 0 ? '+' : ''}${fmt(bet.pnl ?? 0)}
                   </span>
                 </div>
               </div>
@@ -730,6 +732,7 @@ function CalibrationTab({ data }: { data: LearningData }) {
           </p>
           <div className="space-y-2">
             {Object.entries(data.sigmaAccuracy)
+              .filter(([, info]) => info && typeof info === 'object' && typeof info.multiplier === 'number')
               .sort(([, a], [, b]) => b.multiplier - a.multiplier)
               .map(([city, info]) => (
                 <div key={city} className="flex items-center justify-between py-2 border-b border-arbiter-border/30 last:border-0">

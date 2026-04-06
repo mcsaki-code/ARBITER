@@ -219,29 +219,36 @@ export const handler = schedule('0 * * * *', async () => {
       pnl = Math.round(bet.amount_usd * 200 * 100) / 100;
     }
 
-    // Brier score = (predicted_prob - actual_outcome)^2
-    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality.
-    const predictedProb = bet.direction === 'BUY_YES'
-      ? (bet.entry_price ?? 0.5)
-      : 1 - (bet.entry_price ?? 0.5);
-    const actualOutcome = betWon ? 1.0 : 0.0;
-    const brierScore = Math.pow(predictedProb - actualOutcome, 2);
-
-    // Pull edge and confidence from the weather analysis
+    // Pull edge, confidence, and TRUE_PROB from the weather analysis.
+    // CRITICAL: predicted_prob must be our model's true_prob, NOT the market
+    // entry_price. Using entry_price corrupts learning — it just measures the
+    // market's calibration, not ours, and makes Brier scoring meaningless.
     let analysisEdge: number | null = null;
     let analysisConfidence: string | null = null;
+    let analysisTrueProb: number | null = null;
 
     if (bet.analysis_id) {
       const { data: analysis } = await supabase
         .from('weather_analyses')
-        .select('edge, confidence')
+        .select('edge, confidence, true_prob')
         .eq('id', bet.analysis_id)
         .single();
       if (analysis) {
         analysisEdge = analysis.edge;
         analysisConfidence = analysis.confidence;
+        analysisTrueProb = analysis.true_prob;
       }
     }
+
+    // Brier score = (predicted_prob - actual_outcome)^2
+    // Lower is better: 0 = perfect, 1 = worst. Tracks calibration quality.
+    // For BUY_YES we win when our outcome occurs; for BUY_NO it's the inverse.
+    const ourYesProb = analysisTrueProb != null && analysisTrueProb > 0 && analysisTrueProb < 1
+      ? analysisTrueProb
+      : (bet.entry_price ?? 0.5); // fallback for legacy bets without analysis
+    const predictedProb = bet.direction === 'BUY_YES' ? ourYesProb : 1 - ourYesProb;
+    const actualOutcome = betWon ? 1.0 : 0.0;
+    const brierScore = Math.pow(predictedProb - actualOutcome, 2);
 
     await supabase
       .from('bets')

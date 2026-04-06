@@ -15,6 +15,8 @@ export async function GET() {
     const supabase = getSupabaseAdmin();
 
     // 1. Get learning insights and summary from system_config
+    // NOTE: forecast_next_cycle and sigma_adjustments are stored NESTED inside
+    // learning_summary JSON, not as separate keys. We unwrap them below.
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value, updated_at')
@@ -28,8 +30,6 @@ export async function GET() {
         'kelly_boost_medium_high',
         'kelly_boost_low_high',
         'learning_sigma_accuracy',
-        'forecast_next_cycle',
-        'sigma_adjustments',
       ]);
 
     const config: Record<string, { value: string; updated_at: string }> = {};
@@ -61,7 +61,7 @@ export async function GET() {
       } catch { /* ignore parse errors */ }
     }
 
-    let summary = null;
+    let summary: Record<string, unknown> | null = null;
     if (config.learning_summary?.value) {
       try {
         summary = JSON.parse(config.learning_summary.value);
@@ -180,19 +180,36 @@ export async function GET() {
     }));
 
     // Parse V2 expert fields
+    // learning_sigma_accuracy is stored as {generated_at, cities: {...}, note}
+    // — we need to unwrap `.cities` before handing to the UI, else the UI
+    // iterates over generated_at/note strings and crashes on .multiplier.toFixed().
     let sigmaAccuracy: Record<string, { multiplier: number; win_rate: number; n: number }> | null = null;
     if (config.learning_sigma_accuracy?.value) {
-      try { sigmaAccuracy = JSON.parse(config.learning_sigma_accuracy.value); } catch { /* ignore */ }
+      try {
+        const parsed = JSON.parse(config.learning_sigma_accuracy.value);
+        // Support both wrapped ({cities: {...}}) and legacy flat formats
+        const cities = parsed?.cities && typeof parsed.cities === 'object' ? parsed.cities : parsed;
+        // Validate: every value must be a SigmaCity object with multiplier/win_rate/n
+        if (cities && typeof cities === 'object') {
+          const valid: Record<string, { multiplier: number; win_rate: number; n: number }> = {};
+          for (const [k, v] of Object.entries(cities)) {
+            if (v && typeof v === 'object' && typeof (v as { multiplier?: unknown }).multiplier === 'number') {
+              valid[k] = v as { multiplier: number; win_rate: number; n: number };
+            }
+          }
+          sigmaAccuracy = Object.keys(valid).length > 0 ? valid : null;
+        }
+      } catch { /* ignore */ }
     }
 
+    // forecast_next_cycle and sigma_adjustments live INSIDE learning_summary JSON
     let forecastNextCycle: string[] | null = null;
-    if (config.forecast_next_cycle?.value) {
-      try { forecastNextCycle = JSON.parse(config.forecast_next_cycle.value); } catch { /* ignore */ }
-    }
-
     let sigmaAdjustments: string[] | null = null;
-    if (config.sigma_adjustments?.value) {
-      try { sigmaAdjustments = JSON.parse(config.sigma_adjustments.value); } catch { /* ignore */ }
+    if (summary && typeof summary === 'object') {
+      const fc = (summary as Record<string, unknown>).forecast_next_cycle;
+      const sa = (summary as Record<string, unknown>).sigma_adjustments;
+      if (Array.isArray(fc)) forecastNextCycle = fc as string[];
+      if (Array.isArray(sa)) sigmaAdjustments = sa as string[];
     }
 
     const kellyBoosts = {

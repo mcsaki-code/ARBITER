@@ -437,6 +437,8 @@ export const handler = schedule('0 6 * * *', async () => {
   // Perfect calibration: Brier score ~0.2 for 50/50 bets,
   // lower scores = better calibration.
   // ============================================================
+  // Use OUR true_prob from analysis (not market entry_price) for Brier scoring.
+  // Falls back to entry_price only for legacy bets without an attached analysis.
   const betsWithBrierData = bets.filter(b => b.entry_price > 0 && b.entry_price < 1);
   if (betsWithBrierData.length >= 3) {
     // Group by confidence tier and compute avg brier scores
@@ -444,14 +446,17 @@ export const handler = schedule('0 6 * * *', async () => {
     for (const b of betsWithBrierData) {
       const conf = b.confidence || 'UNKNOWN';
       if (!brierByConf[conf]) brierByConf[conf] = [];
-      const predictedProb = b.direction === 'BUY_YES' ? b.entry_price : (1 - b.entry_price);
+      const ourYesProb = b.true_prob != null && b.true_prob > 0 && b.true_prob < 1
+        ? b.true_prob
+        : b.entry_price;
+      const predictedProb = b.direction === 'BUY_YES' ? ourYesProb : (1 - ourYesProb);
       const actual = b.status === 'WON' ? 1.0 : 0.0;
       brierByConf[conf].push(Math.pow(predictedProb - actual, 2));
     }
 
     for (const [conf, scores] of Object.entries(brierByConf)) {
       if (scores.length < 2) continue;
-      const avgBrier = avg(scores.map((s, i) => ({ val: s, i })), x => x.val);
+      const avgBrier = scores.reduce((s, x) => s + x, 0) / scores.length;
       const expectedBrier = conf === 'HIGH' ? 0.15 : conf === 'MEDIUM' ? 0.22 : 0.28;
       const calibrationDelta = avgBrier - expectedBrier;
       insights.push({
@@ -568,6 +573,16 @@ export const handler = schedule('0 6 * * *', async () => {
     }),
     updated_at: new Date().toISOString(),
   }, { onConflict: 'key' });
+
+  // Also persist forecast_next_cycle and sigma_adjustments as separate
+  // top-level keys for direct UI access (the API also reads them out of
+  // learning_summary, but having both improves robustness).
+  await setConfig('forecast_next_cycle', JSON.stringify(forecastLines));
+  await setConfig('sigma_adjustments', JSON.stringify(
+    Object.entries(sigmaInsights)
+      .filter(([, v]) => Math.abs(v.multiplier - 1.0) > 0.15)
+      .map(([city, v]) => `${city}: σ×${v.multiplier.toFixed(2)} (${(v.win_rate * 100).toFixed(0)}% WR, n=${v.n})`)
+  ));
 
   console.log(`[learn-v2] Generated ${insights.length} insights, ${actionedInsights.length} actions taken`);
   for (const i of actionedInsights) {
