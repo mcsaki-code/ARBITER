@@ -481,6 +481,89 @@ export const handler = schedule('0 6 * * *', async () => {
   }
 
   // ============================================================
+  // BRIER DRIFT MONITOR
+  // Catches REAL model breakage that streak-based circuit breakers miss.
+  // Compares trailing-20 Brier to trailing-50 Brier on chronologically
+  // ordered resolved bets. If trailing-20 is materially worse, the model
+  // has drifted (bad deploy, regime change, broken analyzer) and we flag.
+  //
+  // Severity tiers:
+  //   - drift > 0.05  → WARN (write to system_config, surface in UI)
+  //   - drift > 0.10  → AUTO-HALT (set cb_manual_halt = true)
+  // ============================================================
+  {
+    const chronological = [...bets]
+      .filter(b => b.entry_price > 0 && b.entry_price < 1)
+      .sort((a, b) => new Date(a.placed_at).getTime() - new Date(b.placed_at).getTime());
+
+    const brierFor = (b: ResolvedBetWithAnalysis): number => {
+      const ourYes = b.true_prob != null && b.true_prob > 0 && b.true_prob < 1
+        ? b.true_prob
+        : b.entry_price;
+      const pred = b.direction === 'BUY_YES' ? ourYes : (1 - ourYes);
+      const actual = b.status === 'WON' ? 1.0 : 0.0;
+      return Math.pow(pred - actual, 2);
+    };
+
+    const last20 = chronological.slice(-20);
+    const last50 = chronological.slice(-50);
+
+    if (last20.length >= 10 && last50.length >= 20) {
+      const brier20 = last20.reduce((s, b) => s + brierFor(b), 0) / last20.length;
+      const brier50 = last50.reduce((s, b) => s + brierFor(b), 0) / last50.length;
+      const drift = brier20 - brier50;
+
+      let severity: 'OK' | 'WARN' | 'HALT' = 'OK';
+      if (drift > 0.10) severity = 'HALT';
+      else if (drift > 0.05) severity = 'WARN';
+
+      await setConfig('brier_drift', JSON.stringify({
+        generated_at: new Date().toISOString(),
+        brier_trailing_20: Math.round(brier20 * 10000) / 10000,
+        brier_trailing_50: Math.round(brier50 * 10000) / 10000,
+        drift: Math.round(drift * 10000) / 10000,
+        severity,
+        n_20: last20.length,
+        n_50: last50.length,
+        note: severity === 'HALT'
+          ? 'AUTO-HALT: model drift detected — manual reset required'
+          : severity === 'WARN'
+            ? 'Trailing-20 Brier worse than baseline — review model'
+            : 'No drift detected',
+      }));
+
+      if (severity === 'HALT') {
+        // Auto-engage manual halt; operator must reset via manualResume()
+        await setConfig('cb_manual_halt', 'true');
+        console.log(`[learn-v2] BRIER DRIFT HALT: trailing-20=${brier20.toFixed(4)} vs trailing-50=${brier50.toFixed(4)}, drift=${drift.toFixed(4)}`);
+      } else if (severity === 'WARN') {
+        console.log(`[learn-v2] Brier drift WARN: trailing-20=${brier20.toFixed(4)} vs trailing-50=${brier50.toFixed(4)}`);
+      }
+    }
+  }
+
+  // ============================================================
+  // KILL CRITERION CHECK (pre-committed: -15% bankroll @ n=50)
+  // ============================================================
+  {
+    const { data: cfg } = await supabase
+      .from('system_config').select('value').eq('key', 'paper_bankroll_start').single();
+    const startBankroll = parseFloat(cfg?.value || '1000');
+    const killThreshold = -0.15 * startBankroll;
+    if (totalBets >= 50 && totalPnl < killThreshold) {
+      await setConfig('cb_manual_halt', 'true');
+      await setConfig('kill_criterion_triggered', JSON.stringify({
+        triggered_at: new Date().toISOString(),
+        n: totalBets,
+        total_pnl: totalPnl,
+        threshold: killThreshold,
+        note: 'KILL CRITERION HIT: cumulative P&L worse than -15% bankroll after n=50. Manual postmortem required before resuming.',
+      }));
+      console.log(`[learn-v2] KILL CRITERION TRIGGERED: $${totalPnl.toFixed(2)} < $${killThreshold.toFixed(2)} at n=${totalBets}`);
+    }
+  }
+
+  // ============================================================
   // DIMENSION 8: Per-City Sigma Accuracy
   // Learn if our σ assumptions match realized temperature variance.
   // Track how often actual temperature falls within our predicted ±1σ.

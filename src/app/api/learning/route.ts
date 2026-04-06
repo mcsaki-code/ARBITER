@@ -30,6 +30,9 @@ export async function GET() {
         'kelly_boost_medium_high',
         'kelly_boost_low_high',
         'learning_sigma_accuracy',
+        'brier_drift',
+        'kill_criterion_triggered',
+        'cb_manual_halt',
       ]);
 
     const config: Record<string, { value: string; updated_at: string }> = {};
@@ -212,6 +215,17 @@ export async function GET() {
       if (Array.isArray(sa)) sigmaAdjustments = sa as string[];
     }
 
+    // Brier drift + kill criterion + halt status
+    let brierDrift: { brier_trailing_20: number; brier_trailing_50: number; drift: number; severity: string; n_20: number; n_50: number; note: string } | null = null;
+    if (config.brier_drift?.value) {
+      try { brierDrift = JSON.parse(config.brier_drift.value); } catch { /* ignore */ }
+    }
+    let killCriterion: { triggered_at: string; n: number; total_pnl: number; threshold: number; note: string } | null = null;
+    if (config.kill_criterion_triggered?.value) {
+      try { killCriterion = JSON.parse(config.kill_criterion_triggered.value); } catch { /* ignore */ }
+    }
+    const manualHalt = config.cb_manual_halt?.value === 'true';
+
     const kellyBoosts = {
       high_high: parseFloat(config.kelly_boost_high_high?.value || '1.0'),
       medium_high: parseFloat(config.kelly_boost_medium_high?.value || '1.0'),
@@ -229,6 +243,9 @@ export async function GET() {
       forecastNextCycle,
       sigmaAdjustments,
       kellyBoosts,
+      brierDrift,
+      killCriterion,
+      manualHalt,
 
       // Live computed stats
       liveStats: {

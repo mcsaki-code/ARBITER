@@ -7,11 +7,26 @@
 // loss spirals by pausing trading when things go wrong.
 //
 // Rules:
-// 1. 3 consecutive losses → pause 2 hours
-// 2. 5 consecutive losses → pause 12 hours
+// 1. 5 consecutive losses → pause 2 hours
+// 2. 8 consecutive losses → pause 12 hours
 // 3. 15% daily drawdown → halt for rest of day
 // 4. 25% weekly drawdown → halt for rest of week
 // 5. Max 30% peak drawdown → full shutdown until manual reset
+//
+// NOTE on consecutive-loss thresholds (2026-04-06):
+// ARBITER runs a TAIL-BET strategy. Avg predicted prob ~19% means
+// ~81% of bets are EXPECTED to lose. The streak math:
+//   P(3 losses) = 0.81^3 = 53%   ← original 3-loss breaker tripped on normal variance
+//   P(5 losses) = 0.81^5 = 35%
+//   P(8 losses) = 0.81^8 = 19%
+// Streak breakers are meant to catch model drift / bad deploys, NOT
+// expected variance. Dollar drawdown breakers (15%/25%/30%) are the
+// real safety net and remain unchanged. These streak thresholds are
+// re-tuned for the actual loss rate of the strategy.
+//
+// KILL CRITERION (pre-committed, do not override):
+// If cumulative P&L after n=50 resolved bets is worse than -15% of
+// starting bankroll, STOP automated betting and run a manual postmortem.
 //
 // Usage: import { shouldTrade, recordOutcome } from './circuit-breaker';
 //        if (!(await shouldTrade(supabase))) return; // skip betting
@@ -39,8 +54,8 @@ const CONFIG_KEYS = {
 };
 
 // ── Thresholds ────────────────────────────────────────────
-const CONSECUTIVE_LOSS_PAUSE_1 = 3;   // 3 losses → 2h pause
-const CONSECUTIVE_LOSS_PAUSE_2 = 5;   // 5 losses → 12h pause
+const CONSECUTIVE_LOSS_PAUSE_1 = 5;   // 5 losses → 2h pause (tail strategy: P=35%)
+const CONSECUTIVE_LOSS_PAUSE_2 = 8;   // 8 losses → 12h pause (tail strategy: P=19%)
 const PAUSE_DURATION_1_MS = 2 * 3600000;   // 2 hours
 const PAUSE_DURATION_2_MS = 12 * 3600000;  // 12 hours
 const MAX_DAILY_DRAWDOWN_PCT = 0.15;       // 15% of bankroll
