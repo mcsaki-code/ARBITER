@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
+import { recordOutcome } from '@/lib/circuit-breaker';
 
 export const dynamic = 'force-dynamic';
 
@@ -209,6 +210,33 @@ export async function GET() {
       // Round PnL
       pnl = Math.round(pnl * 100) / 100;
 
+      // Pull edge, confidence, and TRUE_PROB from the weather analysis.
+      // CRITICAL: predicted_prob must be our model's true_prob, not entry_price.
+      // Without this, Brier scoring measures market calibration instead of ours
+      // and the learning agent gets garbage signal.
+      let analysisEdge: number | null = null;
+      let analysisConfidence: string | null = null;
+      let analysisTrueProb: number | null = null;
+      if (bet.analysis_id) {
+        const { data: analysis } = await supabase
+          .from('weather_analyses')
+          .select('edge, confidence, true_prob')
+          .eq('id', bet.analysis_id)
+          .single();
+        if (analysis) {
+          analysisEdge = analysis.edge;
+          analysisConfidence = analysis.confidence;
+          analysisTrueProb = analysis.true_prob;
+        }
+      }
+
+      const ourYesProb = analysisTrueProb != null && analysisTrueProb > 0 && analysisTrueProb < 1
+        ? analysisTrueProb
+        : (bet.entry_price ?? 0.5);
+      const predictedProb = bet.direction === 'BUY_YES' ? ourYesProb : 1 - ourYesProb;
+      const actualOutcome = betWon ? 1.0 : 0.0;
+      const brierScore = Math.pow(predictedProb - actualOutcome, 2);
+
       // Update bet
       const { error: updateErr } = await supabase
         .from('bets')
@@ -217,13 +245,24 @@ export async function GET() {
           exit_price: exitPrice,
           pnl,
           resolved_at: new Date().toISOString(),
-          notes: `Resolved: winning outcome "${winningOutcome}" | Bet on "${bet.outcome_label}" | ${betWon ? 'WIN' : 'LOSS'}`,
+          notes: `Resolved (api/resolve): winning outcome "${winningOutcome}" | Bet on "${bet.outcome_label}" | ${betWon ? 'WIN' : 'LOSS'}`,
+          predicted_prob: predictedProb,
+          brier_score: Math.round(brierScore * 10000) / 10000,
+          edge: analysisEdge,
+          confidence: analysisConfidence,
         })
         .eq('id', bet.id);
 
       if (updateErr) {
         log.push(`Error updating bet ${bet.id.substring(0, 8)}: ${updateErr.message}`);
         continue;
+      }
+
+      // Keep circuit-breaker streak counter in sync (V3 path also calls this)
+      try {
+        await recordOutcome(supabase, betWon);
+      } catch (e) {
+        log.push(`Bet ${bet.id.substring(0, 8)}: recordOutcome failed: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       resolved++;
