@@ -348,10 +348,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     const isTailBet = (analysis.market_price ?? 0) > 0 && (analysis.market_price ?? 0) < 0.15;
 
     // ── Kelly Sizing ──────────────────────────────────────────
-    // 1/8th Kelly with confidence scaling. Tail bets get 1.5x boost
-    // because asymmetric payout justifies slightly larger positions.
-    // V3.1: Ensemble-driven Kelly multiplier — tighter sigma + high
-    // agreement = larger position, wide sigma + low agreement = smaller.
+    // V3.2 (2026-04-07): HALVED sizing for new MIN_ENTRY_PRICE=0.05
+    //   regime. After Seattle false-WIN correction, true bankroll is
+    //   $783.12 (-21.7% DD) and true streak is 9. Carving out the
+    //   sub-5¢ zone is a regime change — restart at half size for the
+    //   first 20 bets in the new regime to stretch the learning budget,
+    //   then reassess and restore full sizing if Brier and win-rate hold.
+    //   Caps: 0.0175 input (was 0.035), 0.015 final (was 0.03).
+    // Tail bets still get 1.5x boost because asymmetric payout justifies it.
+    // Ensemble-driven multiplier (model agreement × hours-left sigma) still applies.
     let betAmount = 0;
     if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
       // NOTE: analysis.kelly_fraction from computeKelly() already includes
@@ -359,8 +364,8 @@ export const handler = schedule('*/15 * * * *', async () => {
       // discount, and weather subtype scaling. Do NOT re-apply confMult here.
       const tailBoost = isTailBet ? 1.5 : 1.0;
       const ensembleMult = getEnsembleKellyMultiplier(analysis.model_agreement, hoursLeft);
-      const cappedKelly = Math.min(analysis.kelly_fraction, 0.035);
-      const adjustedKelly = Math.min(cappedKelly * tailBoost * ensembleMult, 0.03);
+      const cappedKelly = Math.min(analysis.kelly_fraction, 0.0175);
+      const adjustedKelly = Math.min(cappedKelly * tailBoost * ensembleMult, 0.015);
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
 
       if (ensembleMult !== 1.0) {
