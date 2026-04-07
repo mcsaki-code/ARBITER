@@ -38,8 +38,10 @@ const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update f
 // Entry price bounds — derived from empirical data:
 //   - ALL bets with entry > 0.40 have lost (100% loss rate)
 //   - Best wins come from tail entries <15¢ (10x-27x payout)
-//   - Below 2% is adverse selection territory
-const MIN_ENTRY_PRICE = 0.02;
+//   - Sub-5¢ zone is empirically 0/16 through 2026-04-07 (P=5% random,
+//     -$261 P&L) → model systematically overconfident on extreme tails.
+//     MIN raised 0.02 → 0.05 on 2026-04-07. Reassess at n=35.
+const MIN_ENTRY_PRICE = 0.05;
 const MAX_ENTRY_PRICE = 0.40;
 
 // Whale insight: optimal entry window is 24-48h before resolution.
