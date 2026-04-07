@@ -20,8 +20,7 @@ interface GammaMarket {
   outcomePrices: string;
   active: boolean;
   closed: boolean;
-  resolvedBy: string;
-  // Gamma returns resolution as the winning outcome index or resolved price array
+  resolvedBy: string | null; // null until UMA oracle settles on-chain
 }
 
 async function fetchMarketFromGamma(conditionId: string): Promise<GammaMarket | null> {
@@ -112,38 +111,49 @@ export async function GET() {
       let winningOutcomeIndex: number | null = null;
 
       if (gamma) {
-        // Check Gamma API: if closed and prices show clear winner (one at ~1.0)
+        // ── CRITICAL FINALITY CHECK: resolvedBy must be populated ──
+        // closed != resolved on Polymarket. A market can stop trading
+        // (closed=true) while the UMA oracle challenge window is still
+        // open, OR briefly flip closed=true around endDate with intraday
+        // price pins. The only safe finality signal is `resolvedBy` —
+        // the Ethereum address of the oracle proposer, populated only
+        // after UMA settlement. On 2026-04-07, a Seattle weather bet was
+        // prematurely resolved via the old closed+price branch when
+        // intraday prices pinned to the wrong outcome; the market later
+        // repriced and the bet actually lost. DO NOT re-introduce a
+        // closed-only branch here.
+        if (!gamma.resolvedBy) {
+          // Not yet finalized on-chain — leave bet open
+          const hoursLeft = resolutionDate
+            ? Math.round((resolutionDate.getTime() - Date.now()) / 3600000)
+            : '?';
+          log.push(
+            `Bet ${bet.id.substring(0, 8)}: resolvedBy not set (closed=${gamma.closed}, ${hoursLeft}h past endDate) — awaiting UMA finality`
+          );
+          continue;
+        }
+
         const prices = parseOutcomePrices(gamma.outcomePrices);
         const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+        if (prices.length === 0 || maxPrice < 0.97) {
+          log.push(
+            `Bet ${bet.id.substring(0, 8)}: resolvedBy=${gamma.resolvedBy.substring(0, 10)}... but maxPrice ${maxPrice.toFixed(3)} < 0.97 — skipping as ambiguous`
+          );
+          continue;
+        }
 
-        if (gamma.closed && prices.length > 0 && maxPrice >= 0.95) {
-          isResolved = true;
-          winningOutcomeIndex = prices.indexOf(maxPrice);
-          log.push(
-            `Market ${market.condition_id.substring(0, 12)}: RESOLVED via Gamma (winner idx=${winningOutcomeIndex}, price=${maxPrice.toFixed(2)})`
-          );
-        } else if (gamma.closed && isPastResolution) {
-          // Market closed + past resolution but no clear winner in prices
-          // Check if all prices are near 0 (voided) or still ambiguous
-          isResolved = true;
-          winningOutcomeIndex = prices.indexOf(maxPrice);
-          log.push(
-            `Market ${market.condition_id.substring(0, 12)}: RESOLVED (closed + past resolution date)`
-          );
-        }
-      } else if (isPastResolution) {
-        // Can't reach Gamma but past resolution — check DB market prices
-        const dbPrices = market.outcome_prices || [];
-        if (dbPrices.length > 0) {
-          const maxDbPrice = Math.max(...dbPrices);
-          if (maxDbPrice >= 0.90) {
-            isResolved = true;
-            winningOutcomeIndex = dbPrices.indexOf(maxDbPrice);
-            log.push(
-              `Market ${market.condition_id.substring(0, 12)}: RESOLVED via DB prices (past resolution)`
-            );
-          }
-        }
+        isResolved = true;
+        winningOutcomeIndex = prices.indexOf(maxPrice);
+        log.push(
+          `Market ${market.condition_id.substring(0, 12)}: RESOLVED via UMA oracle (resolvedBy=${gamma.resolvedBy.substring(0, 10)}..., winner idx=${winningOutcomeIndex}, price=${maxPrice.toFixed(3)})`
+        );
+      } else {
+        // Gamma unreachable — do NOT fall back to DB prices. DB prices
+        // are refreshed from Gamma and can be stale/intraday. Wait for
+        // Gamma to recover; the V3 resolver will also catch this bet.
+        log.push(
+          `Bet ${bet.id.substring(0, 8)}: Gamma unreachable — skipping (V3 resolver will retry)`
+        );
       }
 
       if (!isResolved) {
