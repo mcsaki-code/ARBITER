@@ -17,9 +17,14 @@ const supabase = createClient(
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 
-// Feature flag: DISABLED — ensemble abstraction is lossy, strips domain
-// fields and causes validation failures. Direct Claude works fine.
-const USE_ENSEMBLE = false;
+// Feature flag: ENABLED 2026-04-08 — analyze-weather works around the
+// "ensemble is lossy" issue by parsing Claude's full reasoning JSON for
+// domain-specific fields (true_prob, market_price, outcome_index), and
+// only uses the ensemble for direction cross-validation + confidence
+// boost/downgrade. All three API keys (ANTHROPIC, OPENAI, GEMINI) are
+// set in Netlify env. With this flag false, the system was effectively
+// single-model Claude despite being marketed as 3-AI consensus.
+const USE_ENSEMBLE = true;
 
 export const handler = schedule('*/20 * * * *', async () => {
   console.log('[analyze-weather-v2] Starting enhanced weather analysis');

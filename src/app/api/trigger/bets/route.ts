@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { executeBet } from '@/lib/execute-bet';
 import { shouldTrade } from '@/lib/circuit-breaker';
+import { ensembleAnalyze, type EnsembleResult } from '@/lib/ensemble';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow up to 60s for analysis + placement
@@ -447,37 +448,94 @@ Respond ONLY in JSON:
   "auto_eligible": boolean
 }`;
 
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: CLAUDE_MODEL,
-        max_tokens: 800,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
+    // V3.2 (2026-04-08): Route through 3-model ensemble (Claude + GPT-4o + Gemini).
+    // Falls back to direct Claude only if Claude failed in the ensemble call.
+    let analysis: any = null;
+    let ensembleData: EnsembleResult | null = null;
 
-    if (!res.ok) return [];
+    try {
+      ensembleData = await ensembleAnalyze(prompt);
+      const claudeResponse = ensembleData.model_responses.find((r) => r.model === 'claude');
+      if (claudeResponse?.reasoning) {
+        const jsonMatch = claudeResponse.reasoning.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            analysis = JSON.parse(jsonMatch[0]);
+          } catch {
+            analysis = null;
+          }
+        }
+      }
+    } catch (err) {
+      log.push(`Ensemble call failed for ${city.name}: ${err instanceof Error ? err.message : 'unknown'}`);
+      ensembleData = null;
+    }
 
-    const data = await res.json();
-    const text = data.content?.[0]?.text;
-    if (!text) return [];
+    // Fallback: direct Claude if ensemble Claude leg didn't return parseable JSON
+    if (!analysis) {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: CLAUDE_MODEL,
+          max_tokens: 800,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return [];
+      if (!res.ok) return [];
 
-    const analysis = JSON.parse(jsonMatch[0]);
+      const data = await res.json();
+      const text = data.content?.[0]?.text;
+      if (!text) return [];
+
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return [];
+
+      try {
+        analysis = JSON.parse(jsonMatch[0]);
+      } catch {
+        return [];
+      }
+    }
+
     const bet = analysis.best_bet;
     if (!bet || bet.direction === 'PASS' || !bet.edge || bet.edge < MIN_EDGE_WEATHER) return [];
     // V3.2: BUY_NO blocked at analysis time too
     if (bet.direction === 'BUY_NO') return [];
     // V3.2: reject saturated-edge hallucinations instead of capping
     if (Math.abs(bet.edge) > 0.30) return [];
+
+    // V3.2: Cross-validate against ensemble consensus when available.
+    // If models disagree on direction → bail (don't bet on contested signals).
+    // If full agreement → keep confidence; partial → downgrade by one level.
+    if (ensembleData) {
+      const ensembleDir = ensembleData.consensus_direction;
+      const claudeDir = bet.direction;
+      const agreement = ensembleData.agreement_score;
+
+      if (ensembleDir !== 'PASS' && claudeDir !== ensembleDir) {
+        log.push(`${city.name}: ensemble disagreement (Claude=${claudeDir}, Ensemble=${ensembleDir}, agreement=${(agreement * 100).toFixed(0)}%) — skipping`);
+        return [];
+      }
+
+      // Partial agreement: downgrade confidence one notch
+      if (agreement < 1.0 && agreement >= 0.5) {
+        if (bet.confidence === 'HIGH') bet.confidence = 'MEDIUM';
+        else if (bet.confidence === 'MEDIUM') bet.confidence = 'LOW';
+      }
+
+      // Severe degradation: only 1 of 3 models responded with a usable answer
+      if (ensembleData.used_models.length < 2) {
+        log.push(`${city.name}: ensemble degraded to ${ensembleData.used_models.length} model(s) — skipping`);
+        return [];
+      }
+    }
 
     const p = bet.true_prob || 0.5;
     const c = bet.market_price || 0.5;
@@ -516,6 +574,8 @@ Respond ONLY in JSON:
         reasoning: bet.reasoning || '',
         auto_eligible: analysis.auto_eligible || false,
         flags: [],
+        ensemble_agreement_score: ensembleData?.agreement_score ?? null,
+        ensemble_used_models: ensembleData?.used_models ?? null,
         analyzed_at: new Date().toISOString(),
       })
       .select()
@@ -527,7 +587,8 @@ Respond ONLY in JSON:
     }
 
     if (inserted) {
-      log.push(`Analyzed weather: ${city.name} edge=${(bet.edge * 100).toFixed(1)}%`);
+      const used = ensembleData ? `ensemble[${ensembleData.used_models.join(',')}] agree=${(ensembleData.agreement_score * 100).toFixed(0)}%` : 'claude-fallback';
+      log.push(`Analyzed weather: ${city.name} edge=${(bet.edge * 100).toFixed(1)}% ${used}`);
       return [{ ...inserted, category: 'weather' }];
     }
   } catch (err) {
