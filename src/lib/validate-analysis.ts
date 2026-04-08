@@ -98,8 +98,11 @@ export function validateCryptoAnalysis(raw: unknown): ValidationResult<Validated
     errors.push(`bracket_prob: ${bracketProb} not in 0-1 after normalization`);
   if (marketPrice !== null && (marketPrice < 0 || marketPrice > 1))
     errors.push(`market_price: ${marketPrice} not in 0-1 after normalization`);
-  if (edge !== null && edge > 0.95)
-    errors.push(`edge: ${edge} suspiciously high (>95%), likely a normalization error`);
+  // V3.2: Reject saturated-edge hallucinations outright instead of silently
+  // capping at 0.50. Claude returning edge > 0.30 is almost always a model
+  // error, and the old cap was responsible for the $27.47 loss on bet 8718a4c2.
+  if (edge !== null && Math.abs(edge) > 0.30)
+    errors.push(`edge: ${edge} exceeds 0.30 cap — rejected as likely hallucination`);
 
   if (errors.length > 0) return { valid: false, errors };
 
@@ -111,7 +114,7 @@ export function validateCryptoAnalysis(raw: unknown): ValidationResult<Validated
       target_bracket: r.target_bracket as string,
       bracket_prob: bracketProb!,
       market_price: marketPrice!,
-      edge: Math.min(Math.abs(edge!), 0.50),  // cap at 50%
+      edge: Math.abs(edge!),
       direction: r.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
       confidence: r.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
       kelly_fraction: isNumber(r.kelly_fraction) ? r.kelly_fraction : 0,
@@ -156,7 +159,8 @@ export function validateSportsAnalysis(raw: unknown): ValidationResult<Validated
   if (sbConsensus === null) errors.push(`sportsbook_consensus: invalid (${r.sportsbook_consensus})`);
   if (pmPrice === null)     errors.push(`polymarket_price: invalid (${r.polymarket_price})`);
   if (edge === null)        errors.push(`edge: invalid (${r.edge})`);
-  if (edge !== null && edge > 0.95) errors.push(`edge: ${edge} suspiciously high`);
+  if (edge !== null && Math.abs(edge) > 0.30)
+    errors.push(`edge: ${edge} exceeds 0.30 cap — rejected as likely hallucination`);
 
   if (errors.length > 0) return { valid: false, errors };
 
@@ -167,7 +171,7 @@ export function validateSportsAnalysis(raw: unknown): ValidationResult<Validated
       sport: isString(r.sport) ? r.sport as string : 'sports',
       sportsbook_consensus: sbConsensus!,
       polymarket_price: pmPrice!,
-      edge: Math.min(Math.abs(edge!), 0.50),
+      edge: Math.abs(edge!),
       direction: r.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
       confidence: r.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
       reasoning: r.reasoning as string,
@@ -224,7 +228,11 @@ export function validateWeatherAnalysis(raw: unknown): ValidationResult<Validate
   if (modelProb === null)   errors.push(`best_bet.model_prob: invalid (${bb.model_prob})`);
   if (marketPrice === null)  errors.push(`best_bet.market_price: invalid (${bb.market_price})`);
   if (edge === null)         errors.push(`best_bet.edge: invalid (${bb.edge})`);
-  if (edge !== null && edge > 0.95) errors.push(`best_bet.edge: ${edge} suspiciously high`);
+  // V3.2: reject outright saturated-edge hallucinations (>0.35). The old
+  // silent cap at 0.35 let through bets priced on inflated edges — we now
+  // reject so the whole analysis is skipped, not just clamped.
+  if (edge !== null && Math.abs(edge) > 0.35)
+    errors.push(`best_bet.edge: ${edge} exceeds 0.35 weather cap — rejected as hallucination`);
 
   // Validate all_outcomes if present
   const allOutcomes: ValidatedWeatherAnalysis['all_outcomes'] = [];
@@ -252,7 +260,7 @@ export function validateWeatherAnalysis(raw: unknown): ValidationResult<Validate
         outcome_label: bb.outcome_label as string,
         model_prob: modelProb!,
         market_price: marketPrice!,
-        edge: Math.min(Math.abs(edge!), 0.35),  // weather capped at 35%
+        edge: Math.abs(edge!),
         direction: bb.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
         confidence: bb.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
         reasoning: bb.reasoning as string,
@@ -297,7 +305,7 @@ export function validatePoliticsAnalysis(raw: unknown): ValidationResult<Validat
   if (marketPrice === null) errors.push(`market_price: invalid (${r.market_price})`);
   if (trueProb === null)    errors.push(`true_prob: invalid (${r.true_prob})`);
   if (edge === null)        errors.push(`edge: invalid (${r.edge})`);
-  if (edge !== null && edge > 0.95) errors.push(`edge: ${edge} suspiciously high`);
+  if (edge !== null && Math.abs(edge) > 0.30) errors.push(`edge: ${edge} exceeds 0.30 cap — rejected as likely hallucination`);
 
   if (errors.length > 0) return { valid: false, errors };
 
@@ -310,7 +318,7 @@ export function validatePoliticsAnalysis(raw: unknown): ValidationResult<Validat
       best_outcome_label: isString(r.best_outcome_label) ? r.best_outcome_label as string : '',
       market_price: marketPrice!,
       true_prob: trueProb!,
-      edge: Math.min(Math.abs(edge!), 0.50),
+      edge: Math.abs(edge!),
       direction: r.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
       confidence: r.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
       reasoning: isString(r.reasoning) ? r.reasoning as string : '',
@@ -350,7 +358,7 @@ export function validateOpportunityAnalysis(raw: unknown): ValidationResult<Vali
   if (edge === null)        errors.push(`edge: invalid (${r.edge})`);
   if (trueProb === null)    errors.push(`true_prob: invalid (${r.true_prob})`);
   if (marketPrice === null) errors.push(`market_price: invalid (${r.market_price})`);
-  if (edge !== null && edge > 0.95) errors.push(`edge: ${edge} suspiciously high`);
+  if (edge !== null && Math.abs(edge) > 0.30) errors.push(`edge: ${edge} exceeds 0.30 cap — rejected as likely hallucination`);
 
   if (errors.length > 0) return { valid: false, errors };
 
@@ -359,7 +367,7 @@ export function validateOpportunityAnalysis(raw: unknown): ValidationResult<Vali
     data: {
       direction: r.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
       confidence: r.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
-      edge: Math.min(Math.abs(edge!), 0.50),
+      edge: Math.abs(edge!),
       true_prob: trueProb!,
       market_price: marketPrice!,
       reasoning: isString(r.reasoning) ? r.reasoning as string : '',
@@ -400,7 +408,7 @@ export function validateSentimentAnalysis(raw: unknown): ValidationResult<Valida
   if (edge === null)        errors.push(`edge: invalid (${r.edge})`);
   if (trueProb === null)    errors.push(`true_prob: invalid (${r.true_prob})`);
   if (marketPrice === null) errors.push(`market_price: invalid (${r.market_price})`);
-  if (edge !== null && edge > 0.95) errors.push(`edge: ${edge} suspiciously high`);
+  if (edge !== null && Math.abs(edge) > 0.30) errors.push(`edge: ${edge} exceeds 0.30 cap — rejected as likely hallucination`);
 
   if (errors.length > 0) return { valid: false, errors };
 
@@ -409,7 +417,7 @@ export function validateSentimentAnalysis(raw: unknown): ValidationResult<Valida
     data: {
       direction: r.direction as 'BUY_YES' | 'BUY_NO' | 'PASS',
       confidence: r.confidence as 'HIGH' | 'MEDIUM' | 'LOW',
-      edge: Math.min(Math.abs(edge!), 0.50),
+      edge: Math.abs(edge!),
       true_prob: trueProb!,
       market_price: marketPrice!,
       reasoning: isString(r.reasoning) ? r.reasoning as string : '',

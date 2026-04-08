@@ -148,6 +148,11 @@ export const handler = schedule('*/15 * * * *', async () => {
       'live_max_single_bet_usd',
       'live_max_daily_usd',
       'v3_start_date',
+      // Learned boosts written by learn-from-results
+      'kelly_boost_high_high',
+      'kelly_boost_medium_high',
+      'kelly_boost_low_high',
+      'blocked_directions',
     ]);
 
   const config: Record<string, string> = {};
@@ -280,12 +285,18 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
 
     // ── BUY_NO BLOCK (learned from backtest: 0/11 win rate) ────
-    // Weather binary markets: Claude's BUY_NO calls are systematically
-    // wrong. BUY_YES is 21/21, BUY_NO is 0/11 across all resolved data.
-    // The 0.40 entry price cap naturally blocks most BUY_NO bets, but
-    // this explicit check prevents edge cases from leaking through.
     if (analysis.direction === 'BUY_NO') {
       console.log(`[place-bets] SKIP ${shortId} — BUY_NO disabled (0% historical win rate)`);
+      continue;
+    }
+
+    // ── Learned dynamic direction block ──────────────────────
+    // learn-from-results can append directions to `blocked_directions`
+    // (comma-separated) when WR < 30% over 5+ bets. Keeps the learning
+    // loop end-to-end.
+    const blockedDirs = (config.blocked_directions || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (blockedDirs.includes(analysis.direction)) {
+      console.log(`[place-bets] SKIP ${shortId} — ${analysis.direction} in blocked_directions (learned)`);
       continue;
     }
 
@@ -364,12 +375,27 @@ export const handler = schedule('*/15 * * * *', async () => {
       // discount, and weather subtype scaling. Do NOT re-apply confMult here.
       const tailBoost = isTailBet ? 1.5 : 1.0;
       const ensembleMult = getEnsembleKellyMultiplier(analysis.model_agreement, hoursLeft);
+
+      // ── Learned Kelly boost from learn-from-results ──────────
+      // Bounded [0.5, 1.5] to prevent runaway sizing from small-sample noise.
+      let learnedBoost = 1.0;
+      const confKey = analysis.confidence === 'HIGH' ? 'kelly_boost_high_high'
+        : analysis.confidence === 'MEDIUM' ? 'kelly_boost_medium_high'
+        : 'kelly_boost_low_high';
+      if (analysis.model_agreement === 'HIGH' && config[confKey]) {
+        const raw = parseFloat(config[confKey]);
+        if (!isNaN(raw)) learnedBoost = Math.max(0.5, Math.min(1.5, raw));
+      }
+
       const cappedKelly = Math.min(analysis.kelly_fraction, 0.0175);
-      const adjustedKelly = Math.min(cappedKelly * tailBoost * ensembleMult, 0.015);
+      const adjustedKelly = Math.min(
+        cappedKelly * tailBoost * ensembleMult * learnedBoost,
+        0.015
+      );
       betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
 
-      if (ensembleMult !== 1.0) {
-        console.log(`[place-bets] Ensemble Kelly: agreement=${analysis.model_agreement}, sigma=${getDynamicSigma(hoursLeft).toFixed(1)}°F, mult=${ensembleMult.toFixed(2)}`);
+      if (ensembleMult !== 1.0 || learnedBoost !== 1.0) {
+        console.log(`[place-bets] Kelly mults: agreement=${analysis.model_agreement} sigma=${getDynamicSigma(hoursLeft).toFixed(1)}°F ensMult=${ensembleMult.toFixed(2)} learnedBoost=${learnedBoost.toFixed(2)}`);
       }
     }
 

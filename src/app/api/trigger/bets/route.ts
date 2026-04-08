@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { executeBet } from '@/lib/execute-bet';
-import { getMultiModelConsensus, isMultiModelEnabled } from '@/lib/multi-model';
+import { shouldTrade } from '@/lib/circuit-breaker';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow up to 60s for analysis + placement
@@ -10,25 +10,30 @@ export const maxDuration = 60; // Allow up to 60s for analysis + placement
 // Full Pipeline: Analyze + Place Bets (Manual Trigger)
 // GET /api/trigger/bets
 //
-// This is the COMPLETE pipeline that:
-// 1. Checks for existing analyses (last 6 hours)
-// 2. If none exist, runs inline Claude analysis on best markets
-// 3. Places paper bets from all eligible analyses
-//
-// This fixes the race condition where market discovery runs but
-// no analyses exist yet because the cron hasn't fired.
+// V3.2 HARDENED (2026-04-08): This endpoint was previously bypassing
+// the canonical guardrails in netlify/functions/place-bets.ts.
+// It now enforces the same V3.2 rules:
+//   - Circuit breaker gate (shouldTrade)
+//   - MIN_ENTRY_PRICE 0.05 (not 0.02 — sub-5¢ zone was 0/16)
+//   - BUY_NO blocked (weather-only, tail-bet strategy wants BUY_YES)
+//   - MIN_HOURS_BEFORE_RESOLUTION = 4h
+//   - MAX_BETS_PER_DAY = 15
+//   - Kelly cap HALVED to 0.015
+//   - Pass `edge` through to executeBet so bet rows aren't NULL-edge
 // ============================================================
 
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_SINGLE_BET_PCT = 0.03;     // 3% max per bet (down from 5%)
-const MAX_DAILY_EXPOSURE_PCT = 0.20;  // 20% max daily (down from 25%)
-// No daily bet COUNT cap — risk filters (edge, entry price, kelly, circuit breaker)
-// do the gatekeeping. The exposure cap prevents overextending.
-const MIN_EDGE = 0.05;               // 5% minimum edge (up from 2% — the #1 fix)
-const MIN_EDGE_WEATHER = 0.08;       // 8% for weather (matching successful bots)
+const MAX_SINGLE_BET_PCT = 0.03;     // 3% max per bet
+const MAX_DAILY_EXPOSURE_PCT = 0.20;  // 20% max daily
+const MAX_BETS_PER_DAY = 15;          // Hard cap on bet count
+const MIN_EDGE = 0.05;               // 5% minimum edge
+const MIN_EDGE_WEATHER = 0.08;       // 8% for weather
 const MIN_LIQUIDITY = 5000;          // Skip thin markets
-const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2 hours max staleness (down from 6)
-const KELLY_FRACTION = 0.125;        // 1/8th Kelly (half Kelly is aggressive, 1/8 is professional)
+const MIN_HOURS_BEFORE_RESOLUTION = 4; // Must have ≥4h runway
+const MAX_ANALYSIS_AGE_MS = 2 * 3600000; // 2 hours max staleness
+const KELLY_FRACTION = 0.125;        // 1/8th Kelly
+const KELLY_INPUT_CAP = 0.0175;      // pre-boost cap on kelly_fraction input
+const KELLY_FINAL_CAP = 0.015;       // V3.2: halved final Kelly cap
 
 interface AnalysisCandidate {
   id: string;
@@ -55,12 +60,26 @@ export async function GET() {
 
   try {
     // ============================================================
+    // STEP -1: Circuit breaker gate — V3.2 hardening
+    // ============================================================
+    const cbState = await shouldTrade(supabase);
+    if (!cbState.canTrade) {
+      log.push(`CIRCUIT_BREAKER: ${cbState.reason}`);
+      return NextResponse.json({
+        success: true,
+        placed: 0,
+        circuitBreaker: cbState,
+        log,
+      });
+    }
+
+    // ============================================================
     // STEP 0: Load system config
     // ============================================================
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value')
-      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date']);
+      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date', 'blocked_directions']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -84,7 +103,13 @@ export async function GET() {
     const todayBetCount = todaysBets?.length || 0;
     const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
 
-    log.push(`Bankroll: $${bankroll} | Today: ${todayBetCount} bets, $${todayExposure.toFixed(2)} deployed`);
+    log.push(`Bankroll: $${bankroll} | Today: ${todayBetCount}/${MAX_BETS_PER_DAY} bets, $${todayExposure.toFixed(2)} deployed`);
+
+    // Hard cap on daily bet count
+    if (todayBetCount >= MAX_BETS_PER_DAY) {
+      log.push(`DAILY_BET_CAP: already at ${todayBetCount}/${MAX_BETS_PER_DAY} bets, skipping`);
+      return NextResponse.json({ success: true, placed: 0, log });
+    }
 
     // All open bet market IDs (prevent duplicates)
     const { data: openBets } = await supabase
@@ -177,13 +202,31 @@ export async function GET() {
     let placed = 0;
     let totalDeployed = todayExposure;
 
+    let placedThisRun = 0;
     for (const analysis of candidates) {
       if (totalDeployed >= maxDailyExposure) break;
+      if (todayBetCount + placedThisRun >= MAX_BETS_PER_DAY) {
+        log.push(`DAILY_BET_CAP reached mid-loop at ${todayBetCount + placedThisRun}`);
+        break;
+      }
       if (Date.now() - startTime > 55000) break;
 
       // Skip duplicate positions
       if (openMarketIds.has(analysis.market_id)) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — already open`);
+        continue;
+      }
+
+      // V3.2: BUY_NO is blocked. Tail-bet strategy is BUY_YES-only.
+      if (analysis.direction === 'BUY_NO') {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — BUY_NO blocked (V3.2)`);
+        continue;
+      }
+
+      // Learned dynamic direction block (written by learn-from-results)
+      const blockedDirs = (config.blocked_directions || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (blockedDirs.includes(analysis.direction)) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — ${analysis.direction} in blocked_directions (learned)`);
         continue;
       }
 
@@ -194,13 +237,13 @@ export async function GET() {
 
       if (!analysis.auto_eligible && !isMediumEligible) continue;
 
-      // Calculate bet size using fractional Kelly
-      // Professional bettors use 1/8th Kelly or less when probability estimates are uncertain
+      // V3.2 Kelly sizing: analyzer already applied confidence multiplier into
+      // kelly_fraction. Cap the INPUT (prevent saturated-edge blow-ups) then
+      // apply a final cap. No double-multiplication of confidence.
       let betAmount = 0;
       if (analysis.kelly_fraction && analysis.kelly_fraction > 0) {
-        // Re-calculate with our conservative KELLY_FRACTION (1/8th)
-        const confMult = analysis.confidence === 'HIGH' ? 0.8 : analysis.confidence === 'MEDIUM' ? 0.5 : 0.2;
-        const adjustedKelly = Math.min(analysis.kelly_fraction * KELLY_FRACTION / 0.25 * confMult, 0.03);
+        const cappedKelly = Math.min(analysis.kelly_fraction, KELLY_INPUT_CAP);
+        const adjustedKelly = Math.min(cappedKelly, KELLY_FINAL_CAP);
         betAmount = Math.max(1, Math.round(bankroll * adjustedKelly * 100) / 100);
       }
       if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006); // Default ~$3 for paper (0.6% of bankroll)
@@ -227,11 +270,12 @@ export async function GET() {
         continue;
       }
 
-      // Check time remaining — don't bet on markets resolving within 1 hour
+      // V3.2: Require ≥4h runway. Late-window bets lose info advantage
+      // and get hit by spreads as liquidity dries up.
       if (currentMarket.resolution_date) {
         const hoursLeft = (new Date(currentMarket.resolution_date).getTime() - Date.now()) / 3600000;
-        if (hoursLeft < 1) {
-          log.push(`Skip ${analysis.market_id.substring(0, 8)} — resolves in ${hoursLeft.toFixed(1)}h`);
+        if (hoursLeft < MIN_HOURS_BEFORE_RESOLUTION) {
+          log.push(`Skip ${analysis.market_id.substring(0, 8)} — resolves in ${hoursLeft.toFixed(1)}h (< ${MIN_HOURS_BEFORE_RESOLUTION}h floor)`);
           continue;
         }
       }
@@ -273,9 +317,8 @@ export async function GET() {
         entryPrice = 1 - entryPrice;
       }
 
-      // Validate entry price: floor at 2%, cap at 40% (matching place-bets.ts risk rules)
-      // ALL historical bets with entry > 40% have lost; low-entry tail bets are where the edge is
-      const MIN_ENTRY_PRICE = 0.02;
+      // V3.2: floor at 5% (sub-5¢ zone was 0/16 historically), cap at 40%
+      const MIN_ENTRY_PRICE = 0.05;
       const MAX_ENTRY_PRICE = 0.40;
       if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
@@ -299,6 +342,7 @@ export async function GET() {
           outcome_label: outcomeLabel,
           entry_price: entryPrice,
           amount_usd: betAmount,
+          edge: analysis.edge ?? null,
         },
         config,
         0, // todayLiveExposure
@@ -315,6 +359,7 @@ export async function GET() {
       }
 
       placed++;
+      placedThisRun++;
       totalDeployed += betAmount;
       openMarketIds.add(analysis.market_id);
       log.push(`BET: ${analysis.category} ${analysis.direction} $${betAmount.toFixed(2)} @ ${entryPrice.toFixed(3)} | edge=${((analysis.edge || 0) * 100).toFixed(1)}% ${analysis.confidence}`);
@@ -428,7 +473,11 @@ Respond ONLY in JSON:
 
     const analysis = JSON.parse(jsonMatch[0]);
     const bet = analysis.best_bet;
-    if (!bet || bet.direction === 'PASS' || !bet.edge || bet.edge < MIN_EDGE) return [];
+    if (!bet || bet.direction === 'PASS' || !bet.edge || bet.edge < MIN_EDGE_WEATHER) return [];
+    // V3.2: BUY_NO blocked at analysis time too
+    if (bet.direction === 'BUY_NO') return [];
+    // V3.2: reject saturated-edge hallucinations instead of capping
+    if (Math.abs(bet.edge) > 0.30) return [];
 
     const p = bet.true_prob || 0.5;
     const c = bet.market_price || 0.5;
@@ -440,7 +489,8 @@ Respond ONLY in JSON:
       const fullKelly = (p * b - (1 - p)) / b;
       if (fullKelly > 0) {
         const confMult = { HIGH: 0.8, MEDIUM: 0.5, LOW: 0.2 }[bet.confidence as string] || 0.2;
-        kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, 0.03);
+        // V3.2: halved final cap (0.015 not 0.03)
+        kellyFraction = Math.min(fullKelly * KELLY_FRACTION * confMult, KELLY_FINAL_CAP);
         recBetUsd = Math.max(1, Math.round(bankroll * kellyFraction * 100) / 100);
       }
     }

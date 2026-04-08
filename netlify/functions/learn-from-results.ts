@@ -180,11 +180,31 @@ export const handler = schedule('0 6 * * *', async () => {
   // DIMENSION 1: Direction Performance
   // ============================================================
   const dirGroups = groupBy(bets, b => b.direction);
+  // Load existing blocked_directions so we can update it
+  const { data: blockedCfg } = await supabase
+    .from('system_config').select('value').eq('key', 'blocked_directions').single();
+  const currentBlocked = new Set(
+    (blockedCfg?.value || '').split(',').map((s: string) => s.trim()).filter(Boolean)
+  );
+  const originalBlocked = new Set(currentBlocked);
+
   for (const [dir, group] of Object.entries(dirGroups)) {
     const wins = group.filter(b => b.status === 'WON').length;
     const wr = wins / group.length;
     const pnl = sum(group, b => b.pnl);
     const wagered = sum(group, b => b.amount_usd);
+    const shouldBlock = wr < 0.3 && group.length >= 5;
+    const shouldUnblock = wr >= 0.4 && group.length >= 10 && currentBlocked.has(dir);
+
+    let action: string | null = null;
+    if (shouldBlock && !currentBlocked.has(dir)) {
+      currentBlocked.add(dir);
+      action = `BLOCKED ${dir} in system_config.blocked_directions (WR ${(wr * 100).toFixed(0)}%, n=${group.length})`;
+    } else if (shouldUnblock) {
+      currentBlocked.delete(dir);
+      action = `UNBLOCKED ${dir} — recovered to ${(wr * 100).toFixed(0)}% WR over ${group.length} bets`;
+    }
+
     insights.push({
       category: 'direction',
       dimension: 'bet_direction',
@@ -194,13 +214,21 @@ export const handler = schedule('0 6 * * *', async () => {
       avg_pnl: pnl / group.length,
       total_pnl: pnl,
       roi: wagered > 0 ? pnl / wagered : 0,
-      recommendation: wr < 0.3 && group.length >= 5
+      recommendation: shouldBlock
         ? `BLOCK ${dir}: ${(wr * 100).toFixed(0)}% win rate across ${group.length} bets — not profitable`
         : wr > 0.7 && group.length >= 5
           ? `BOOST ${dir}: ${(wr * 100).toFixed(0)}% win rate — strong signal, consider higher Kelly`
           : `MONITOR ${dir}: ${(wr * 100).toFixed(0)}% WR (n=${group.length}) — need more data`,
-      action_taken: null,
+      action_taken: action,
     });
+  }
+
+  // Persist blocked_directions if changed
+  const newBlockedStr = Array.from(currentBlocked).join(',');
+  const oldBlockedStr = Array.from(originalBlocked).join(',');
+  if (newBlockedStr !== oldBlockedStr) {
+    await setConfig('blocked_directions', newBlockedStr);
+    console.log(`[learn-v2] blocked_directions: "${oldBlockedStr}" → "${newBlockedStr}"`);
   }
 
   // ============================================================
