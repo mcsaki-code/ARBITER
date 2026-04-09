@@ -31,6 +31,10 @@ const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
 const MAX_BETS_PER_DAY = 15;           // max 15 bets per day across all markets
+// Phase 2 (temperature laddering): multiple adjacent brackets for the same
+// city can now produce bets. Cap per-city so a single city's ladder can't
+// eat the entire daily budget if the forecast distribution favors one day.
+const MAX_BETS_PER_CITY_PER_DAY = 4;
 const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
 const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
 const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update frequently
@@ -186,6 +190,35 @@ export const handler = schedule('*/15 * * * *', async () => {
   const todayExposure = todaysBets?.reduce((sum, b) => sum + (b.amount_usd || 0), 0) || 0;
   const existingMarketIds = new Set(todaysBets?.map((b) => b.market_id) || []);
 
+  // Phase 2: build a per-city bet count for today.
+  // IMPORTANT: markets.city_id column exists but is never populated
+  // (refresh-markets doesn't write it). weather_analyses.city_id IS
+  // populated, so we join today's bets through that table instead.
+  // We take the MOST RECENT weather_analyses row per market_id so a
+  // later re-analysis can't double-count.
+  const betsPerCity = new Map<string, number>();
+  const todayMarketIds = Array.from(existingMarketIds).filter(Boolean) as string[];
+  if (todayMarketIds.length > 0) {
+    const { data: cityRows } = await supabase
+      .from('weather_analyses')
+      .select('market_id, city_id, analyzed_at')
+      .in('market_id', todayMarketIds)
+      .order('analyzed_at', { ascending: false });
+    const marketToCity = new Map<string, string>();
+    for (const row of cityRows || []) {
+      const mid = String(row.market_id);
+      if (!marketToCity.has(mid) && row.city_id) {
+        marketToCity.set(mid, String(row.city_id));
+      }
+    }
+    for (const cid of marketToCity.values()) {
+      betsPerCity.set(cid, (betsPerCity.get(cid) || 0) + 1);
+    }
+  }
+  console.log(
+    `[place-bets] Phase2 per-city counts: ${JSON.stringify(Object.fromEntries(betsPerCity))}`
+  );
+
   console.log(`[place-bets] Today: ${todaysBets?.length || 0} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
   const todayBetCount = todaysBets?.length || 0;
@@ -280,6 +313,20 @@ export const handler = schedule('*/15 * * * *', async () => {
     if (existingMarketIds.has(analysis.market_id)) {
       console.log(`[place-bets] SKIP ${shortId} — already bet today`);
       continue;
+    }
+
+    // Phase 2: per-city daily cap. Prevents a single city's temperature
+    // ladder from consuming the entire daily bet budget.
+    const analysisCityId = (analysis as { city_id?: string | null }).city_id;
+    if (analysisCityId) {
+      const cityBetCount = betsPerCity.get(String(analysisCityId)) || 0;
+      if (cityBetCount >= MAX_BETS_PER_CITY_PER_DAY) {
+        console.log(
+          `[place-bets] SKIP ${shortId} — city ${analysisCityId} already at ` +
+            `${cityBetCount}/${MAX_BETS_PER_CITY_PER_DAY} bets today`
+        );
+        continue;
+      }
     }
 
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
@@ -554,6 +601,15 @@ export const handler = schedule('*/15 * * * *', async () => {
     totalDeployed += betAmount;
     openMarketIds.add(analysis.market_id);
     existingMarketIds.add(analysis.market_id);
+    // Phase 2: track per-city count so subsequent ladder rungs for the
+    // same city get gated by MAX_BETS_PER_CITY_PER_DAY.
+    {
+      const cid = (analysis as { city_id?: string | null }).city_id;
+      if (cid) {
+        const k = String(cid);
+        betsPerCity.set(k, (betsPerCity.get(k) || 0) + 1);
+      }
+    }
 
     const tailTag = isTailBet ? ' [TAIL]' : '';
     console.log(

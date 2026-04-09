@@ -417,6 +417,88 @@ export const handler = schedule('*/10 * * * *', async () => {
         }
       }
 
+      // ========================================================
+      // PHASE 2a: TEMPERATURE LADDER PROMOTION
+      // ========================================================
+      // gopfan2 / neobrother strategy: when forecast distribution
+      // implies a strong bet on an ADJACENT bracket that the LLM
+      // passed on, promote it to BUY_YES via measurement alone.
+      //
+      // Guardrails (tighter than normal override because we're
+      // overriding the LLM's "no-bet" verdict):
+      //   - Only BUY_YES (BUY_NO is 0/11 historical WR)
+      //   - Only temperature markets with parseable brackets
+      //   - Require >=5 forecast members (high-confidence n)
+      //   - Require >=10% measured edge (vs 8% standard)
+      //   - Entry price must be 0.05-0.40 (MIN_ENTRY_PRICE zone)
+      //   - Cap confidence at MEDIUM (no LLM support for HIGH)
+      //   - Only fire when LLM said PASS (never override a real
+      //     LLM bet — that's what the earlier override block is for)
+      // ========================================================
+      const llmPassedOnBracket =
+        analysis.best_bet &&
+        analysis.best_bet.direction === 'PASS' &&
+        marketType.startsWith('temperature');
+
+      if (llmPassedOnBracket) {
+        const bracket = parseBracketFromQuestion(market.question);
+        if (bracket && forecasts && forecasts.length > 0) {
+          const members: ForecastMember[] = forecasts
+            .filter((f: { temp_high_f: number | null }) => f.temp_high_f != null)
+            .map((f: { source: string; temp_high_f: number }) => ({
+              source: f.source,
+              temp_high_f: f.temp_high_f,
+            }));
+
+          if (members.length >= 5) {
+            const forecastProb = computeBracketProbability(members, bracket, hoursRemaining);
+
+            // Use the refreshed Gamma price directly (not analysis.best_bet.market_price
+            // which is null on a PASS). Binary market — outcome_prices[0] is YES.
+            const yesPrice = market.outcome_prices?.[0] ?? null;
+
+            if (
+              yesPrice !== null &&
+              yesPrice >= 0.05 &&
+              yesPrice <= 0.40 &&
+              forecastProb.probability - yesPrice >= 0.10
+            ) {
+              const measuredEdge = forecastProb.probability - yesPrice;
+              console.log(
+                `[analyze-weather-v2] ${city.name} — LADDER PROMOTION: ` +
+                  `bracket=${bracket.label} measured=${forecastProb.probability.toFixed(3)} ` +
+                  `yes=${yesPrice.toFixed(3)} edge=${measuredEdge.toFixed(3)} n=${members.length}`
+              );
+              analysis.best_bet.direction = 'BUY_YES';
+              analysis.best_bet.confidence = 'MEDIUM';
+              analysis.best_bet.market_price = yesPrice;
+              analysis.best_bet.true_prob = forecastProb.probability;
+              analysis.best_bet.edge = measuredEdge;
+              analysis.best_bet.outcome_index = 0;
+              analysis.best_bet.outcome_label = market.outcomes?.[0] ?? 'YES';
+              analysis.best_bet.reasoning =
+                `[FORECAST-ENSEMBLE PROMOTION] LLM passed; ` +
+                `${members.length}-member forecast distribution implies ` +
+                `P(${bracket.label})=${(forecastProb.probability * 100).toFixed(1)}% vs market ` +
+                `${(yesPrice * 100).toFixed(1)}%. Method: ${forecastProb.method}, ` +
+                `mean=${forecastProb.mean_f.toFixed(1)}°F, sigma=${forecastProb.sigma_f.toFixed(2)}.`;
+
+              analysis.flags = analysis.flags || [];
+              analysis.flags.push(
+                `ladder_promotion: bracket=${bracket.label} edge=${measuredEdge.toFixed(3)} n=${members.length}`
+              );
+              analysis.auto_eligible = true;
+
+              // Stash metadata for downstream consumers
+              analysis.forecast_ensemble_prob = forecastProb.probability;
+              analysis.forecast_ensemble_method = forecastProb.method;
+              analysis.forecast_ensemble_n = forecastProb.n_members;
+              analysis.forecast_ensemble_sigma = forecastProb.sigma_f;
+            }
+          }
+        }
+      }
+
       // Calculate Kelly bet size
       let kellyFraction = 0;
       let recBetUsd = 0;

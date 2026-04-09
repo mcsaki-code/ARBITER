@@ -5,19 +5,20 @@
  */
 
 import { SupabaseClient } from '@supabase/supabase-js';
+import {
+  computeBracketProbability,
+  type ForecastMember,
+  type BracketRange,
+} from './forecast-ensemble';
 
 const MIN_EDGE  = 0.08;   // 8% minimum edge
+// Fallback sigma for when we only have 1-2 forecast members and must
+// use a climatological floor rather than the sample std. Matches the
+// lead-time-aware table in forecast-ensemble.ts (in °F, converted to °C).
 // Sigma scales with forecast lead time (uncertainty grows with √t)
-// Day-0: 1.5°C, Day-1: 2.5°C, Day-2: 3.5°C, Day-3+: 4.5°C
-// Matches analyze-temperature.ts Netlify function sigma table
+// Day-0: 1.5°C, Day-1: 2.5°C, Day-2: 3.5°C, Day-3+: 4.5°C (legacy fallback)
 
-// Abramowitz & Stegun normal CDF (error < 7.5e-8)
-function normalCDF(x: number): number {
-  const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
-  const phi = 1 - (1 / Math.sqrt(2 * Math.PI)) * Math.exp(-0.5 * x * x) * poly;
-  return x >= 0 ? phi : 1 - phi;
-}
+// normalCDF removed — forecast-ensemble.ts provides the CDF internally.
 
 interface TemperatureParsed {
   city: string;
@@ -160,9 +161,15 @@ export async function analyzeTemperatureMarkets(
     const targetDate = resolveDateStr(parsed.date_str);
     if (!targetDate) continue;
 
-    // Days out from today — determines forecast sigma
+    // Days out from today — used only as a legacy fallback.
+    // Real sigma now comes from the forecast member sample std
+    // (with a lead-time-aware floor) via forecast-ensemble.ts.
     const daysOut = Math.round((new Date(targetDate).getTime() - Date.now()) / 86400000);
-    const sigma = sigmaCForDaysOut(daysOut);
+    const hoursRemaining = Math.max(
+      0,
+      (new Date(targetDate).getTime() - Date.now()) / 3600000
+    );
+    const legacySigmaC = sigmaCForDaysOut(daysOut);
 
     // Match city
     const cityNameLc = parsed.city.toLowerCase();
@@ -185,20 +192,56 @@ export async function analyzeTemperatureMarkets(
     if (fcErr) { errors++; continue; }
     if (!forecasts?.length) { skippedNoForecast++; continue; }
 
-    // Multi-model consensus
-    const avgHighF = forecasts.reduce((sum, f) => sum + (f.temp_high_f ?? 0), 0) / forecasts.length;
+    // ── FORECAST-MEMBER DISTRIBUTION MATH (phase 2 port) ──────
+    // Build ForecastMember[] in °F (the bracket lib expects °F),
+    // then convert the threshold from °C back to °F for the call.
+    // This is what gopfan2 / suislanchez actually do — use the
+    // spread of individual model forecasts, not a fixed sigma table.
+    const members: ForecastMember[] = forecasts
+      .filter((f: { temp_high_f: number | null }) => f.temp_high_f != null)
+      .map((f: { temp_high_f: number; source: string }) => ({
+        source: f.source,
+        temp_high_f: f.temp_high_f,
+      }));
+    if (members.length < 2) { skippedNoForecast++; continue; }
+
+    const avgHighF = members.reduce((s, m) => s + m.temp_high_f, 0) / members.length;
     const mu_c = (avgHighF - 32) * 5 / 9;
 
-    // Compute probability
-    const T = parsed.threshold_c;
-    let trueProb: number;
+    const T_c = parsed.threshold_c;
+    const T_f = T_c * 9 / 5 + 32;
+    // Build a bracket range in °F from the operator.
+    // 'exact' = half-open degree window (centered on T), matching how
+    // Polymarket resolves "exactly X°C" questions (±0.5°C = ±0.9°F).
+    let bracket: BracketRange;
+    const halfWindowF = 0.5 * 9 / 5; // 0.9°F
     if (parsed.operator === 'exact') {
-      trueProb = normalCDF((T + 0.5 - mu_c) / sigma) - normalCDF((T - 0.5 - mu_c) / sigma);
+      bracket = {
+        low_f: T_f - halfWindowF,
+        high_f: T_f + halfWindowF,
+        kind: 'exact',
+        label: `${T_c}°C (exact)`,
+      };
     } else if (parsed.operator === 'lte') {
-      trueProb = normalCDF((T - mu_c) / sigma);
+      bracket = {
+        low_f: -Infinity,
+        high_f: T_f,
+        kind: 'at_or_below',
+        label: `<=${T_c}°C`,
+      };
     } else {
-      trueProb = 1 - normalCDF((T - mu_c) / sigma);
+      bracket = {
+        low_f: T_f,
+        high_f: Infinity,
+        kind: 'at_or_above',
+        label: `>=${T_c}°C`,
+      };
     }
+
+    const forecastProb = computeBracketProbability(members, bracket, hoursRemaining);
+    const trueProb = forecastProb.probability;
+    const sigmaFEff = forecastProb.sigma_f;
+    const sigmaCEff = sigmaFEff * 5 / 9;
 
     const marketPrice = market.outcome_prices?.[0] ?? 0.5;
     const edge = trueProb - marketPrice;
@@ -206,7 +249,17 @@ export async function analyzeTemperatureMarkets(
 
     if (absEdge < MIN_EDGE) { skippedLowEdge++; continue; }
 
-    const direction = edge > 0 ? 'BUY_YES' : 'BUY_NO';
+    // BUY_NO is empirically 0/11 in V3.2 — skip rather than emit dead
+    // analyses that place-bets.ts will just throw away. This keeps the
+    // analyses table clean and lets the learning loop see only the
+    // directions we actually trade.
+    if (edge <= 0) {
+      skippedLowEdge++;
+      log(`SKIP ${parsed.city} ${parsed.operator}${T_c}°C — BUY_NO suppressed (edge ${(edge*100).toFixed(1)}%)`);
+      continue;
+    }
+
+    const direction = 'BUY_YES';
     const confidence = absEdge >= 0.20 ? 'HIGH' : absEdge >= 0.10 ? 'MEDIUM' : 'LOW';
 
     // Kelly — CORRECT formula for BUY_NO: pWin = 1 - trueProb
@@ -223,8 +276,8 @@ export async function analyzeTemperatureMarkets(
       city_id: city.id,
       consensus_id: null,
       model_high_f: avgHighF,
-      model_spread_f: sigma * 1.8,
-      model_agreement: forecasts.length >= 3 ? 'HIGH' : 'MEDIUM',
+      model_spread_f: sigmaCEff * 1.8,
+      model_agreement: members.length >= 3 ? 'HIGH' : 'MEDIUM',
       market_type: 'temperature_statistical',
       best_outcome_label: direction === 'BUY_YES' ? 'Yes' : 'No',
       market_price: marketPrice,
@@ -234,18 +287,25 @@ export async function analyzeTemperatureMarkets(
       confidence,
       kelly_fraction: kellyFraction,
       rec_bet_usd: recBetUsd,
-      reasoning: `[Railway] Statistical: forecast ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), threshold ${T}°C ${parsed.operator}, sigma=${sigma}°C (${daysOut}d out), P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
-      auto_eligible: confidence === 'HIGH' && forecasts.length >= 3 && absEdge >= MIN_EDGE,
+      reasoning: `[Railway-v2] Member-distribution: n=${members.length} forecasts, mean ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), sigma=${sigmaCEff.toFixed(2)}°C (${sigmaFEff.toFixed(2)}°F, method=${forecastProb.method}, ${daysOut}d out), threshold ${T_c}°C ${parsed.operator}, P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
+      auto_eligible: confidence === 'HIGH' && members.length >= 3 && absEdge >= MIN_EDGE,
       ensemble_prob: trueProb,
       ensemble_edge: edge,
       precip_consensus: null,
-      flags: [`railway_worker`, `forecast_sources_${forecasts.length}`, `sigma_${sigma.toFixed(1)}C`, `days_out_${daysOut}`, `pWin_${(pWin * 100).toFixed(1)}pct`],
+      flags: [
+        `railway_worker_v2`,
+        `forecast_sources_${members.length}`,
+        `sigma_${sigmaCEff.toFixed(2)}C_${forecastProb.method}`,
+        `days_out_${daysOut}`,
+        `pWin_${(pWin * 100).toFixed(1)}pct`,
+        `legacy_sigma_${legacySigmaC.toFixed(1)}C`,
+      ],
     });
 
     if (insertErr) { errors++; continue; }
 
     analyzed++;
-    log(`✅ ${parsed.city} ${parsed.operator}${T}°C | ${daysOut}d out σ=${sigma}°C | forecast=${mu_c.toFixed(1)}°C | edge=${(edge*100).toFixed(1)}% ${direction} $${recBetUsd}`);
+    log(`✅ ${parsed.city} ${parsed.operator}${T_c}°C | ${daysOut}d out σ=${sigmaCEff.toFixed(2)}°C (${forecastProb.method}) | forecast=${mu_c.toFixed(1)}°C | n=${members.length} | edge=${(edge*100).toFixed(1)}% ${direction} $${recBetUsd}`);
   }
 
   const durationMs = Date.now() - start;
