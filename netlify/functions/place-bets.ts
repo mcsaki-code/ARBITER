@@ -585,6 +585,7 @@ export const handler = schedule('*/15 * * * *', async () => {
           amount_usd: betAmount,
           edge: analysis.edge || null,
           confidence: analysis.confidence || null,
+          predicted_prob: analysis.ensemble_prob ?? analysis.true_prob ?? null,
         },
         config,
         todayLiveExposure

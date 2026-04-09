@@ -39,6 +39,7 @@ interface BetInsertParams {
   condition_id?: string; // Polymarket condition_id (from markets table)
   edge?: number | null; // Edge from analysis
   confidence?: string | null; // Confidence level from analysis
+  predicted_prob?: number | null; // True probability from ensemble/analysis
 }
 
 interface ExecutionResult {
@@ -153,6 +154,7 @@ export async function executeBet(
       condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
     }).select('id').single();
 
@@ -191,6 +193,7 @@ export async function executeBet(
         condition_id: params.condition_id ?? null,
         edge: params.edge ?? null,
         confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
         placed_at: new Date().toISOString(),
         notes: `Live order skipped: ${walletCheck.errors.join('; ')}`,
       }).select('id').single();
@@ -214,6 +217,7 @@ export async function executeBet(
       condition_id: params.condition_id ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order skipped: wallet check error - ${err instanceof Error ? err.message : String(err)}`,
     }).select('id').single();
@@ -253,6 +257,7 @@ export async function executeBet(
       order_status: 'NONE',
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: 'Live order attempted but condition_id missing — placed as paper',
     }).select('id').single();
@@ -282,6 +287,7 @@ export async function executeBet(
       condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order skipped: invalid direction "${params.direction}"`,
     }).select('id').single();
@@ -322,6 +328,7 @@ export async function executeBet(
       condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order failed: ${msg}`,
     }).select('id').single();
@@ -346,6 +353,7 @@ export async function executeBet(
       condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order rejected: ${orderResult.errorMessage}`,
     }).select('id').single();
@@ -405,6 +413,7 @@ export async function executeBet(
       condition_id: conditionId ?? null,
       edge: params.edge ?? null,
       confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
       placed_at: new Date().toISOString(),
       notes: `Live order ${finalStatus}: ${orderResult.orderId}`,
     }).select('id').single();
@@ -426,6 +435,7 @@ export async function executeBet(
     condition_id: conditionId,
     edge: params.edge ?? null,
     confidence: params.confidence ?? null,
+      predicted_prob: params.predicted_prob ?? null,
     clob_order_id: orderResult.orderId || null,
     order_status: finalStatus,
     placed_at: new Date().toISOString(),

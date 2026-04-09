@@ -61,26 +61,52 @@ function mae(errors: number[]): number {
 }
 
 /**
- * Page through weather_calibration_raw in 1000-row chunks. Supabase caps
- * single-query results at 1000 by default; with ~572k rows we need to page.
+ * Fetch weather_calibration_raw per-city to avoid Supabase statement timeouts.
+ * With ~688k rows total, offset-based paging on the whole table times out past
+ * ~550k. Querying per-city (~40k rows each, 34 cities) stays well within limits.
  */
 async function fetchAllRaw(supabase: SupabaseClient): Promise<RawRow[]> {
+  // First get all distinct city_ids
+  const { data: cities, error: citiesErr } = await supabase
+    .from('weather_calibration_raw')
+    .select('city_id')
+    .not('error_f', 'is', null)
+    .limit(1000);
+  if (citiesErr) throw new Error(`city list fetch: ${citiesErr.message}`);
+  const cityIds = [...new Set((cities ?? []).map((r: { city_id: string }) => r.city_id))];
+
+  // Actually, get city_ids from weather_cities to be sure
+  const { data: allCities, error: allCitiesErr } = await supabase
+    .from('weather_cities')
+    .select('id')
+    .eq('is_active', true);
+  if (allCitiesErr) throw new Error(`weather_cities fetch: ${allCitiesErr.message}`);
+  const activeCityIds = (allCities ?? []).map((c: { id: string }) => c.id);
+
   const all: RawRow[] = [];
-  const PAGE = 1000;
-  let from = 0;
-  while (true) {
-    const { data, error } = await supabase
-      .from('weather_calibration_raw')
-      .select('city_id, valid_date, source, lead_days, forecast_high_f, observed_high_f, error_f')
-      .not('error_f', 'is', null)
-      .range(from, from + PAGE - 1);
-    if (error) throw new Error(`raw fetch: ${error.message}`);
-    if (!data || data.length === 0) break;
-    all.push(...(data as RawRow[]));
-    if (data.length < PAGE) break;
-    from += PAGE;
-    if (from % 10000 === 0) {
-      console.log(`[calibration-derive] loaded ${from} raw rows…`);
+  for (const cityId of activeCityIds) {
+    const PAGE = 1000; // Supabase caps responses at 1000 rows
+    let from = 0;
+    let cityCount = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from('weather_calibration_raw')
+        .select('city_id, valid_date, source, lead_days, forecast_high_f, observed_high_f, error_f')
+        .eq('city_id', cityId)
+        .not('error_f', 'is', null)
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(`raw fetch city ${cityId}: ${error.message}`);
+      if (!data || data.length === 0) break;
+      all.push(...(data as RawRow[]));
+      cityCount += data.length;
+      if (data.length < PAGE) break;
+      from += PAGE;
+    }
+    if (cityCount > 0) {
+      console.log(`[calibration-derive] loaded city ${cityId}: ${cityCount} rows`);
+    }
+    if (all.length % 100000 < 50000 && all.length > 50000) {
+      console.log(`[calibration-derive] total so far: ${all.length} rows…`);
     }
   }
   return all;

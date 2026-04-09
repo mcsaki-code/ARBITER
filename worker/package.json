@@ -9,7 +9,8 @@
     "dev": "ts-node --transpile-only src/index.ts",
     "typecheck": "tsc --noEmit",
     "ingest:calibration": "ts-node --transpile-only src/calibration-ingest.ts",
-    "derive:calibration": "ts-node --transpile-only src/calibration-derive.ts"
+    "derive:calibration": "ts-node --transpile-only src/calibration-derive.ts",
+    "validate:calibration": "ts-node --transpile-only src/calibration-validate.ts"
   },
   "engines": {
     "node": ">=18.0.0"

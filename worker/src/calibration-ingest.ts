@@ -66,6 +66,23 @@ interface RawRow {
  * history window. Uses Open-Meteo's ERA5 archive — this is reanalysis data,
  * not forecasts, so it's the canonical "what actually happened."
  */
+async function fetchWithRetry(url: string, label: string): Promise<Response> {
+  // Open-Meteo free tier caps at ~10k calls/hour per IP. On 429 we back off
+  // for 65s (up to 3 tries) so the script can gracefully ride through minor
+  // burst limits. For a full hourly exhaustion, the script will still bail
+  // cleanly — the resume logic lets you rerun it at the top of the next hour.
+  const MAX_TRIES = 3;
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    const res = await fetch(url);
+    if (res.status !== 429) return res;
+    if (attempt === MAX_TRIES) return res;
+    console.warn(`[calibration-ingest] ${label}: 429 (try ${attempt}/${MAX_TRIES}) — sleeping 65s`);
+    await new Promise((r) => setTimeout(r, 65_000));
+  }
+  // unreachable
+  return fetch(url);
+}
+
 async function fetchObserved(
   city: City,
   startDate: string,
@@ -80,7 +97,7 @@ async function fetchObserved(
   url.searchParams.set('temperature_unit', 'fahrenheit');
   url.searchParams.set('timezone', city.timezone ?? 'auto');
 
-  const res = await fetch(url.toString());
+  const res = await fetchWithRetry(url.toString(), `${city.name} ERA5`);
   if (!res.ok) {
     throw new Error(`ERA5 archive ${city.name}: HTTP ${res.status} ${await res.text()}`);
   }
@@ -123,7 +140,7 @@ async function fetchModelForecast(
   url.searchParams.set('timezone', city.timezone ?? 'auto');
   url.searchParams.set('models', model);
 
-  const res = await fetch(url.toString());
+  const res = await fetchWithRetry(url.toString(), `${city.name} ${model}`);
   if (!res.ok) {
     // Some models don't have deep history. Log and skip.
     console.warn(
@@ -260,14 +277,44 @@ export async function ingestCalibration(): Promise<void> {
   const started = Date.now();
   let totalRows = 0;
 
+  // Resume logic: any city that already has >=30k rows is considered done and
+  // skipped. A full pull produces ~40k rows (7 models × 8 leads × 730 days,
+  // minus rate-limited gaps). 30k is a conservative "mostly complete" bar.
+  // This lets Matt rerun across Open-Meteo's hourly rate-limit boundary
+  // without redoing work.
+  const RESUME_THRESHOLD = 30_000;
+  const existingCounts = new Map<string, number>();
   for (const city of cities) {
+    const { count } = await supabase
+      .from('weather_calibration_raw')
+      .select('*', { count: 'exact', head: true })
+      .eq('city_id', (city as City).id);
+    existingCounts.set((city as City).id, count ?? 0);
+  }
+
+  for (const city of cities) {
+    const existing = existingCounts.get((city as City).id) ?? 0;
+    if (existing >= RESUME_THRESHOLD) {
+      console.log(
+        `[calibration-ingest] ${(city as City).name} — already has ${existing} rows, skipping`
+      );
+      continue;
+    }
     try {
       const n = await ingestCity(supabase, city as City);
       totalRows += n;
     } catch (err) {
-      console.error(
-        `[calibration-ingest] ${city.name} FATAL: ${err instanceof Error ? err.message : String(err)}`
-      );
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[calibration-ingest] ${(city as City).name} FATAL: ${msg}`);
+      // If we hit an hourly rate limit, stop cleanly so the script exits with
+      // partial progress preserved. Matt can rerun at the top of the next
+      // hour and the resume logic picks up where we left off.
+      if (msg.includes('429') || msg.toLowerCase().includes('hourly api request limit')) {
+        console.error(
+          '[calibration-ingest] Hourly rate limit hit — stopping. Rerun at the top of the next hour; resume logic will skip finished cities.'
+        );
+        break;
+      }
     }
   }
 
