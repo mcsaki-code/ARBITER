@@ -9,8 +9,15 @@ import {
   computeBracketProbability,
   type ForecastMember,
   type BracketRange,
+  type CalibrationPrior,
 } from './forecast-ensemble';
 import { writeShadowRow } from './backtest-shadow';
+import {
+  loadCalibrationSnapshot,
+  lookupSigma,
+  lookupWeight,
+  debiasMembers,
+} from './calibration-lookup';
 
 const MIN_EDGE  = 0.08;   // 8% minimum edge
 // Fallback sigma for when we only have 1-2 forecast members and must
@@ -151,6 +158,14 @@ export async function analyzeTemperatureMarkets(
   const { data: cfgRows } = await supabase.from('system_config').select('key, value').eq('key', 'paper_bankroll');
   const bankroll = parseFloat(cfgRows?.[0]?.value ?? '5000');
 
+  // Load calibration snapshot once per run (Phase A.3).
+  // Respects system_config.calibration_enabled. Returns EMPTY_SNAPSHOT if
+  // disabled — every lookup becomes a no-op and we fall back to raw math.
+  const calibration = await loadCalibrationSnapshot(supabase);
+  if (calibration.enabled) {
+    log(`Calibration loaded: sigma=${calibration.rowCounts.sigma} bias=${calibration.rowCounts.bias} weights=${calibration.rowCounts.weights}`);
+  }
+
   let analyzed = 0, skippedRecent = 0, skippedNoCity = 0, skippedNoForecast = 0, skippedLowEdge = 0, errors = 0;
 
   for (const market of tempMarkets) {
@@ -239,7 +254,44 @@ export async function analyzeTemperatureMarkets(
       };
     }
 
-    const forecastProb = computeBracketProbability(members, bracket, hoursRemaining);
+    // ── Build calibration prior (Phase A.3) ──────────────────
+    // When calibration is enabled AND we have enough samples for this
+    // (city, lead, month) bucket, we apply:
+    //   1. Per-model bias correction (debias each member)
+    //   2. Empirical sigma blend (alpha = n_cal/30)
+    //   3. Per-model weighted empirical CDF
+    // All three degrade gracefully — if any lookup misses, it falls
+    // back to raw-math behavior for just that component.
+    const leadDays = Math.max(0, Math.round(hoursRemaining / 24));
+    const monthNum = Number(targetDate.slice(5, 7));
+    let prior: CalibrationPrior | undefined;
+    if (calibration.enabled) {
+      const debiased = debiasMembers(members, calibration, city.id, leadDays, monthNum);
+      const sigmaLookup = lookupSigma(calibration, city.id, leadDays, monthNum);
+      // Build weight map across the sources actually present, normalize
+      // so they sum to 1 over the set of members with a known weight.
+      const weightEntries: Array<[string, number]> = [];
+      let weightSum = 0;
+      for (const m of members) {
+        const w = lookupWeight(calibration, city.id, m.source, leadDays);
+        if (w) {
+          weightEntries.push([m.source, w.weight]);
+          weightSum += w.weight;
+        }
+      }
+      const weightBySource = new Map<string, number>();
+      if (weightSum > 0) {
+        for (const [src, w] of weightEntries) weightBySource.set(src, w / weightSum);
+      }
+      prior = {
+        debiasedMembers: debiased,
+        empiricalSigmaF: sigmaLookup?.sigma_f ?? null,
+        nCalSigma: sigmaLookup?.n ?? null,
+        weightBySource: weightBySource.size > 0 ? weightBySource : undefined,
+      };
+    }
+
+    const forecastProb = computeBracketProbability(members, bracket, hoursRemaining, prior);
     const trueProb = forecastProb.probability;
     const sigmaFEff = forecastProb.sigma_f;
     const sigmaCEff = sigmaFEff * 5 / 9;
@@ -312,7 +364,7 @@ export async function analyzeTemperatureMarkets(
       confidence,
       kelly_fraction: kellyFraction,
       rec_bet_usd: recBetUsd,
-      reasoning: `[Railway-v2] Member-distribution: n=${members.length} forecasts, mean ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), sigma=${sigmaCEff.toFixed(2)}°C (${sigmaFEff.toFixed(2)}°F, method=${forecastProb.method}, ${daysOut}d out), threshold ${T_c}°C ${parsed.operator}, P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
+      reasoning: `[Railway-v3] Member-distribution: n=${members.length} forecasts, mean ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), sigma=${sigmaCEff.toFixed(2)}°C (${sigmaFEff.toFixed(2)}°F, method=${forecastProb.method}, σ_source=${forecastProb.sigma_source}${forecastProb.calibration_used ? ', calibrated' : ''}${forecastProb.n_cal_sigma ? `, n_cal=${forecastProb.n_cal_sigma}` : ''}, ${daysOut}d out), threshold ${T_c}°C ${parsed.operator}, P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
       auto_eligible: confidence === 'HIGH' && members.length >= 3 && absEdge >= MIN_EDGE,
       ensemble_prob: trueProb,
       ensemble_edge: edge,
@@ -321,9 +373,12 @@ export async function analyzeTemperatureMarkets(
         `railway_worker_v2`,
         `forecast_sources_${members.length}`,
         `sigma_${sigmaCEff.toFixed(2)}C_${forecastProb.method}`,
+        `sigma_source_${forecastProb.sigma_source}`,
         `days_out_${daysOut}`,
         `pWin_${(pWin * 100).toFixed(1)}pct`,
         `legacy_sigma_${legacySigmaC.toFixed(1)}C`,
+        ...(forecastProb.calibration_used ? ['calibrated_v1'] : []),
+        ...(forecastProb.method === 'empirical_weighted' ? ['weighted_ecdf'] : []),
       ],
     });
 

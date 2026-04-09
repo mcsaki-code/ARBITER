@@ -39,12 +39,30 @@ export interface BracketRange {
 
 export interface ForecastProbabilityResult {
   probability: number;         // 0-1, Laplace-smoothed
-  method: 'empirical' | 'normal' | 'degenerate';
+  method: 'empirical' | 'normal' | 'degenerate' | 'empirical_weighted';
   n_members: number;
   mean_f: number;
   sigma_f: number;             // effective sigma used
   members_in_bracket: number;  // for empirical mode
   sigma_source: 'sample' | 'floor' | 'blend';
+  calibration_used?: boolean;  // true if priors applied
+  debiased_mean_f?: number;    // mean after per-model bias correction
+  raw_mean_f?: number;         // mean before bias correction
+  n_cal_sigma?: number | null; // sample count behind empirical sigma
+}
+
+// ── Optional calibration prior injected by caller (Phase A.3) ──
+export interface CalibrationPrior {
+  // Per-member bias-corrected temperatures (produced by debiasMembers()
+  // in calibration-lookup.ts). If omitted, raw members are used.
+  debiasedMembers?: ForecastMember[];
+  // Empirical sigma from weather_calibration_sigma (city, lead, month).
+  empiricalSigmaF?: number | null;
+  nCalSigma?: number | null;
+  // Per-model weights from weather_calibration_weights (city, source,
+  // lead_days). Must already be normalized to sum to 1 across the members
+  // actually provided.
+  weightBySource?: Map<string, number>;
 }
 
 // ── Normal CDF (Abramowitz & Stegun 26.2.17, ~7.5e-8 accuracy) ──
@@ -91,9 +109,14 @@ function sampleStats(values: number[]): { mean: number; std: number } {
 export function computeBracketProbability(
   members: ForecastMember[],
   bracket: BracketRange,
-  hoursRemaining: number
+  hoursRemaining: number,
+  prior?: CalibrationPrior
 ): ForecastProbabilityResult {
-  const values = members.map((m) => m.temp_high_f).filter((v) => Number.isFinite(v));
+  // If caller passed debiased members (Phase A.3), use those for stats +
+  // empirical CDF. Keep the raw set around to report raw_mean_f for audit.
+  const rawValues = members.map((m) => m.temp_high_f).filter((v) => Number.isFinite(v));
+  const workingMembers = prior?.debiasedMembers ?? members;
+  const values = workingMembers.map((m) => m.temp_high_f).filter((v) => Number.isFinite(v));
   const n = values.length;
 
   if (n === 0) {
@@ -109,12 +132,65 @@ export function computeBracketProbability(
   }
 
   const { mean, std: sampleStd } = sampleStats(values);
+  const rawMean = rawValues.length > 0 ? rawValues.reduce((a, b) => a + b, 0) / rawValues.length : mean;
   const sigmaFloor = getDynamicSigmaFloor(hoursRemaining);
 
+  // Blend sample sigma with empirical sigma from historical calibration.
+  // alpha = min(1, n_cal/30) — full trust once we have 30+ days of data.
+  let blendedSigma = Math.max(sampleStd, sigmaFloor);
+  let sigmaSource: 'sample' | 'floor' | 'blend' =
+    sampleStd >= sigmaFloor ? 'sample' : 'floor';
+  if (
+    prior?.empiricalSigmaF != null &&
+    prior.nCalSigma != null &&
+    prior.nCalSigma >= 20
+  ) {
+    const alpha = Math.min(1, prior.nCalSigma / 30);
+    const baseline = Math.max(sampleStd, sigmaFloor);
+    blendedSigma = Math.sqrt(
+      alpha * prior.empiricalSigmaF ** 2 + (1 - alpha) * baseline ** 2
+    );
+    sigmaSource = 'blend';
+  }
+
+  const calibrationUsed = !!(
+    prior?.debiasedMembers ||
+    prior?.empiricalSigmaF != null ||
+    (prior?.weightBySource && prior.weightBySource.size > 0)
+  );
+
   // Empirical CDF with Laplace smoothing — only used with ≥5 distinct models.
-  // Count is smoothed as (k + 1) / (n + 2) to prevent 0 or 1 extremes that
-  // would make Kelly sizing blow up on tiny samples.
+  // When weights are provided, use weighted empirical CDF instead:
+  //   p = (sum(w_i * 1[v_i in bracket]) + epsilon) / (sum(w_i) + 2*epsilon)
+  // epsilon = 1/(n+2) to preserve Laplace-style regularization.
   if (n >= 5) {
+    if (prior?.weightBySource && prior.weightBySource.size > 0) {
+      let wHit = 0;
+      let wTotal = 0;
+      for (const m of workingMembers) {
+        const w = prior.weightBySource.get(m.source) ?? 0;
+        if (w <= 0) continue;
+        wTotal += w;
+        if (inBracket(m.temp_high_f, bracket)) wHit += w;
+      }
+      if (wTotal > 0) {
+        const epsilon = 1 / (n + 2);
+        const smoothed = (wHit + epsilon) / (wTotal + 2 * epsilon);
+        return {
+          probability: clamp(smoothed, 0.01, 0.99),
+          method: 'empirical_weighted',
+          n_members: n,
+          mean_f: mean,
+          sigma_f: blendedSigma,
+          members_in_bracket: values.filter((v) => inBracket(v, bracket)).length,
+          sigma_source: sigmaSource,
+          calibration_used: true,
+          debiased_mean_f: mean,
+          raw_mean_f: rawMean,
+          n_cal_sigma: prior?.nCalSigma ?? null,
+        };
+      }
+    }
     const hits = values.filter((v) => inBracket(v, bracket)).length;
     const smoothed = (hits + 1) / (n + 2);
     return {
@@ -122,29 +198,31 @@ export function computeBracketProbability(
       method: 'empirical',
       n_members: n,
       mean_f: mean,
-      sigma_f: Math.max(sampleStd, sigmaFloor),
+      sigma_f: blendedSigma,
       members_in_bracket: hits,
-      sigma_source: sampleStd >= sigmaFloor ? 'sample' : 'floor',
+      sigma_source: sigmaSource,
+      calibration_used: calibrationUsed,
+      debiased_mean_f: prior?.debiasedMembers ? mean : undefined,
+      raw_mean_f: prior?.debiasedMembers ? rawMean : undefined,
+      n_cal_sigma: prior?.nCalSigma ?? null,
     };
   }
 
-  // Normal approximation: use the mean as center, blend sample std with
-  // floor. For 2-4 members, sample std is too noisy to trust on its own;
-  // but if models strongly disagree we want to respect that, so use max.
-  const sigma = Math.max(sampleStd, sigmaFloor);
-  const sigmaSource: 'sample' | 'floor' | 'blend' =
-    sampleStd >= sigmaFloor ? 'sample' : 'floor';
-
-  const prob = normalBracketProb(mean, sigma, bracket);
+  // Normal approximation with debiased mean + blended sigma.
+  const prob = normalBracketProb(mean, blendedSigma, bracket);
 
   return {
     probability: clamp(prob, 0.01, 0.99),
     method: 'normal',
     n_members: n,
     mean_f: mean,
-    sigma_f: sigma,
+    sigma_f: blendedSigma,
     members_in_bracket: values.filter((v) => inBracket(v, bracket)).length,
     sigma_source: sigmaSource,
+    calibration_used: calibrationUsed,
+    debiased_mean_f: prior?.debiasedMembers ? mean : undefined,
+    raw_mean_f: prior?.debiasedMembers ? rawMean : undefined,
+    n_cal_sigma: prior?.nCalSigma ?? null,
   };
 }
 
