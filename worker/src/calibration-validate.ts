@@ -163,7 +163,7 @@ async function main() {
   const mktBriers: number[] = [];
   const naiveBriers: number[] = [];
 
-  for (const row of rows as ShadowRow[]) {
+  for (const row of (rows as unknown as ShadowRow[])) {
     const outcome = row.resolved_outcome === 'YES' ? 1 : 0;
     const uncalProb = clamp(row.predicted_prob, 0.01, 0.99);
 
