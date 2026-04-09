@@ -7,7 +7,9 @@
     "start": "node dist/index.js",
     "build": "tsc",
     "dev": "ts-node --transpile-only src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ingest:calibration": "ts-node --transpile-only src/calibration-ingest.ts",
+    "derive:calibration": "ts-node --transpile-only src/calibration-derive.ts"
   },
   "engines": {
     "node": ">=18.0.0"

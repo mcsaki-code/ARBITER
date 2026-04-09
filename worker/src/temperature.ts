@@ -10,6 +10,7 @@ import {
   type ForecastMember,
   type BracketRange,
 } from './forecast-ensemble';
+import { writeShadowRow } from './backtest-shadow';
 
 const MIN_EDGE  = 0.08;   // 8% minimum edge
 // Fallback sigma for when we only have 1-2 forecast members and must
@@ -246,6 +247,30 @@ export async function analyzeTemperatureMarkets(
     const marketPrice = market.outcome_prices?.[0] ?? 0.5;
     const edge = trueProb - marketPrice;
     const absEdge = Math.abs(edge);
+
+    // ── SHADOW BACKTEST WRITE ─────────────────────────────────
+    // Fire-and-forget: records v2's prediction for EVERY bracket we
+    // analyze, regardless of whether we'd bet on it. Scored later
+    // when the market resolves. Never throws — wrapped internally.
+    // This is our cheap self-building calibration loop (Path B).
+    await writeShadowRow(supabase, {
+      marketId: String(market.id),
+      cityId: city.id,
+      cityName: city.name,
+      bracketKind: bracket.kind,
+      thresholdC: parsed.threshold_c,
+      thresholdF: T_f,
+      bracketLabel: bracket.label,
+      predictedProb: trueProb,
+      sigmaF: sigmaFEff,
+      method: forecastProb.method,
+      nMembers: members.length,
+      meanF: avgHighF,
+      leadTimeHours: hoursRemaining,
+      marketPriceYes: marketPrice,
+      marketLiquidityUsd: market.liquidity_usd ?? null,
+      sourceAnalyzer: 'railway_worker_v2',
+    });
 
     if (absEdge < MIN_EDGE) { skippedLowEdge++; continue; }
 

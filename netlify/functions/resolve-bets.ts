@@ -17,6 +17,7 @@
 import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { recordOutcome } from '../../src/lib/circuit-breaker';
+import { scoreResolvedShadows } from '../../src/lib/backtest-shadow';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -373,5 +374,18 @@ export const handler = schedule('0 * * * *', async () => {
   }
 
   console.log(`[resolve-bets] Done. Resolved ${resolved} bets, PnL $${totalPnl.toFixed(2)} (paper: $${v3Pnl.toFixed(2)}, live: $${livePnl.toFixed(2)})`);
+
+  // ── SHADOW BACKTEST SCORING ─────────────────────────────────
+  // Score any backtest_shadow rows whose markets have since
+  // resolved. This is the readout of Path B — every shadow row
+  // becomes a brier/log-loss/abs_error data point for calibration
+  // without ever placing a bet. Runs hourly with the resolver.
+  try {
+    const shadowResult = await scoreResolvedShadows(supabase, { verbose: true });
+    console.log(`[resolve-bets] shadow scoring: scored=${shadowResult.scored} skipped=${shadowResult.skipped} errors=${shadowResult.errors}`);
+  } catch (err) {
+    console.warn(`[resolve-bets] shadow scoring failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   return { statusCode: 200 };
 });
