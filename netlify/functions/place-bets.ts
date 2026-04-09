@@ -410,6 +410,26 @@ export const handler = schedule('*/15 * * * *', async () => {
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
     if (betAmount < 1) { console.log(`[place-bets] BREAK ${shortId} — betAmount ${betAmount.toFixed(2)} < $1 (maxSingle=${maxSingleBet.toFixed(2)} remaining=${(maxDailyExposure - totalDeployed).toFixed(2)})`); break; }
 
+    // ── gopfan2-style micro-bet caps for sub-10¢ tail zone ───────
+    // The $2M+ Polymarket weather winner's rule set: "buy Yes below
+    // 15¢, never risk more than $1-$2 per position." Tail bets are
+    // high-variance by design — size them to survive long cold streaks
+    // so one 10-20x winner pays for 15+ losers. Kelly fractional sizing
+    // is too aggressive on binary bets with 5-10% implied prob; cap
+    // hard by entry zone.
+    //   entry < 0.05  → max $1   (deep tail, expected 1-in-20+)
+    //   entry 0.05-0.10 → max $2 (standard tail, expected 1-in-10-20)
+    //   entry 0.10-0.15 → max $5 (shallow tail)
+    const mktPriceForCap = analysis.market_price ?? 0;
+    let microCap = Infinity;
+    if (mktPriceForCap > 0 && mktPriceForCap < 0.05) microCap = 1;
+    else if (mktPriceForCap >= 0.05 && mktPriceForCap < 0.10) microCap = 2;
+    else if (mktPriceForCap >= 0.10 && mktPriceForCap < 0.15) microCap = 5;
+    if (betAmount > microCap) {
+      console.log(`[place-bets] MICRO-CAP ${shortId}: $${betAmount.toFixed(2)} → $${microCap} (entry=${mktPriceForCap.toFixed(3)}, gopfan2 rule)`);
+      betAmount = microCap;
+    }
+
     // Liquidity cap: never deploy more than 5% of market's liquidity
     const maxByLiquidity = Math.max(1, (currentMarket.liquidity_usd || 0) * 0.05);
     if (betAmount > maxByLiquidity) {

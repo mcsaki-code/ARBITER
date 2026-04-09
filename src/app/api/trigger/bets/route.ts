@@ -330,6 +330,18 @@ export async function GET() {
         continue;
       }
 
+      // gopfan2-style micro-bet caps (mirror place-bets.ts). Size for
+      // survival on binary tail bets: one 10-20x winner must pay for
+      // 15+ losers, so individual stakes stay small.
+      let microCap = Infinity;
+      if (entryPrice < 0.05) microCap = 1;
+      else if (entryPrice < 0.10) microCap = 2;
+      else if (entryPrice < 0.15) microCap = 5;
+      if (betAmount > microCap) {
+        log.push(`Micro-cap ${analysis.market_id.substring(0, 8)}: $${betAmount.toFixed(2)} → $${microCap} (entry ${entryPrice.toFixed(3)})`);
+        betAmount = microCap;
+      }
+
       // Execute bet through the paper/live bridge
       const analysisId = analysis.category === 'weather' ? analysis.id : null;
 

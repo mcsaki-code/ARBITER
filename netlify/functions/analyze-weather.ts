@@ -9,6 +9,11 @@ import { schedule } from '@netlify/functions';
 import { createClient } from '@supabase/supabase-js';
 import { ensembleAnalyze, type EnsembleResult } from '../../src/lib/ensemble';
 import { getCityCalibration, getEdgeMultiplier, getBiasCorrection, getCalibrationContext } from '../../src/lib/calibration';
+import {
+  computeBracketProbability,
+  parseBracketFromQuestion,
+  type ForecastMember,
+} from '../../src/lib/forecast-ensemble';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -26,7 +31,14 @@ const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 // single-model Claude despite being marketed as 3-AI consensus.
 const USE_ENSEMBLE = true;
 
-export const handler = schedule('*/20 * * * *', async () => {
+// Cadence: every 10 min (was 20). Top Polymarket weather bots scan
+// every 2 min; 10 is the tightest we can go on Netlify sync functions
+// without risking 26s timeouts across 8-market batches. The primary
+// edge window is the 1-4h after GFS/ECMWF model releases (00/06/12/18z
+// UTC), where Polymarket prices lag the freshly updated forecasts.
+// At 10-min cadence we get 6 scans per hour instead of 3, halving the
+// average latency between a forecast update and our recompute.
+export const handler = schedule('*/10 * * * *', async () => {
   console.log('[analyze-weather-v2] Starting enhanced weather analysis');
   const startTime = Date.now();
 
@@ -303,6 +315,108 @@ export const handler = schedule('*/20 * * * *', async () => {
         );
       }
 
+      // ========================================================
+      // FORECAST-ENSEMBLE OVERRIDE (2026-04-08)
+      // The LLM ensemble produces a hallucinated true_prob.
+      // When we can parse a bracket range from the question, we
+      // compute the probability DIRECTLY from the forecast member
+      // distribution — this is what gopfan2 / suislanchez's bot
+      // actually does. The LLM's true_prob is kept in flags for
+      // calibration and as fallback when parsing fails.
+      // ========================================================
+      if (
+        analysis.best_bet &&
+        analysis.best_bet.direction !== 'PASS' &&
+        marketType.startsWith('temperature')
+      ) {
+        const bracket = parseBracketFromQuestion(market.question);
+        if (bracket && forecasts && forecasts.length > 0) {
+          const members: ForecastMember[] = forecasts
+            .filter((f: { temp_high_f: number | null }) => f.temp_high_f != null)
+            .map((f: { source: string; temp_high_f: number }) => ({
+              source: f.source,
+              temp_high_f: f.temp_high_f,
+            }));
+
+          if (members.length >= 2) {
+            const forecastProb = computeBracketProbability(members, bracket, hoursRemaining);
+            const llmProb = analysis.best_bet.true_prob ?? null;
+            const mktPriceNow = analysis.best_bet.market_price ?? null;
+
+            // Recompute edge from forecast-ensemble prob vs current market price.
+            // Edge sign is preserved per direction:
+            //   BUY_YES: edge = forecastProb - mktPrice (positive when YES is underpriced)
+            //   BUY_NO:  edge = mktPrice - forecastProb (positive when YES is overpriced)
+            let recomputedEdge: number | null = null;
+            if (mktPriceNow !== null && mktPriceNow > 0 && mktPriceNow < 1) {
+              const direction = analysis.best_bet.direction;
+              recomputedEdge =
+                direction === 'BUY_NO'
+                  ? mktPriceNow - forecastProb.probability
+                  : forecastProb.probability - mktPriceNow;
+            }
+
+            // Persist the LLM prob + forecast prob side-by-side in flags
+            // so the learning loop can build a calibration curve comparing
+            // LLM hallucinations vs. measured probability.
+            analysis.flags = analysis.flags || [];
+            analysis.flags.push(
+              `forecast_ensemble_override: bracket=${bracket.label} ` +
+                `n=${forecastProb.n_members} method=${forecastProb.method} ` +
+                `mean=${forecastProb.mean_f.toFixed(1)}°F sigma=${forecastProb.sigma_f.toFixed(2)} ` +
+                `prob=${forecastProb.probability.toFixed(4)} (llm=${llmProb?.toFixed(4) ?? 'null'})`
+            );
+
+            // Sanity guard: if the forecast prob and LLM prob disagree by more
+            // than 15 percentage points, the LLM is almost certainly wrong.
+            // Downgrade confidence one level and mark the flag.
+            if (llmProb !== null && Math.abs(llmProb - forecastProb.probability) > 0.15) {
+              analysis.flags.push('forecast_vs_llm_divergence_gt_15pp');
+              if (analysis.best_bet.confidence === 'HIGH') {
+                analysis.best_bet.confidence = 'MEDIUM';
+              } else if (analysis.best_bet.confidence === 'MEDIUM') {
+                analysis.best_bet.confidence = 'LOW';
+              }
+            }
+
+            // Kill-switch: if the recomputed edge flips sign (LLM said positive
+            // edge, measurement says negative), PASS. This is the "Claude
+            // hallucinated a bet that doesn't exist" catch.
+            if (
+              recomputedEdge !== null &&
+              analysis.best_bet.edge != null &&
+              Math.sign(recomputedEdge) !== Math.sign(analysis.best_bet.edge) &&
+              recomputedEdge < 0
+            ) {
+              console.log(
+                `[analyze-weather-v2] ${city.name} — forecast-ensemble kills bet: ` +
+                  `LLM edge=${analysis.best_bet.edge}, measured edge=${recomputedEdge.toFixed(4)}`
+              );
+              analysis.flags.push('forecast_ensemble_killed_hallucinated_edge');
+              analysis.best_bet.direction = 'PASS';
+            }
+
+            // Override the authoritative numbers. Kelly and insert use these.
+            analysis.best_bet.true_prob = forecastProb.probability;
+            if (recomputedEdge !== null) {
+              analysis.best_bet.edge = recomputedEdge;
+            }
+
+            // Stash the forecast-ensemble metadata for the DB row.
+            analysis.forecast_ensemble_prob = forecastProb.probability;
+            analysis.forecast_ensemble_method = forecastProb.method;
+            analysis.forecast_ensemble_n = forecastProb.n_members;
+            analysis.forecast_ensemble_sigma = forecastProb.sigma_f;
+          } else {
+            analysis.flags = analysis.flags || [];
+            analysis.flags.push(`forecast_ensemble_skipped_insufficient_members_${members.length}`);
+          }
+        } else if (!bracket) {
+          analysis.flags = analysis.flags || [];
+          analysis.flags.push('forecast_ensemble_skipped_bracket_parse_failed');
+        }
+      }
+
       // Calculate Kelly bet size
       let kellyFraction = 0;
       let recBetUsd = 0;
@@ -428,7 +542,11 @@ export const handler = schedule('*/20 * * * *', async () => {
         rec_bet_usd: recBetUsd,
         reasoning: analysis.best_bet?.reasoning ?? null,
         auto_eligible: analysis.auto_eligible || false,
-        ensemble_prob: analysis.best_bet?.ensemble_prob ?? null,
+        // Forecast-ensemble measurement (not to be confused with LLM ensemble).
+        // This is the probability computed directly from forecast member
+        // distribution — the gopfan2/suislanchez math. Null if bracket couldn't
+        // be parsed from question text or there weren't enough members.
+        ensemble_prob: analysis.forecast_ensemble_prob ?? null,
         ensemble_edge: analysis.best_bet?.ensemble_edge ?? null,
         precip_consensus: consensus.precip_consensus_mm ?? null,
         flags: analysis.flags || [],
