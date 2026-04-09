@@ -30,10 +30,17 @@ const supabase = createClient(
 const MAX_SINGLE_BET_PCT = 0.03;       // 3% of bankroll max per bet
 const MAX_DAILY_EXPOSURE_PCT = 0.20;   // 20% of bankroll deployed per day
 const MAX_BETS_PER_MARKET = 1;         // one bet per market
-const MAX_BETS_PER_DAY = 15;           // max 15 bets per day across all markets
-// Phase 2 (temperature laddering): multiple adjacent brackets for the same
-// city can now produce bets. Cap per-city so a single city's ladder can't
-// eat the entire daily budget if the forecast distribution favors one day.
+// Phase 2.1: raised from 15 → 22 to accommodate temperature laddering.
+// With the Railway v2 forecast-ensemble math finding more edges (tighter
+// sigma → previously missed bets now qualify) + 4-bracket ladders per
+// city, 15 was hitting its ceiling on 2026-04-08 (16 placed, 1 rejected).
+// 22 = 4 cities × 4 ladder rungs + 6 non-ladder singletons. Still well
+// under the 20% daily exposure cap which remains the real risk limit.
+const MAX_BETS_PER_DAY = 22;
+// Phase 2: multiple adjacent brackets for the same city can now produce
+// bets. Cap per-city so a single city's ladder can't eat the entire
+// daily budget. Calibrated against current candidate distribution: the
+// top city typically has 4 qualifying brackets.
 const MAX_BETS_PER_CITY_PER_DAY = 4;
 const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
 const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
