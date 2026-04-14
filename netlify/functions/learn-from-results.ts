@@ -193,8 +193,15 @@ export const handler = schedule('0 6 * * *', async () => {
     const wr = wins / group.length;
     const pnl = sum(group, b => b.pnl);
     const wagered = sum(group, b => b.amount_usd);
-    const shouldBlock = wr < 0.3 && group.length >= 5;
-    const shouldUnblock = wr >= 0.4 && group.length >= 10 && currentBlocked.has(dir);
+    const roi = wagered > 0 ? pnl / wagered : 0;
+    // Tail-strategy guard: this is a low-WR / high-payout strategy by design,
+    // so WR alone is not a valid block signal. Only block a direction if ROI
+    // is meaningfully negative AND sample is large enough. A positive-ROI
+    // direction must never be auto-blocked on WR.
+    const shouldBlock = roi < -0.15 && wr < 0.2 && group.length >= 20;
+    const shouldUnblock =
+      currentBlocked.has(dir) &&
+      (roi >= 0 || (wr >= 0.4 && group.length >= 10));
 
     let action: string | null = null;
     if (shouldBlock && !currentBlocked.has(dir)) {
