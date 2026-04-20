@@ -218,11 +218,9 @@ export async function GET() {
         continue;
       }
 
-      // V3.2: BUY_NO is blocked. Tail-bet strategy is BUY_YES-only.
-      if (analysis.direction === 'BUY_NO') {
-        log.push(`Skip ${analysis.market_id.substring(0, 8)} — BUY_NO blocked (V3.2)`);
-        continue;
-      }
+      // 2026-04-20: removed V3.2 hardcoded BUY_NO block (see place-bets.ts
+      // and worker/src/temperature.ts for rationale). Learned blocks from
+      // learn-from-results remain the single source of direction gating.
 
       // Learned dynamic direction block (written by learn-from-results)
       const blockedDirs = (config.blocked_directions || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -518,8 +516,7 @@ Respond ONLY in JSON:
 
     const bet = analysis.best_bet;
     if (!bet || bet.direction === 'PASS' || !bet.edge || bet.edge < MIN_EDGE_WEATHER) return [];
-    // V3.2: BUY_NO blocked at analysis time too
-    if (bet.direction === 'BUY_NO') return [];
+    // 2026-04-20: V3.2 hardcoded BUY_NO rejection removed. See place-bets.ts.
     // V3.2: reject saturated-edge hallucinations instead of capping
     if (Math.abs(bet.edge) > 0.30) return [];
 

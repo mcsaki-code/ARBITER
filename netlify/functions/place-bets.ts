@@ -340,11 +340,12 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     if (analysis.market_price) analysis.market_price = normalizeProb(analysis.market_price);
 
-    // ── BUY_NO BLOCK (learned from backtest: 0/11 win rate) ────
-    if (analysis.direction === 'BUY_NO') {
-      console.log(`[place-bets] SKIP ${shortId} — BUY_NO disabled (0% historical win rate)`);
-      continue;
-    }
+    // 2026-04-20: removed hardcoded BUY_NO block. The "0/11 win rate"
+    // rationale pre-dates V3.3 reset and was combined with an analyzer
+    // that never emitted BUY_NO, making the claim un-testable. Now that
+    // the worker emits both directions (32 BUY_NO in the first post-fix
+    // cycle), any real profitability signal must come from the learner,
+    // not from a stale constant.
 
     // ── Learned dynamic direction block ──────────────────────
     // learn-from-results can append directions to `blocked_directions`
