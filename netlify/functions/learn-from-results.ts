@@ -188,6 +188,15 @@ export const handler = schedule('0 6 * * *', async () => {
   );
   const originalBlocked = new Set(currentBlocked);
 
+  // 2026-04-20: Cooldown guard. After a manual unblock we must give the
+  // pipeline time to generate fresh data before re-blocking. Without this
+  // the learner reads the (old) resolved-bets table, sees the same bad
+  // stats, and instantly re-blocks — wedging the system indefinitely.
+  const { data: cooldownCfg } = await supabase
+    .from('system_config').select('value').eq('key', 'blocked_directions_cooldown_until').single();
+  const cooldownUntil = cooldownCfg?.value ? new Date(cooldownCfg.value) : null;
+  const inCooldown = cooldownUntil && !isNaN(cooldownUntil.getTime()) && cooldownUntil > new Date();
+
   for (const [dir, group] of Object.entries(dirGroups)) {
     const wins = group.filter(b => b.status === 'WON').length;
     const wr = wins / group.length;
@@ -198,7 +207,14 @@ export const handler = schedule('0 6 * * *', async () => {
     // so WR alone is not a valid block signal. Only block a direction if ROI
     // is meaningfully negative AND sample is large enough. A positive-ROI
     // direction must never be auto-blocked on WR.
-    const shouldBlock = roi < -0.15 && wr < 0.2 && group.length >= 20;
+    //
+    // Also: only act on reasonably fresh samples. A stale 55-bet window from
+    // pre-unblock should not be allowed to re-block the direction. We require
+    // at least 10 *new* bets since the cooldown anchor — that's enforced
+    // upstream by setting the cooldown whenever the direction list is
+    // mutated, and observed here by skipping blocks while the cooldown is
+    // active.
+    const shouldBlock = !inCooldown && roi < -0.15 && wr < 0.2 && group.length >= 20;
     const shouldUnblock =
       currentBlocked.has(dir) &&
       (roi >= 0 || (wr >= 0.4 && group.length >= 10));
@@ -210,6 +226,8 @@ export const handler = schedule('0 6 * * *', async () => {
     } else if (shouldUnblock) {
       currentBlocked.delete(dir);
       action = `UNBLOCKED ${dir} — recovered to ${(wr * 100).toFixed(0)}% WR over ${group.length} bets`;
+    } else if (!shouldBlock && inCooldown && roi < -0.15 && wr < 0.2 && group.length >= 20) {
+      action = `BLOCK SUPPRESSED for ${dir} — cooldown active until ${cooldownUntil!.toISOString()}`;
     }
 
     insights.push({
@@ -230,12 +248,15 @@ export const handler = schedule('0 6 * * *', async () => {
     });
   }
 
-  // Persist blocked_directions if changed
+  // Persist blocked_directions if changed, and set a 7-day cooldown whenever
+  // we mutate the list. Prevents tight oscillation on a stale bet window.
   const newBlockedStr = Array.from(currentBlocked).join(',');
   const oldBlockedStr = Array.from(originalBlocked).join(',');
   if (newBlockedStr !== oldBlockedStr) {
     await setConfig('blocked_directions', newBlockedStr);
-    console.log(`[learn-v2] blocked_directions: "${oldBlockedStr}" → "${newBlockedStr}"`);
+    const newCooldown = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    await setConfig('blocked_directions_cooldown_until', newCooldown);
+    console.log(`[learn-v2] blocked_directions: "${oldBlockedStr}" → "${newBlockedStr}" (cooldown → ${newCooldown})`);
   }
 
   // ============================================================

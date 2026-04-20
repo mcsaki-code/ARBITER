@@ -326,17 +326,12 @@ export async function analyzeTemperatureMarkets(
 
     if (absEdge < MIN_EDGE) { skippedLowEdge++; continue; }
 
-    // BUY_NO is empirically 0/11 in V3.2 — skip rather than emit dead
-    // analyses that place-bets.ts will just throw away. This keeps the
-    // analyses table clean and lets the learning loop see only the
-    // directions we actually trade.
-    if (edge <= 0) {
-      skippedLowEdge++;
-      log(`SKIP ${parsed.city} ${parsed.operator}${T_c}°C — BUY_NO suppressed (edge ${(edge*100).toFixed(1)}%)`);
-      continue;
-    }
-
-    const direction = 'BUY_YES';
+    // 2026-04-20: BUY_NO suppression removed. The V3.2-era "0/11" sample
+    // pre-dates V3.3 reset and biased the learner's direction audit (100%
+    // of bets were BUY_YES, so the learner blocked BUY_YES and starved the
+    // whole pipeline). Emit both directions; let place-bets.ts filter on
+    // learned blocks, and let the learning loop see real data.
+    const direction: 'BUY_YES' | 'BUY_NO' = edge > 0 ? 'BUY_YES' : 'BUY_NO';
     const confidence = absEdge >= 0.20 ? 'HIGH' : absEdge >= 0.10 ? 'MEDIUM' : 'LOW';
 
     // Kelly — CORRECT formula for BUY_NO: pWin = 1 - trueProb

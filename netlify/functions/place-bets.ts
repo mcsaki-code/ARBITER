@@ -46,14 +46,16 @@ const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
 const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
 const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update frequently
 
-// Entry price bounds — derived from empirical data:
+// Entry price bounds — derived from empirical data on 55 resolved V3.3 bets:
 //   - ALL bets with entry > 0.40 have lost (100% loss rate)
-//   - Best wins come from tail entries <15¢ (10x-27x payout)
-//   - Sub-5¢ zone is empirically 0/16 through 2026-04-07 (P=5% random,
-//     -$261 P&L) → model systematically overconfident on extreme tails.
-//     MIN raised 0.02 → 0.05 on 2026-04-07. Reassess at n=35.
-const MIN_ENTRY_PRICE = 0.05;
-const MAX_ENTRY_PRICE = 0.40;
+//   - 5-10¢ "sweet spot" is 0/23, -$46 P&L (ROI -100%)
+//   - 10-15¢ "mid-tail" is 0/13, -$65 P&L (ROI -100%)
+//   - 15-25¢ "moderate" is 3/14, +$45 P&L (ROI +29%) — the ONLY profitable band
+//   - 25-40¢ "expensive" is 1/5, -$35 P&L (ROI -48%)
+// 2026-04-20: raised MIN 0.05 → 0.15 to trade only the profitable zone.
+// MAX tightened to 0.25 to avoid the expensive band where ROI collapses.
+const MIN_ENTRY_PRICE = 0.15;
+const MAX_ENTRY_PRICE = 0.25;
 
 // Whale insight: optimal entry window is 24-48h before resolution.
 // Too early = forecast uncertainty too high. Too late = market already priced in.
