@@ -166,6 +166,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       'kelly_boost_medium_high',
       'kelly_boost_low_high',
       'blocked_directions',
+      // Option B (2026-04-30): config-driven safety restrictions
+      // applied after the kill-criterion halt of 2026-04-23.
+      'blocked_cities',  // comma-separated city names — no spaces between commas
+      'min_confidence',  // 'HIGH' | 'MEDIUM' (default 'MEDIUM' if unset)
     ]);
 
   const config: Record<string, string> = {};
@@ -227,6 +231,32 @@ export const handler = schedule('*/15 * * * *', async () => {
   console.log(
     `[place-bets] Phase2 per-city counts: ${JSON.stringify(Object.fromEntries(betsPerCity))}`
   );
+
+  // Option B blocklist: build city_id → name lookup so we can match
+  // analysis.city_id (UUID) against the human-readable blocklist value.
+  const blockedCitiesRaw = (config.blocked_cities || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const blockedCityIds = new Set<string>();
+  if (blockedCitiesRaw.length > 0) {
+    const { data: blockedRows } = await supabase
+      .from('weather_cities')
+      .select('id, name')
+      .in('name', blockedCitiesRaw);
+    for (const row of blockedRows || []) {
+      blockedCityIds.add(String(row.id));
+    }
+    console.log(
+      `[place-bets] City blocklist active (${blockedCityIds.size}/${blockedCitiesRaw.length} matched): ${blockedCitiesRaw.join(', ')}`
+    );
+  }
+
+  // Configurable confidence floor. Default 'MEDIUM' preserves prior behaviour.
+  const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
+  const allowedConfidences =
+    minConfidence === 'HIGH' ? new Set(['HIGH'])
+    : minConfidence === 'LOW' ? new Set(['HIGH', 'MEDIUM', 'LOW'])
+    : new Set(['HIGH', 'MEDIUM']);
+  console.log(`[place-bets] min_confidence=${minConfidence} → allowed=${Array.from(allowedConfidences).join(',')}`);
 
   console.log(`[place-bets] Today: ${todaysBets?.length || 0} bets, $${todayExposure.toFixed(2)} deployed, bankroll $${bankroll}`);
 
@@ -328,6 +358,13 @@ export const handler = schedule('*/15 * * * *', async () => {
     // ladder from consuming the entire daily bet budget.
     const analysisCityId = (analysis as { city_id?: string | null }).city_id;
     if (analysisCityId) {
+      // Option B (2026-04-30): hard blocklist for cities with -100% ROI
+      // history (Singapore/London/Tokyo/Istanbul/Seoul/NYC/Buenos Aires
+      // by default — see system_config.blocked_cities).
+      if (blockedCityIds.has(String(analysisCityId))) {
+        console.log(`[place-bets] SKIP ${shortId} — city ${analysisCityId} on blocked_cities list`);
+        continue;
+      }
       const cityBetCount = betsPerCity.get(String(analysisCityId)) || 0;
       if (cityBetCount >= MAX_BETS_PER_CITY_PER_DAY) {
         console.log(
@@ -357,13 +394,16 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
-    // Eligibility: confidence >= MEDIUM AND edge >= MIN_EDGE_WEATHER
+    // Eligibility: confidence ∈ allowedConfidences AND edge >= MIN_EDGE_WEATHER.
+    // allowedConfidences is config-driven (system_config.min_confidence) —
+    // Option B sets it to 'HIGH' to filter out the MEDIUM×HIGH bleeder
+    // pattern (n=55, 7% WR, -$214 P&L) that drove the 4/23 kill criterion.
     const isEligible =
-      (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
+      allowedConfidences.has(String(analysis.confidence).toUpperCase()) &&
       edgeNorm >= MIN_EDGE_WEATHER;
 
     if (!isEligible) {
-      console.log(`[place-bets] SKIP ${shortId} — not eligible: conf=${analysis.confidence} edge=${edgeNorm.toFixed(3)}`);
+      console.log(`[place-bets] SKIP ${shortId} — not eligible: conf=${analysis.confidence} edge=${edgeNorm.toFixed(3)} (min_conf=${minConfidence})`);
       continue;
     }
 
