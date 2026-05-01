@@ -358,11 +358,13 @@ export async function GET() {
         entryPrice = 1 - entryPrice;
       }
 
-      // 2026-04-30 Option B: tightened to 0.15-0.25, the only profitable
-      // band on 86 V3.3 bets (15-25¢ = +15% ROI, all others negative).
-      // Mirrors place-bets.ts. Was 0.05/0.40 prior.
+      // 2026-04-30 Option B: tightened to 0.15-0.25.
+      // 2026-05-01: further tightened MAX 0.25 → 0.20. Empirical re-audit of
+      // V3.3 90-bet corpus showed 20-25¢ band lost -29% ROI on 14 bets;
+      // 15-20¢ is the only profitable sub-band (+29% ROI on 21 bets).
+      // Mirrors place-bets.ts.
       const MIN_ENTRY_PRICE = 0.15;
-      const MAX_ENTRY_PRICE = 0.25;
+      const MAX_ENTRY_PRICE = 0.20;
       if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
         continue;

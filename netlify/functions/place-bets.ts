@@ -46,16 +46,19 @@ const MIN_EDGE_WEATHER = 0.08;         // 8% minimum edge for weather
 const MIN_LIQUIDITY = 400;             // Weather brackets have $400-$2K liquidity
 const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update frequently
 
-// Entry price bounds — derived from empirical data on 55 resolved V3.3 bets:
-//   - ALL bets with entry > 0.40 have lost (100% loss rate)
-//   - 5-10¢ "sweet spot" is 0/23, -$46 P&L (ROI -100%)
-//   - 10-15¢ "mid-tail" is 0/13, -$65 P&L (ROI -100%)
-//   - 15-25¢ "moderate" is 3/14, +$45 P&L (ROI +29%) — the ONLY profitable band
-//   - 25-40¢ "expensive" is 1/5, -$35 P&L (ROI -48%)
-// 2026-04-20: raised MIN 0.05 → 0.15 to trade only the profitable zone.
-// MAX tightened to 0.25 to avoid the expensive band where ROI collapses.
+// Entry price bounds — derived from empirical data on V3.3 resolved bets.
+// Re-audited 2026-05-01 on the 90-bet V3.3 corpus:
+//   - 5-10¢   tail: 29 bets, 0 wins, -$58 P&L (ROI -100%)
+//   - 10-15¢  mid-tail: 15 bets, 0 wins, -$75 P&L (ROI -100%)
+//   - 15-20¢  the ONLY profitable band: 21 bets, 4 wins, +$68 P&L (ROI +29%)
+//   - 20-25¢  loses: 14 bets, 2 wins, -$43 P&L (ROI -29%)
+//   - 25-40¢  loses: 11 bets, 3 wins, -$34 P&L (ROI -23%)
+// 2026-04-20: raised MIN 0.05 → 0.15.
+// 2026-04-30: tightened MAX 0.40 → 0.25 (Option B).
+// 2026-05-01: tightened MAX 0.25 → 0.20 — the 20-25¢ sub-band lost -29% ROI
+//             on 14 bets (would have saved $43 on actual V3.3 history).
 const MIN_ENTRY_PRICE = 0.15;
-const MAX_ENTRY_PRICE = 0.25;
+const MAX_ENTRY_PRICE = 0.20;
 
 // Whale insight: optimal entry window is 24-48h before resolution.
 // Too early = forecast uncertainty too high. Too late = market already priced in.
