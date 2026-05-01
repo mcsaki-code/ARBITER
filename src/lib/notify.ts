@@ -134,3 +134,60 @@ export async function notifyDailySummary(summary: {
     // Silent fail
   }
 }
+
+/**
+ * Phase 1 vol-exit dry-run: alert that the daily-cap of dry-run alerts
+ * has been hit. Informational only — the monitor keeps running and
+ * keeps recording alerts; this email exists to flag a "spike day"
+ * that's worth eyeballing.
+ *
+ * Fail-silent like the other notifiers — never blocks monitor execution.
+ */
+export async function sendVolumeExitCapNotification(args: {
+  alertCount: number;
+  cap: number;
+  isoDate: string; // YYYY-MM-DD, in UTC (matches DATE(alert_at))
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const toEmail = process.env.NOTIFICATION_EMAIL;
+
+  if (!apiKey || !toEmail) return;
+
+  const subject = `[VOL-EXIT] Dry-run alert cap hit — ${args.alertCount} today`;
+
+  const html = [
+    `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 500px; margin: 0 auto; background: #0d0d14; color: #e0e0e8; padding: 24px; border-radius: 12px;">`,
+    `<h2 style="color: #f0b429; margin: 0 0 16px 0;">Volume-Exit Alert Cap Hit</h2>`,
+    `<div style="background: #1a1a2e; padding: 16px; border-radius: 8px;">`,
+    `<p style="margin: 0 0 8px 0;"><strong>Date:</strong> ${args.isoDate} (UTC)</p>`,
+    `<p style="margin: 0 0 8px 0;"><strong>Alerts today:</strong> ${args.alertCount} (cap: ${args.cap})</p>`,
+    `<p style="margin: 0; font-size: 13px; color: #9999aa;">Phase 1 dry-run — no positions were touched. Monitor continues to record alerts; this is the only email you'll get today.</p>`,
+    `</div>`,
+    `<p style="font-size: 12px; color: #555570; margin-top: 12px;">`,
+    `<a href="https://arbit3r.netlify.app/tracker" style="color: #f0b429;">View Dashboard →</a>`,
+    `</p>`,
+    `</div>`,
+  ].join('\n');
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'Arbiter <onboarding@resend.dev>',
+        to: [toEmail],
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn(`[notify] vol-exit cap email failed (${res.status}): ${text}`);
+    }
+  } catch (err) {
+    console.warn(`[notify] vol-exit cap email error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}

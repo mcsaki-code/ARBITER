@@ -286,3 +286,180 @@ export async function fetchPolymarketAllWeather(): Promise<ParsedMarket[]> {
 
 // Re-export CITY_KEYWORDS for use by other modules
 export { CITY_KEYWORDS };
+
+// ============================================================
+// Phase 1 — Volume-Spike Exit Trigger (Dry-Run)
+// ============================================================
+// Helpers for the position monitor. All read-only against the
+// public Polymarket Data API (no auth needed).
+//
+// Verified 2026-05-01 against `https://data-api.polymarket.com/trades`:
+//   - `market=<conditionId>` filter works
+//   - returns trades sorted DESC by `timestamp` (unix seconds)
+//   - per-trade fields used here: timestamp, size, price, side
+//
+// CAVEAT: a single page is finite (default ~500). For very-high-
+// volume markets the trailing-24h baseline will be undersampled.
+// For ARBITER's weather-only universe this is fine; if we extend
+// to busier markets, paginate with `offset`.
+// ============================================================
+
+const DATA_API_BASE = 'https://data-api.polymarket.com';
+const DATA_API_TIMEOUT_MS = 8000;
+
+interface DataApiTrade {
+  timestamp: number; // unix seconds
+  size: number;
+  price: number;
+  side: 'BUY' | 'SELL';
+  conditionId: string;
+  asset: string;
+}
+
+/**
+ * Fetch raw trades for a market from the public data API.
+ * Returns [] on any error (fail-open contract for the monitor).
+ */
+async function fetchMarketTrades(
+  conditionId: string,
+  limit = 500
+): Promise<DataApiTrade[]> {
+  try {
+    const params = new URLSearchParams({
+      market: conditionId,
+      limit: String(limit),
+    });
+    const res = await fetch(`${DATA_API_BASE}/trades?${params}`, {
+      signal: AbortSignal.timeout(DATA_API_TIMEOUT_MS),
+      headers: { Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      console.warn(`[polymarket] data-api /trades ${res.status} for ${conditionId.slice(0, 12)}…`);
+      return [];
+    }
+    const trades = (await res.json()) as DataApiTrade[];
+    return Array.isArray(trades) ? trades : [];
+  } catch (err) {
+    console.warn(
+      `[polymarket] data-api /trades failed for ${conditionId.slice(0, 12)}…:`,
+      err instanceof Error ? err.message : String(err)
+    );
+    return [];
+  }
+}
+
+/**
+ * USD-equivalent trade volume for a market over the trailing N minutes.
+ * Sums (size * price) for trades where `now - timestamp <= windowMinutes`.
+ *
+ * USD-denominated to match the rest of the schema (markets.volume_usd,
+ * markets.liquidity_usd are all USD). Treats BUY and SELL identically —
+ * we care about flow, not direction.
+ *
+ * Returns 0 on error. Phase 1 is dry-run; never throws.
+ */
+export async function getRecentVolume(
+  conditionId: string,
+  windowMinutes: number
+): Promise<number> {
+  const trades = await fetchMarketTrades(conditionId, 500);
+  if (trades.length === 0) return 0;
+
+  const cutoff = Math.floor(Date.now() / 1000) - windowMinutes * 60;
+  let total = 0;
+  for (const t of trades) {
+    if (t.timestamp < cutoff) continue;
+    const size = Number(t.size) || 0;
+    const price = Number(t.price) || 0;
+    total += size * price;
+  }
+  return total;
+}
+
+/**
+ * Average USD-equivalent trade volume per `windowMinutes` window over the
+ * trailing `hours` hours. Used as the rolling baseline for spike detection.
+ *
+ * Implementation: pull up to 2000 recent trades, bucket by integer-divided
+ * window-index, average across buckets that contain at least one trade.
+ * Empty buckets are excluded — averaging over time-elapsed/window would
+ * understate baselines for sleepy markets and trip false alerts.
+ *
+ * Returns 0 on error or insufficient data. The monitor treats 0 as
+ * "no usable baseline yet" and skips the alert check.
+ */
+export async function getTrailingVolumeAverage(
+  conditionId: string,
+  hours: number,
+  windowMinutes: number
+): Promise<number> {
+  const trades = await fetchMarketTrades(conditionId, 2000);
+  if (trades.length === 0) return 0;
+
+  const cutoff = Math.floor(Date.now() / 1000) - hours * 3600;
+  const windowSeconds = windowMinutes * 60;
+
+  // Bucket key = floor(timestamp / windowSeconds). Each bucket holds the
+  // sum of (size*price) for trades that fell inside that window.
+  const buckets = new Map<number, number>();
+  for (const t of trades) {
+    if (t.timestamp < cutoff) continue;
+    const bucket = Math.floor(t.timestamp / windowSeconds);
+    const size = Number(t.size) || 0;
+    const price = Number(t.price) || 0;
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + size * price);
+  }
+
+  if (buckets.size === 0) return 0;
+  let sum = 0;
+  for (const v of buckets.values()) sum += v;
+  return sum / buckets.size;
+}
+
+/**
+ * Best-effort current price for a market outcome.
+ *
+ * Tries Gamma per-market endpoint first (numeric_id required — the
+ * conditionId-filter endpoint is broken per memory feedback_gamma_api).
+ * Falls through to null on any error so the monitor can fall back to
+ * its own DB read.
+ *
+ * @param conditionId Polymarket condition_id
+ * @param outcomeIdx 0 = YES (default), 1 = NO
+ */
+export async function getCurrentMidPrice(
+  conditionId: string,
+  outcomeIdx = 0
+): Promise<number | null> {
+  try {
+    // Gamma /markets supports a `condition_ids` query (broken per memory),
+    // but `/markets?clob_token_ids=...` and the singular numeric path work.
+    // We don't have the numeric_id here, so use the /markets list endpoint
+    // with a tight filter — this is a known-working fallback.
+    const params = new URLSearchParams({
+      condition_ids: conditionId,
+      limit: '1',
+    });
+    const res = await fetch(`${GAMMA_BASE}/markets?${params}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const rows = (await res.json()) as GammaMarket[];
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const row = rows[0];
+
+    let prices: number[] = [];
+    try {
+      const parsed = JSON.parse(row.outcomePrices);
+      prices = parsed.map((p: string) => parseFloat(p));
+    } catch {
+      prices = row.outcomePrices.split(',').map((s) => parseFloat(s.trim()));
+    }
+    const price = prices[outcomeIdx];
+    if (!Number.isFinite(price)) return null;
+    return price;
+  } catch {
+    return null;
+  }
+}
+
