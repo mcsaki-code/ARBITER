@@ -152,7 +152,12 @@ async function loadOpenBets(supabase: SupabaseClient): Promise<OpenBet[]> {
 }
 
 function baselineIsFresh(bet: OpenBet, minAgeMinutes: number): boolean {
-  if (bet.volume_baseline == null || bet.volume_baseline <= 0) return false;
+  // Treat any persisted baseline as fresh until its timestamp ages out —
+  // including baseline=0 ("sleepy market with no trades in 24h"). Otherwise
+  // dead markets get a trades-API hit every cron pass, contradicting the
+  // refreshBaseline comment about not hammering dead markets.
+  // The alert check separately skips when baseline <= 0.
+  if (bet.volume_baseline == null) return false;
   if (!bet.volume_baseline_set_at) return false;
   const ageMs = Date.now() - new Date(bet.volume_baseline_set_at).getTime();
   return ageMs < minAgeMinutes * 60_000;
@@ -225,21 +230,26 @@ async function resolveCurrentPrice(bet: OpenBet): Promise<number | null> {
 async function countAlertsToday(
   supabase: SupabaseClient,
   isoDateUtc: string
-): Promise<{ total: number; unnotified: number }> {
+): Promise<{ total: number; notified: number }> {
+  // Use [today, tomorrow) bounds. Avoids the millisecond-precision edge
+  // where a row at 23:59:59.9999 (microsecond) escapes a `<= .999Z` filter.
   const dayStart = `${isoDateUtc}T00:00:00.000Z`;
-  const dayEnd = `${isoDateUtc}T23:59:59.999Z`;
+  const next = new Date(`${isoDateUtc}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const dayEnd = next.toISOString();
+
   const { data, error } = await supabase
     .from('position_alerts')
     .select('notified')
     .gte('alert_at', dayStart)
-    .lte('alert_at', dayEnd);
+    .lt('alert_at', dayEnd);
   if (error) {
     console.warn('[monitor] alert count query failed:', error.message);
-    return { total: 0, unnotified: 0 };
+    return { total: 0, notified: 0 };
   }
   const total = data?.length ?? 0;
-  const unnotified = (data ?? []).filter((r: { notified: boolean }) => !r.notified).length;
-  return { total, unnotified };
+  const notified = (data ?? []).filter((r: { notified: boolean }) => r.notified).length;
+  return { total, notified };
 }
 
 async function markTodayAlertsNotified(
@@ -247,12 +257,14 @@ async function markTodayAlertsNotified(
   isoDateUtc: string
 ): Promise<void> {
   const dayStart = `${isoDateUtc}T00:00:00.000Z`;
-  const dayEnd = `${isoDateUtc}T23:59:59.999Z`;
+  const next = new Date(`${isoDateUtc}T00:00:00.000Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const dayEnd = next.toISOString();
   const { error } = await supabase
     .from('position_alerts')
     .update({ notified: true })
     .gte('alert_at', dayStart)
-    .lte('alert_at', dayEnd);
+    .lt('alert_at', dayEnd);
   if (error) {
     console.warn('[monitor] mark notified failed:', error.message);
   }
@@ -376,11 +388,16 @@ export async function runOnce(): Promise<MonitorRunSummary> {
   }
 
   // Step 5: daily-cap email.
-  // Use UTC date to match what `DATE(alert_at)` returns server-side.
+  //
+  // Spec: send AT MOST one email per UTC day. The "did we email today?"
+  // signal is "any of today's position_alerts has notified=true" — once
+  // markTodayAlertsNotified runs, the original cap-hitting rows stay
+  // notified=true forever, so future passes that find new alerts past
+  // the cap will still see notified > 0 and correctly suppress the email.
   try {
     const isoDateUtc = new Date().toISOString().slice(0, 10);
-    const { total, unnotified } = await countAlertsToday(supabase, isoDateUtc);
-    if (total >= cfg.maxAlertsPerDay && unnotified > 0) {
+    const { total, notified } = await countAlertsToday(supabase, isoDateUtc);
+    if (total >= cfg.maxAlertsPerDay && notified === 0) {
       await sendVolumeExitCapNotification({
         alertCount: total,
         cap: cfg.maxAlertsPerDay,

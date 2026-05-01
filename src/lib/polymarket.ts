@@ -297,11 +297,14 @@ export { CITY_KEYWORDS };
 //   - `market=<conditionId>` filter works
 //   - returns trades sorted DESC by `timestamp` (unix seconds)
 //   - per-trade fields used here: timestamp, size, price, side
+//   - server-side cap: requests for limit > 1000 are silently capped
+//     at 1000. Confirmed via probe: `?market=…&limit=2000` returned
+//     1000 trades.
 //
-// CAVEAT: a single page is finite (default ~500). For very-high-
-// volume markets the trailing-24h baseline will be undersampled.
-// For ARBITER's weather-only universe this is fine; if we extend
-// to busier markets, paginate with `offset`.
+// For ARBITER's weather-only universe (low volume) 1000 trades easily
+// covers > 24h. For the high-volume markets we'd hit in the future,
+// 1000 trades may be < 24h and the baseline would reflect recent flow
+// rather than a true 24h average — paginate with `offset` if so.
 // ============================================================
 
 const DATA_API_BASE = 'https://data-api.polymarket.com';
@@ -380,20 +383,21 @@ export async function getRecentVolume(
  * Average USD-equivalent trade volume per `windowMinutes` window over the
  * trailing `hours` hours. Used as the rolling baseline for spike detection.
  *
- * Implementation: pull up to 2000 recent trades, bucket by integer-divided
- * window-index, average across buckets that contain at least one trade.
- * Empty buckets are excluded — averaging over time-elapsed/window would
- * understate baselines for sleepy markets and trip false alerts.
+ * Implementation: pull up to 1000 recent trades (server-side cap), bucket
+ * by integer-divided window-index, average across buckets that contain at
+ * least one trade. Empty buckets are excluded — averaging over
+ * time-elapsed/window would understate baselines for sleepy markets and
+ * trip false alerts.
  *
  * Returns 0 on error or insufficient data. The monitor treats 0 as
- * "no usable baseline yet" and skips the alert check.
+ * "no usable baseline" and skips the alert check.
  */
 export async function getTrailingVolumeAverage(
   conditionId: string,
   hours: number,
   windowMinutes: number
 ): Promise<number> {
-  const trades = await fetchMarketTrades(conditionId, 2000);
+  const trades = await fetchMarketTrades(conditionId, 1000);
   if (trades.length === 0) return 0;
 
   const cutoff = Math.floor(Date.now() / 1000) - hours * 3600;
@@ -419,10 +423,15 @@ export async function getTrailingVolumeAverage(
 /**
  * Best-effort current price for a market outcome.
  *
- * Tries Gamma per-market endpoint first (numeric_id required — the
- * conditionId-filter endpoint is broken per memory feedback_gamma_api).
+ * Uses Gamma's `/markets?condition_ids=…` (PLURAL) filter — verified
+ * 2026-05-01 to return the matching market correctly for both sports
+ * and weather conditionIds. The memory `feedback_gamma_api` warning
+ * is about the SINGULAR `?condition_id=` filter (which returns random
+ * legacy 2020-era markets); the plural batch filter is the documented
+ * working endpoint.
+ *
  * Falls through to null on any error so the monitor can fall back to
- * its own DB read.
+ * its own DB read of `markets.outcome_prices`.
  *
  * @param conditionId Polymarket condition_id
  * @param outcomeIdx 0 = YES (default), 1 = NO
@@ -432,10 +441,6 @@ export async function getCurrentMidPrice(
   outcomeIdx = 0
 ): Promise<number | null> {
   try {
-    // Gamma /markets supports a `condition_ids` query (broken per memory),
-    // but `/markets?clob_token_ids=...` and the singular numeric path work.
-    // We don't have the numeric_id here, so use the /markets list endpoint
-    // with a tight filter — this is a known-working fallback.
     const params = new URLSearchParams({
       condition_ids: conditionId,
       limit: '1',
