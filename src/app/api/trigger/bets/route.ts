@@ -80,7 +80,9 @@ export async function GET() {
     const { data: configRows } = await supabase
       .from('system_config')
       .select('key, value')
-      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date', 'blocked_directions']);
+      .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date', 'blocked_directions',
+                  // 2026-04-30 Option B — single source of truth with place-bets.ts
+                  'blocked_cities', 'min_confidence']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -118,6 +120,33 @@ export async function GET() {
       .select('market_id')
       .eq('status', 'OPEN');
     const openMarketIds = new Set(openBets?.map((b) => b.market_id) || []);
+
+    // ============================================================
+    // 2026-04-30 Option B: mirror place-bets.ts gates so the manual
+    // trigger and the cron use the same restrictions.
+    // ============================================================
+    const blockedCitiesRaw = (config.blocked_cities || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const blockedCityIds = new Set<string>();
+    if (blockedCitiesRaw.length > 0) {
+      const { data: blockedRows } = await supabase
+        .from('weather_cities')
+        .select('id, name')
+        .in('name', blockedCitiesRaw);
+      for (const row of blockedRows || []) {
+        blockedCityIds.add(String(row.id));
+      }
+      log.push(
+        `City blocklist active (${blockedCityIds.size}/${blockedCitiesRaw.length} matched): ${blockedCitiesRaw.join(', ')}`
+      );
+    }
+
+    const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
+    const allowedConfidences =
+      minConfidence === 'HIGH' ? new Set(['HIGH'])
+      : minConfidence === 'LOW' ? new Set(['HIGH', 'MEDIUM', 'LOW'])
+      : new Set(['HIGH', 'MEDIUM']);
+    log.push(`min_confidence=${minConfidence} → allowed=${Array.from(allowedConfidences).join(',')}`);
 
     // ============================================================
     // STEP 1: Check for existing analyses (last 6 hours)
@@ -229,12 +258,25 @@ export async function GET() {
         continue;
       }
 
-      // Must have at least MEDIUM confidence
-      const isMediumEligible =
-        (analysis.confidence === 'HIGH' || analysis.confidence === 'MEDIUM') &&
+      // 2026-04-30 Option B: city blocklist (mirror place-bets.ts).
+      const analysisCityId = (analysis as { city_id?: string | null }).city_id;
+      if (analysisCityId && blockedCityIds.has(String(analysisCityId))) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — city ${analysisCityId} on blocked_cities list`);
+        continue;
+      }
+
+      // 2026-04-30 Option B: confidence floor from system_config.min_confidence
+      // (default 'MEDIUM' if unset — preserves prior behaviour). Also gates on
+      // edge >= MIN_EDGE. auto_eligible bypass removed: a stale auto_eligible=true
+      // row could otherwise sneak through the new HIGH-only gate.
+      const isEligible =
+        allowedConfidences.has(String(analysis.confidence).toUpperCase()) &&
         (analysis.edge || 0) >= MIN_EDGE;
 
-      if (!analysis.auto_eligible && !isMediumEligible) continue;
+      if (!isEligible) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — not eligible: conf=${analysis.confidence} edge=${((analysis.edge || 0) * 100).toFixed(1)}% (min_conf=${minConfidence})`);
+        continue;
+      }
 
       // V3.2 Kelly sizing: analyzer already applied confidence multiplier into
       // kelly_fraction. Cap the INPUT (prevent saturated-edge blow-ups) then
@@ -316,9 +358,11 @@ export async function GET() {
         entryPrice = 1 - entryPrice;
       }
 
-      // V3.2: floor at 5% (sub-5¢ zone was 0/16 historically), cap at 40%
-      const MIN_ENTRY_PRICE = 0.05;
-      const MAX_ENTRY_PRICE = 0.40;
+      // 2026-04-30 Option B: tightened to 0.15-0.25, the only profitable
+      // band on 86 V3.3 bets (15-25¢ = +15% ROI, all others negative).
+      // Mirrors place-bets.ts. Was 0.05/0.40 prior.
+      const MIN_ENTRY_PRICE = 0.15;
+      const MAX_ENTRY_PRICE = 0.25;
       if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
         continue;
