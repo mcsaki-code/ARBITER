@@ -173,6 +173,15 @@ export const handler = schedule('*/15 * * * *', async () => {
       // applied after the kill-criterion halt of 2026-04-23.
       'blocked_cities',  // comma-separated city names — no spaces between commas
       'min_confidence',  // 'HIGH' | 'MEDIUM' (default 'MEDIUM' if unset)
+      // Path A (2026-05-05): narrow-and-prove regime. When set, ONLY these
+      // cities are eligible; all others are skipped (allowlist semantics
+      // override blocked_cities). Empty/unset = legacy blocklist behaviour.
+      'allowed_cities',
+      // Path A: hard cap per bet in USD. When > 0, every bet is capped at
+      // this dollar amount AFTER Kelly+pct sizing. Used to extend bankroll
+      // runway during the curated-slice experiment ($5 ⇒ ~150 bets fit in
+      // $750). Set to 0 / unset to disable.
+      'max_bet_usd',
     ]);
 
   const config: Record<string, string> = {};
@@ -251,6 +260,35 @@ export const handler = schedule('*/15 * * * *', async () => {
     console.log(
       `[place-bets] City blocklist active (${blockedCityIds.size}/${blockedCitiesRaw.length} matched): ${blockedCitiesRaw.join(', ')}`
     );
+  }
+
+  // Path A allowlist (2026-05-05): when allowed_cities is non-empty, ONLY
+  // these cities can be bet on. Blocklist still applies on top (defense-
+  // in-depth), so a city must be in the allowlist AND not blocked. Empty
+  // allowed_cities ⇒ legacy behaviour (only blocklist applies).
+  const allowedCitiesRaw = (config.allowed_cities || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const allowedCityIds = new Set<string>();
+  if (allowedCitiesRaw.length > 0) {
+    const { data: allowedRows } = await supabase
+      .from('weather_cities')
+      .select('id, name')
+      .in('name', allowedCitiesRaw);
+    for (const row of allowedRows || []) {
+      allowedCityIds.add(String(row.id));
+    }
+    console.log(
+      `[place-bets] City ALLOWLIST active (${allowedCityIds.size}/${allowedCitiesRaw.length} matched): ${allowedCitiesRaw.join(', ')} — only these cities can be bet on`
+    );
+  }
+
+  // Path A hard stake cap. When max_bet_usd > 0, applied AFTER Kelly+pct
+  // sizing as a final ceiling. Lets us run an extended sample at $5/bet
+  // without rewriting the Kelly math.
+  const maxBetUsdRaw = parseFloat(config.max_bet_usd || '0');
+  const maxBetUsdCap = isNaN(maxBetUsdRaw) || maxBetUsdRaw <= 0 ? Infinity : maxBetUsdRaw;
+  if (maxBetUsdCap !== Infinity) {
+    console.log(`[place-bets] Path A stake cap active: $${maxBetUsdCap.toFixed(2)}/bet`);
   }
 
   // Configurable confidence floor. Default 'MEDIUM' preserves prior behaviour.
@@ -366,6 +404,13 @@ export const handler = schedule('*/15 * * * *', async () => {
       // by default — see system_config.blocked_cities).
       if (blockedCityIds.has(String(analysisCityId))) {
         console.log(`[place-bets] SKIP ${shortId} — city ${analysisCityId} on blocked_cities list`);
+        continue;
+      }
+      // Path A (2026-05-05): allowlist gate. When set, ONLY whitelisted
+      // cities pass. Curates the bet stream to slices with positive V3.3
+      // ROI signal (Toronto / Wellington / Seattle).
+      if (allowedCityIds.size > 0 && !allowedCityIds.has(String(analysisCityId))) {
+        console.log(`[place-bets] SKIP ${shortId} — city ${analysisCityId} not in allowed_cities (Path A)`);
         continue;
       }
       const cityBetCount = betsPerCity.get(String(analysisCityId)) || 0;
@@ -508,6 +553,13 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     // Cap at max single bet and remaining daily exposure
     betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
+    // Path A flat-stake cap (e.g. $5/bet). Applied AFTER Kelly+pct sizing
+    // as a final ceiling so the rest of the math is unchanged. When unset
+    // (maxBetUsdCap === Infinity) this is a no-op.
+    if (betAmount > maxBetUsdCap) {
+      console.log(`[place-bets] PATH-A CAP ${shortId}: $${betAmount.toFixed(2)} → $${maxBetUsdCap.toFixed(2)}`);
+      betAmount = maxBetUsdCap;
+    }
     if (betAmount < 1) { console.log(`[place-bets] BREAK ${shortId} — betAmount ${betAmount.toFixed(2)} < $1 (maxSingle=${maxSingleBet.toFixed(2)} remaining=${(maxDailyExposure - totalDeployed).toFixed(2)})`); break; }
 
     // ── gopfan2-style micro-bet caps for sub-10¢ tail zone ───────

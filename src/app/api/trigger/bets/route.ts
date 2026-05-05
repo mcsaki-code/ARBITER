@@ -82,7 +82,9 @@ export async function GET() {
       .select('key, value')
       .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date', 'blocked_directions',
                   // 2026-04-30 Option B — single source of truth with place-bets.ts
-                  'blocked_cities', 'min_confidence']);
+                  'blocked_cities', 'min_confidence',
+                  // 2026-05-05 Path A — allowlist + flat stake cap
+                  'allowed_cities', 'max_bet_usd']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -139,6 +141,30 @@ export async function GET() {
       log.push(
         `City blocklist active (${blockedCityIds.size}/${blockedCitiesRaw.length} matched): ${blockedCitiesRaw.join(', ')}`
       );
+    }
+
+    // Path A allowlist (2026-05-05) — mirror place-bets.ts.
+    const allowedCitiesRaw = (config.allowed_cities || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const allowedCityIds = new Set<string>();
+    if (allowedCitiesRaw.length > 0) {
+      const { data: allowedRows } = await supabase
+        .from('weather_cities')
+        .select('id, name')
+        .in('name', allowedCitiesRaw);
+      for (const row of allowedRows || []) {
+        allowedCityIds.add(String(row.id));
+      }
+      log.push(
+        `City ALLOWLIST active (${allowedCityIds.size}/${allowedCitiesRaw.length}): ${allowedCitiesRaw.join(', ')}`
+      );
+    }
+
+    // Path A stake cap.
+    const maxBetUsdRaw = parseFloat(config.max_bet_usd || '0');
+    const maxBetUsdCap = isNaN(maxBetUsdRaw) || maxBetUsdRaw <= 0 ? Infinity : maxBetUsdRaw;
+    if (maxBetUsdCap !== Infinity) {
+      log.push(`Path A stake cap: $${maxBetUsdCap.toFixed(2)}/bet`);
     }
 
     const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
@@ -264,6 +290,11 @@ export async function GET() {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — city ${analysisCityId} on blocked_cities list`);
         continue;
       }
+      // Path A allowlist (2026-05-05) — when set, ONLY whitelisted cities pass.
+      if (allowedCityIds.size > 0 && (!analysisCityId || !allowedCityIds.has(String(analysisCityId)))) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — city ${analysisCityId} not in allowed_cities (Path A)`);
+        continue;
+      }
 
       // 2026-04-30 Option B: confidence floor from system_config.min_confidence
       // (default 'MEDIUM' if unset — preserves prior behaviour). Also gates on
@@ -289,6 +320,11 @@ export async function GET() {
       }
       if (betAmount <= 0) betAmount = Math.min(3, bankroll * 0.006); // Default ~$3 for paper (0.6% of bankroll)
       betAmount = Math.min(betAmount, maxSingleBet, maxDailyExposure - totalDeployed);
+      // Path A flat-stake cap (mirror place-bets.ts).
+      if (betAmount > maxBetUsdCap) {
+        log.push(`PATH-A CAP ${analysis.market_id.substring(0, 8)}: $${betAmount.toFixed(2)} → $${maxBetUsdCap.toFixed(2)}`);
+        betAmount = maxBetUsdCap;
+      }
       if (betAmount < 1) break;
 
       // Fetch current market data for validation and question text

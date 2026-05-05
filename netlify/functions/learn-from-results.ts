@@ -214,7 +214,17 @@ export const handler = schedule('0 6 * * *', async () => {
     // upstream by setting the cooldown whenever the direction list is
     // mutated, and observed here by skipping blocks while the cooldown is
     // active.
-    const shouldBlock = !inCooldown && roi < -0.15 && wr < 0.2 && group.length >= 20;
+    //
+    // 2026-05-05 (Path A): tightened thresholds. Old (n≥20, ROI<-15%) tripped
+    // on BUY_YES at n=88 ROI=-10.6% which was *better* than the portfolio's
+    // -15%; the auto-block was reacting to absolute P&L (driven by sample
+    // mass) rather than to a real direction-specific signal. Now require:
+    //   • n ≥ 150  (forces a meaningfully large slice before acting), and
+    //   • ROI < -20%  (worse than the portfolio's worst window).
+    // This effectively suspends auto-blocking during Path A — the curated
+    // city allowlist is the real risk control. Restore the old thresholds
+    // when sample size catches up post-experiment.
+    const shouldBlock = !inCooldown && roi < -0.20 && wr < 0.2 && group.length >= 150;
     const shouldUnblock =
       currentBlocked.has(dir) &&
       (roi >= 0 || (wr >= 0.4 && group.length >= 10));
