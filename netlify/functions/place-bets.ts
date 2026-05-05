@@ -57,8 +57,12 @@ const MAX_ANALYSIS_AGE = 2 * 3600000;  // 2 hours — weather forecasts update f
 // 2026-04-30: tightened MAX 0.40 → 0.25 (Option B).
 // 2026-05-01: tightened MAX 0.25 → 0.20 — the 20-25¢ sub-band lost -29% ROI
 //             on 14 bets (would have saved $43 on actual V3.3 history).
-const MIN_ENTRY_PRICE = 0.15;
-const MAX_ENTRY_PRICE = 0.20;
+// 2026-05-05: defaults below kept; values are now overridable via
+//             system_config.min_entry_price / system_config.max_entry_price
+//             so we can widen the band without a redeploy if Path A volume
+//             is too thin. Defaults preserve the audited optimum.
+const MIN_ENTRY_PRICE_DEFAULT = 0.15;
+const MAX_ENTRY_PRICE_DEFAULT = 0.20;
 
 // Whale insight: optimal entry window is 24-48h before resolution.
 // Too early = forecast uncertainty too high. Too late = market already priced in.
@@ -182,6 +186,10 @@ export const handler = schedule('*/15 * * * *', async () => {
       // runway during the curated-slice experiment ($5 ⇒ ~150 bets fit in
       // $750). Set to 0 / unset to disable.
       'max_bet_usd',
+      // Path A: price-band overrides. Default to the audited optimum
+      // (0.15/0.20) when unset. Lets us dial the band without a deploy.
+      'min_entry_price',
+      'max_entry_price',
     ]);
 
   const config: Record<string, string> = {};
@@ -289,6 +297,25 @@ export const handler = schedule('*/15 * * * *', async () => {
   const maxBetUsdCap = isNaN(maxBetUsdRaw) || maxBetUsdRaw <= 0 ? Infinity : maxBetUsdRaw;
   if (maxBetUsdCap !== Infinity) {
     console.log(`[place-bets] Path A stake cap active: $${maxBetUsdCap.toFixed(2)}/bet`);
+  }
+
+  // Path A price-band overrides (optional). When unset or invalid, fall
+  // back to the audited V3.3 optimum (0.15/0.20). NaN/non-positive/wrong-
+  // ordered values fall through to defaults so a malformed config can't
+  // accidentally open the gates.
+  const parseBand = (raw: string | undefined, fallback: number) => {
+    const v = parseFloat(raw || '');
+    return isNaN(v) || v <= 0 || v >= 1 ? fallback : v;
+  };
+  let MIN_ENTRY_PRICE = parseBand(config.min_entry_price, MIN_ENTRY_PRICE_DEFAULT);
+  let MAX_ENTRY_PRICE = parseBand(config.max_entry_price, MAX_ENTRY_PRICE_DEFAULT);
+  if (MIN_ENTRY_PRICE >= MAX_ENTRY_PRICE) {
+    console.warn(`[place-bets] Invalid price band ${MIN_ENTRY_PRICE}/${MAX_ENTRY_PRICE} — falling back to defaults`);
+    MIN_ENTRY_PRICE = MIN_ENTRY_PRICE_DEFAULT;
+    MAX_ENTRY_PRICE = MAX_ENTRY_PRICE_DEFAULT;
+  }
+  if (MIN_ENTRY_PRICE !== MIN_ENTRY_PRICE_DEFAULT || MAX_ENTRY_PRICE !== MAX_ENTRY_PRICE_DEFAULT) {
+    console.log(`[place-bets] Price band overridden: [${MIN_ENTRY_PRICE.toFixed(3)}, ${MAX_ENTRY_PRICE.toFixed(3)}] (defaults [${MIN_ENTRY_PRICE_DEFAULT}, ${MAX_ENTRY_PRICE_DEFAULT}])`);
   }
 
   // Configurable confidence floor. Default 'MEDIUM' preserves prior behaviour.

@@ -83,8 +83,8 @@ export async function GET() {
       .in('key', ['paper_bankroll', 'paper_trade_start_date', 'total_paper_bets', 'paper_win_rate', 'live_trading_enabled', 'live_kill_switch', 'live_max_single_bet_usd', 'live_max_daily_usd', 'v3_start_date', 'blocked_directions',
                   // 2026-04-30 Option B — single source of truth with place-bets.ts
                   'blocked_cities', 'min_confidence',
-                  // 2026-05-05 Path A — allowlist + flat stake cap
-                  'allowed_cities', 'max_bet_usd']);
+                  // 2026-05-05 Path A — allowlist + flat stake cap + price band
+                  'allowed_cities', 'max_bet_usd', 'min_entry_price', 'max_entry_price']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -165,6 +165,22 @@ export async function GET() {
     const maxBetUsdCap = isNaN(maxBetUsdRaw) || maxBetUsdRaw <= 0 ? Infinity : maxBetUsdRaw;
     if (maxBetUsdCap !== Infinity) {
       log.push(`Path A stake cap: $${maxBetUsdCap.toFixed(2)}/bet`);
+    }
+
+    // Path A price-band overrides (mirror place-bets.ts). Defaults to
+    // 0.15 / 0.20 when unset or invalid.
+    const parseBand = (raw: string | undefined, fallback: number) => {
+      const v = parseFloat(raw || '');
+      return isNaN(v) || v <= 0 || v >= 1 ? fallback : v;
+    };
+    let pathAMinPrice = parseBand(config.min_entry_price, 0.15);
+    let pathAMaxPrice = parseBand(config.max_entry_price, 0.20);
+    if (pathAMinPrice >= pathAMaxPrice) {
+      pathAMinPrice = 0.15;
+      pathAMaxPrice = 0.20;
+    }
+    if (pathAMinPrice !== 0.15 || pathAMaxPrice !== 0.20) {
+      log.push(`Price band overridden: [${pathAMinPrice.toFixed(3)}, ${pathAMaxPrice.toFixed(3)}]`);
     }
 
     const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
@@ -399,8 +415,8 @@ export async function GET() {
       // V3.3 90-bet corpus showed 20-25¢ band lost -29% ROI on 14 bets;
       // 15-20¢ is the only profitable sub-band (+29% ROI on 21 bets).
       // Mirrors place-bets.ts.
-      const MIN_ENTRY_PRICE = 0.15;
-      const MAX_ENTRY_PRICE = 0.20;
+      const MIN_ENTRY_PRICE = pathAMinPrice;
+      const MAX_ENTRY_PRICE = pathAMaxPrice;
       if (!entryPrice || entryPrice < MIN_ENTRY_PRICE || entryPrice >= 0.997) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — price ${entryPrice?.toFixed(4)} below ${MIN_ENTRY_PRICE} floor`);
         continue;
