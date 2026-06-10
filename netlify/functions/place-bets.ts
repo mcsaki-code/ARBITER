@@ -102,6 +102,8 @@ interface AnalysisRow {
   market_price?: number | null;
   model_agreement?: string | null;
   ensemble_agreement_score?: number | null;
+  /** Edge #4 (2026-06-10): forecast moved, market hasn't repriced yet */
+  repricing_lag?: boolean | null;
 }
 
 /** Dynamic sigma scaling — must match analyze-weather.ts getDynamicSigma() */
@@ -199,6 +201,11 @@ export const handler = schedule('*/15 * * * *', async () => {
       // structural dead zone — 0 wins in 11 lifetime bets. 'true' (default)
       // blocks them; set 'false' to re-enable.
       'block_gte_questions',
+      // Edge #4 (2026-06-10): when 'true', only analyses flagged
+      // repricing_lag=true (forecast moved, market hasn't) are eligible.
+      // Default 'false' = observe mode — collect lag-vs-no-lag outcome
+      // data before gating.
+      'require_repricing_lag',
     ]);
 
   const config: Record<string, string> = {};
@@ -342,6 +349,10 @@ export const handler = schedule('*/15 * * * *', async () => {
   if (blockGteQuestions) {
     console.log('[place-bets] gte-question block active ("X° or higher" markets skipped)');
   }
+
+  // Edge #4 (2026-06-10): repricing-lag gate. Default observe mode (off).
+  const requireRepricingLag = config.require_repricing_lag === 'true';
+  console.log(`[place-bets] Repricing-lag gate: ${requireRepricingLag ? 'REQUIRED' : 'observe mode (logging only)'}`);
 
   // Configurable confidence floor. Default 'MEDIUM' preserves prior behaviour.
   const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
@@ -512,6 +523,17 @@ export const handler = schedule('*/15 * * * *', async () => {
     // (lifetime: >30% claimed edge → 0 wins / 22 bets, -100% ROI).
     if (edgeNorm > MAX_CLAIMED_EDGE) {
       console.log(`[place-bets] SKIP ${shortId} — claimed edge ${edgeNorm.toFixed(3)} exceeds ceiling ${MAX_CLAIMED_EDGE.toFixed(2)} (overconfidence zone)`);
+      continue;
+    }
+
+    // Edge #4 (2026-06-10): repricing-lag gate. In observe mode we only
+    // log the flag (the bet row inherits it via analysis_id for later
+    // lag-vs-no-lag performance comparison). When required, non-lag
+    // candidates are skipped.
+    if (analysis.repricing_lag) {
+      console.log(`[place-bets] 🎯 ${shortId} carries repricing_lag flag (forecast moved, market stale)`);
+    } else if (requireRepricingLag) {
+      console.log(`[place-bets] SKIP ${shortId} — no repricing-lag signal (require_repricing_lag=true)`);
       continue;
     }
 

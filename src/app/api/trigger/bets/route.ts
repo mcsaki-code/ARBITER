@@ -86,7 +86,9 @@ export async function GET() {
                   // 2026-05-05 Path A — allowlist + flat stake cap + price band
                   'allowed_cities', 'max_bet_usd', 'min_entry_price', 'max_entry_price',
                   // 2026-06-10 Edge audit — claimed-edge ceiling + gte-question block
-                  'max_claimed_edge', 'block_gte_questions']);
+                  'max_claimed_edge', 'block_gte_questions',
+                  // 2026-06-10 Edge #4 — repricing-lag gate (observe mode by default)
+                  'require_repricing_lag']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -198,6 +200,9 @@ export async function GET() {
     if (blockGteQuestions) {
       log.push('gte-question block active ("X° or higher" markets skipped)');
     }
+    // Edge #4 (2026-06-10): repricing-lag gate (mirror place-bets.ts).
+    const requireRepricingLag = config.require_repricing_lag === 'true';
+    log.push(`Repricing-lag gate: ${requireRepricingLag ? 'REQUIRED' : 'observe mode'}`);
 
     const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
     const allowedConfidences =
@@ -344,6 +349,15 @@ export async function GET() {
       // 2026-06-10 Edge audit: claimed-edge ceiling (mirror place-bets.ts).
       if ((analysis.edge || 0) > maxClaimedEdge) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — claimed edge ${((analysis.edge || 0) * 100).toFixed(1)}% exceeds ceiling ${(maxClaimedEdge * 100).toFixed(0)}% (overconfidence zone)`);
+        continue;
+      }
+
+      // 2026-06-10 Edge #4: repricing-lag gate (mirror place-bets.ts).
+      const hasLagFlag = (analysis as { repricing_lag?: boolean | null }).repricing_lag === true;
+      if (hasLagFlag) {
+        log.push(`🎯 ${analysis.market_id.substring(0, 8)} carries repricing_lag flag`);
+      } else if (requireRepricingLag) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — no repricing-lag signal (gate required)`);
         continue;
       }
 

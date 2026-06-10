@@ -97,6 +97,22 @@ export interface TempAnalysisResult {
   skippedLowEdge: number;
   errors: number;
   durationMs: number;
+  /** Edge #4 (2026-06-10): markets re-analyzed early because forecast shifted */
+  shiftRetriggers?: number;
+  /** Edge #4 (2026-06-10): analyses flagged repricing_lag=true this cycle */
+  lagFlagged?: number;
+}
+
+/**
+ * Edge #4 (2026-06-10) — repricing-lag detection.
+ * Previous-analysis snapshot used to measure how much OUR probability
+ * moved vs how much the MARKET moved since the last analysis.
+ */
+interface PrevAnalysisSnap {
+  analyzed_at: string;
+  true_prob: number | null;
+  market_price: number | null;
+  model_high_f: number | null;
 }
 
 export async function analyzeTemperatureMarkets(
@@ -154,9 +170,56 @@ export async function analyzeTemperatureMarkets(
   const { data: allCities } = await supabase.from('weather_cities').select('id, name');
   const cityList = allCities ?? [];
 
-  // Fetch bankroll once
-  const { data: cfgRows } = await supabase.from('system_config').select('key, value').eq('key', 'paper_bankroll');
-  const bankroll = parseFloat(cfgRows?.[0]?.value ?? '5000');
+  // Fetch config once (bankroll + Edge #4 lag thresholds)
+  const { data: cfgRows } = await supabase
+    .from('system_config')
+    .select('key, value')
+    .in('key', ['paper_bankroll', 'lag_min_prob_shift', 'lag_max_price_shift', 'forecast_shift_reanalyze_f']);
+  const cfg: Record<string, string> = {};
+  (cfgRows ?? []).forEach((r: { key: string; value: string }) => { cfg[r.key] = r.value; });
+  const bankroll = parseFloat(cfg.paper_bankroll ?? '5000');
+
+  // ── Edge #4 (2026-06-10): repricing-lag thresholds ────────────────
+  // The actual structural edge in weather markets is the window between
+  // a forecast model update and the market repricing (per gopfan2 +
+  // public research). We detect it by comparing this analysis to the
+  // previous one for the same market:
+  //   prob_shift  = our probability now − our probability last time
+  //   price_shift = market price now − market price last time
+  // repricing_lag=true ⇔ forecast moved toward our side ≥ minProbShift
+  // while the market moved ≤ maxPriceShift. Observe-only for now —
+  // place-bets gates on it only when require_repricing_lag='true'.
+  const parseNum = (raw: string | undefined, fallback: number) => {
+    const v = parseFloat(raw ?? '');
+    return isNaN(v) || v <= 0 ? fallback : v;
+  };
+  const LAG_MIN_PROB_SHIFT = parseNum(cfg.lag_min_prob_shift, 0.05);
+  const LAG_MAX_PRICE_SHIFT = parseNum(cfg.lag_max_price_shift, 0.02);
+  // Forecast-mean move (°F) that justifies re-analyzing BEFORE the 4h
+  // recent-window expires. This un-inverts the old behaviour where we
+  // re-analyzed on MARKET moves but slept through FORECAST moves.
+  const FORECAST_SHIFT_REANALYZE_F = parseNum(cfg.forecast_shift_reanalyze_f, 0.9);
+  const LAG_MAX_PREV_AGE_MS = 6 * 3600000; // prev older than 6h ⇒ shift timing unknown ⇒ not "fresh"
+  log(`Edge#4 lag config: minProbShift=${LAG_MIN_PROB_SHIFT} maxPriceShift=${LAG_MAX_PRICE_SHIFT} reanalyzeF=${FORECAST_SHIFT_REANALYZE_F}°F`);
+
+  // Bulk-load the most recent prior analysis per market (last 24h) so we
+  // can compute shifts without a per-market query.
+  const prevCutoff = new Date(Date.now() - 24 * 3600000).toISOString();
+  const { data: prevRows } = await supabase
+    .from('weather_analyses')
+    .select('market_id, analyzed_at, true_prob, market_price, model_high_f')
+    .eq('market_type', 'temperature_statistical')
+    .gte('analyzed_at', prevCutoff)
+    .order('analyzed_at', { ascending: false })
+    .limit(5000);
+  const prevByMarket = new Map<string, PrevAnalysisSnap>();
+  for (const row of prevRows ?? []) {
+    const mid = String((row as { market_id: string }).market_id);
+    if (!prevByMarket.has(mid)) {
+      prevByMarket.set(mid, row as unknown as PrevAnalysisSnap);
+    }
+  }
+  log(`Edge#4: loaded prev snapshots for ${prevByMarket.size} markets`);
 
   // Load calibration snapshot once per run (Phase A.3).
   // Respects system_config.calibration_enabled. Returns EMPTY_SNAPSHOT if
@@ -167,9 +230,12 @@ export async function analyzeTemperatureMarkets(
   }
 
   let analyzed = 0, skippedRecent = 0, skippedNoCity = 0, skippedNoForecast = 0, skippedLowEdge = 0, errors = 0;
+  let shiftRetriggers = 0, lagFlagged = 0;
 
   for (const market of tempMarkets) {
-    if (recentIds.has(market.id)) { skippedRecent++; continue; }
+    // Edge #4 (2026-06-10): the recently-analyzed skip moved BELOW the
+    // forecast fetch so a material forecast shift can bypass it — we now
+    // re-analyze when the FORECAST moves, not only when the price moves.
 
     const parsed = parseTemperatureQuestion(market.question);
     if (!parsed) continue;
@@ -223,6 +289,19 @@ export async function analyzeTemperatureMarkets(
 
     const avgHighF = members.reduce((s, m) => s + m.temp_high_f, 0) / members.length;
     const mu_c = (avgHighF - 32) * 5 / 9;
+
+    // ── Edge #4: shift-aware recent-skip ──────────────────────
+    // Skip recently-analyzed markets UNLESS the forecast mean moved
+    // materially since the previous analysis — in that case re-analyze
+    // immediately to capture the repricing-lag window.
+    const prev = prevByMarket.get(String(market.id)) ?? null;
+    const forecastShiftF = prev?.model_high_f != null ? avgHighF - prev.model_high_f : null;
+    if (recentIds.has(market.id)) {
+      const bigShift = forecastShiftF !== null && Math.abs(forecastShiftF) >= FORECAST_SHIFT_REANALYZE_F;
+      if (!bigShift) { skippedRecent++; continue; }
+      shiftRetriggers++;
+      log(`⚡ Forecast shift ${forecastShiftF!.toFixed(1)}°F on "${market.question.substring(0, 55)}" — re-analyzing before recent-window expiry`);
+    }
 
     const T_c = parsed.threshold_c;
     const T_f = T_c * 9 / 5 + 32;
@@ -300,6 +379,31 @@ export async function analyzeTemperatureMarkets(
     const edge = trueProb - marketPrice;
     const absEdge = Math.abs(edge);
 
+    // ── Edge #4: repricing-lag signal ─────────────────────────
+    // repricing_lag=true means: since the previous analysis, OUR
+    // probability moved ≥ LAG_MIN_PROB_SHIFT toward the side we'd bet,
+    // while the MARKET moved ≤ LAG_MAX_PRICE_SHIFT — i.e. the forecast
+    // updated and the market hasn't repriced yet. This is the window
+    // where public evidence says weather-market alpha actually lives.
+    let probShift: number | null = null;
+    let priceShift: number | null = null;
+    let repricingLag = false;
+    if (prev && prev.true_prob != null && prev.market_price != null) {
+      probShift = trueProb - prev.true_prob;
+      priceShift = marketPrice - prev.market_price;
+      const prevAgeMs = Date.now() - new Date(prev.analyzed_at).getTime();
+      const towardOurSide = edge > 0
+        ? probShift >= LAG_MIN_PROB_SHIFT
+        : probShift <= -LAG_MIN_PROB_SHIFT;
+      repricingLag = towardOurSide
+        && Math.abs(priceShift) <= LAG_MAX_PRICE_SHIFT
+        && prevAgeMs <= LAG_MAX_PREV_AGE_MS;
+    }
+    if (repricingLag) {
+      lagFlagged++;
+      log(`🎯 REPRICING LAG: "${market.question.substring(0, 55)}" probΔ=${((probShift ?? 0) * 100).toFixed(1)}pp priceΔ=${((priceShift ?? 0) * 100).toFixed(1)}pp`);
+    }
+
     // ── SHADOW BACKTEST WRITE ─────────────────────────────────
     // Fire-and-forget: records v2's prediction for EVERY bracket we
     // analyze, regardless of whether we'd bet on it. Scored later
@@ -364,6 +468,11 @@ export async function analyzeTemperatureMarkets(
       ensemble_prob: trueProb,
       ensemble_edge: edge,
       precip_consensus: null,
+      // Edge #4 (2026-06-10): repricing-lag telemetry
+      prob_shift: probShift,
+      price_shift: priceShift,
+      repricing_lag: repricingLag,
+      prev_analyzed_at: prev?.analyzed_at ?? null,
       flags: [
         `railway_worker_v2`,
         `forecast_sources_${members.length}`,
@@ -374,6 +483,8 @@ export async function analyzeTemperatureMarkets(
         `legacy_sigma_${legacySigmaC.toFixed(1)}C`,
         ...(forecastProb.calibration_used ? ['calibrated_v1'] : []),
         ...(forecastProb.method === 'empirical_weighted' ? ['weighted_ecdf'] : []),
+        ...(repricingLag ? ['repricing_lag'] : []),
+        ...(forecastShiftF !== null && Math.abs(forecastShiftF) >= FORECAST_SHIFT_REANALYZE_F ? ['forecast_shift_retrigger'] : []),
       ],
     });
 
@@ -384,6 +495,6 @@ export async function analyzeTemperatureMarkets(
   }
 
   const durationMs = Date.now() - start;
-  log(`Done: analyzed=${analyzed} skipped=(recent=${skippedRecent} noCity=${skippedNoCity} noForecast=${skippedNoForecast} lowEdge=${skippedLowEdge}) errors=${errors} in ${durationMs}ms`);
-  return { analyzed, skippedRecent, skippedNoCity, skippedNoForecast, skippedLowEdge, errors, durationMs };
+  log(`Done: analyzed=${analyzed} skipped=(recent=${skippedRecent} noCity=${skippedNoCity} noForecast=${skippedNoForecast} lowEdge=${skippedLowEdge}) shiftRetriggers=${shiftRetriggers} lagFlagged=${lagFlagged} errors=${errors} in ${durationMs}ms`);
+  return { analyzed, skippedRecent, skippedNoCity, skippedNoForecast, skippedLowEdge, errors, durationMs, shiftRetriggers, lagFlagged };
 }
