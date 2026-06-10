@@ -190,6 +190,15 @@ export const handler = schedule('*/15 * * * *', async () => {
       // (0.15/0.20) when unset. Lets us dial the band without a deploy.
       'min_entry_price',
       'max_entry_price',
+      // Edge audit 2026-06-10: claimed-edge ceiling. Lifetime data shows
+      // bets where the analyzer claims >30% edge have a 0% win rate over
+      // 22 resolved bets (-100% ROI) — huge claimed edges are a symptom
+      // of model over-confidence, not opportunity. Default 0.30 if unset.
+      'max_claimed_edge',
+      // Edge audit 2026-06-10: 'gte' questions ("X° or higher") are a
+      // structural dead zone — 0 wins in 11 lifetime bets. 'true' (default)
+      // blocks them; set 'false' to re-enable.
+      'block_gte_questions',
     ]);
 
   const config: Record<string, string> = {};
@@ -316,6 +325,22 @@ export const handler = schedule('*/15 * * * *', async () => {
   }
   if (MIN_ENTRY_PRICE !== MIN_ENTRY_PRICE_DEFAULT || MAX_ENTRY_PRICE !== MAX_ENTRY_PRICE_DEFAULT) {
     console.log(`[place-bets] Price band overridden: [${MIN_ENTRY_PRICE.toFixed(3)}, ${MAX_ENTRY_PRICE.toFixed(3)}] (defaults [${MIN_ENTRY_PRICE_DEFAULT}, ${MAX_ENTRY_PRICE_DEFAULT}])`);
+  }
+
+  // Edge audit 2026-06-10: claimed-edge ceiling. Edges above this are
+  // treated as analyzer over-confidence and skipped. Calibration data:
+  // claimed edge >30% → 0/22 lifetime wins; 15-25% band → +28% ROI.
+  const parseCeiling = (raw: string | undefined, fallback: number) => {
+    const v = parseFloat(raw || '');
+    return isNaN(v) || v <= 0 || v >= 1 ? fallback : v;
+  };
+  const MAX_CLAIMED_EDGE = parseCeiling(config.max_claimed_edge, 0.30);
+  console.log(`[place-bets] Claimed-edge ceiling: ${MAX_CLAIMED_EDGE.toFixed(2)}`);
+
+  // Edge audit 2026-06-10: block "or higher" (gte) questions by default.
+  const blockGteQuestions = (config.block_gte_questions || 'true') !== 'false';
+  if (blockGteQuestions) {
+    console.log('[place-bets] gte-question block active ("X° or higher" markets skipped)');
   }
 
   // Configurable confidence floor. Default 'MEDIUM' preserves prior behaviour.
@@ -482,6 +507,14 @@ export const handler = schedule('*/15 * * * *', async () => {
       continue;
     }
 
+    // Edge audit 2026-06-10: claimed-edge ceiling. A claimed edge above
+    // MAX_CLAIMED_EDGE is a model-overconfidence signature, not alpha
+    // (lifetime: >30% claimed edge → 0 wins / 22 bets, -100% ROI).
+    if (edgeNorm > MAX_CLAIMED_EDGE) {
+      console.log(`[place-bets] SKIP ${shortId} — claimed edge ${edgeNorm.toFixed(3)} exceeds ceiling ${MAX_CLAIMED_EDGE.toFixed(2)} (overconfidence zone)`);
+      continue;
+    }
+
     // Fetch current market data for pre-bet validation
     const { data: currentMarket } = await supabase
       .from('markets')
@@ -496,6 +529,14 @@ export const handler = schedule('*/15 * * * *', async () => {
 
     if (currentMarket.liquidity_usd < MIN_LIQUIDITY) {
       console.log(`[place-bets] SKIP ${shortId} — low liquidity $${currentMarket.liquidity_usd} (floor $${MIN_LIQUIDITY})`);
+      continue;
+    }
+
+    // Edge audit 2026-06-10: block 'gte' questions ("X° or higher" /
+    // "or above"). Structural dead zone: 0 wins in 11 lifetime bets.
+    // 'lte' ("or below") and exact-bracket questions remain eligible.
+    if (blockGteQuestions && /\bor\s+(higher|above)\b/i.test(currentMarket.question || '')) {
+      console.log(`[place-bets] SKIP ${shortId} — gte question blocked ("${(currentMarket.question || '').substring(0, 70)}")`);
       continue;
     }
 

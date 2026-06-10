@@ -84,7 +84,9 @@ export async function GET() {
                   // 2026-04-30 Option B — single source of truth with place-bets.ts
                   'blocked_cities', 'min_confidence',
                   // 2026-05-05 Path A — allowlist + flat stake cap + price band
-                  'allowed_cities', 'max_bet_usd', 'min_entry_price', 'max_entry_price']);
+                  'allowed_cities', 'max_bet_usd', 'min_entry_price', 'max_entry_price',
+                  // 2026-06-10 Edge audit — claimed-edge ceiling + gte-question block
+                  'max_claimed_edge', 'block_gte_questions']);
 
     const config: Record<string, string> = {};
     configRows?.forEach((r) => { config[r.key] = r.value; });
@@ -181,6 +183,20 @@ export async function GET() {
     }
     if (pathAMinPrice !== 0.15 || pathAMaxPrice !== 0.20) {
       log.push(`Price band overridden: [${pathAMinPrice.toFixed(3)}, ${pathAMaxPrice.toFixed(3)}]`);
+    }
+
+    // 2026-06-10 Edge audit — mirror place-bets.ts: claimed-edge ceiling
+    // (>30% claimed edge = 0/22 lifetime wins) + gte-question block
+    // ("X° or higher" = 0/11 lifetime wins).
+    const parseCeiling = (raw: string | undefined, fallback: number) => {
+      const v = parseFloat(raw || '');
+      return isNaN(v) || v <= 0 || v >= 1 ? fallback : v;
+    };
+    const maxClaimedEdge = parseCeiling(config.max_claimed_edge, 0.30);
+    log.push(`Claimed-edge ceiling: ${maxClaimedEdge.toFixed(2)}`);
+    const blockGteQuestions = (config.block_gte_questions || 'true') !== 'false';
+    if (blockGteQuestions) {
+      log.push('gte-question block active ("X° or higher" markets skipped)');
     }
 
     const minConfidence = (config.min_confidence || 'MEDIUM').toUpperCase();
@@ -325,6 +341,12 @@ export async function GET() {
         continue;
       }
 
+      // 2026-06-10 Edge audit: claimed-edge ceiling (mirror place-bets.ts).
+      if ((analysis.edge || 0) > maxClaimedEdge) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — claimed edge ${((analysis.edge || 0) * 100).toFixed(1)}% exceeds ceiling ${(maxClaimedEdge * 100).toFixed(0)}% (overconfidence zone)`);
+        continue;
+      }
+
       // V3.2 Kelly sizing: analyzer already applied confidence multiplier into
       // kelly_fraction. Cap the INPUT (prevent saturated-edge blow-ups) then
       // apply a final cap. No double-multiplication of confidence.
@@ -360,6 +382,12 @@ export async function GET() {
       const liquidityFloor = analysis.category === 'weather' ? 400 : MIN_LIQUIDITY;
       if (currentMarket.liquidity_usd < liquidityFloor) {
         log.push(`Skip ${analysis.market_id.substring(0, 8)} — liquidity $${currentMarket.liquidity_usd} < $${liquidityFloor}`);
+        continue;
+      }
+
+      // 2026-06-10 Edge audit: gte-question block (mirror place-bets.ts).
+      if (blockGteQuestions && /\bor\s+(higher|above)\b/i.test(currentMarket.question || '')) {
+        log.push(`Skip ${analysis.market_id.substring(0, 8)} — gte question blocked`);
         continue;
       }
 
