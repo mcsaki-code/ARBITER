@@ -84,13 +84,23 @@ export function normalCdf(z: number): number {
 // sample-std noise. Use this as a floor so a lucky 3-member
 // agreement doesn't produce an artificially confident prob.
 // Matches getDynamicSigma() in analyze-weather.ts for consistency.
+// math_v4 (2026-06-12): floors REPLACED with values MEASURED on ARBITER's own
+// history — std of (observed_high − analysis-time ensemble mean) by realized
+// lead-to-high, n=5,891 city-day-lead points (weather_analyses × weather_actuals):
+//   0-6h: 1.03°F · 6-12h: 2.09 · 12-18h: 2.56 · 18-24h: 3.68 · 24-36h: 4.53
+// The old table (0.8/1.2/1.8/2.5...) was 2-3x too tight in the prime betting
+// window, AND was being indexed by hours-to-midnight-UTC instead of
+// hours-to-the-high, compounding to ~4x tail over-confidence.
+// NOTE: hoursRemaining must now be hours until the DAILY HIGH (15:00 local),
+// per hoursUntilDailyHigh() in temperature.ts.
 export function getDynamicSigmaFloor(hoursRemaining: number): number {
-  if (hoursRemaining <= 6) return 0.8;
-  if (hoursRemaining <= 12) return 1.2;
-  if (hoursRemaining <= 24) return 1.8;
-  if (hoursRemaining <= 48) return 2.5;
-  if (hoursRemaining <= 72) return 3.2;
-  return 4.0;
+  if (hoursRemaining <= 6) return 1.1;
+  if (hoursRemaining <= 12) return 2.1;
+  if (hoursRemaining <= 18) return 2.8;
+  if (hoursRemaining <= 24) return 3.7;
+  if (hoursRemaining <= 36) return 4.6;
+  if (hoursRemaining <= 48) return 5.0;  // measured 8.8 w/ +7°F bias — data suspect, betting blocked here
+  return 5.5;
 }
 
 // ── Sample statistics ─────────────────────────────────────────
@@ -159,11 +169,20 @@ export function computeBracketProbability(
     (prior?.weightBySource && prior.weightBySource.size > 0)
   );
 
-  // Empirical CDF with Laplace smoothing — only used with ≥5 distinct models.
+  // Empirical CDF with Laplace smoothing.
+  // math_v4 FIX (2026-06-12): gate raised from n≥5 to n≥15. The empirical
+  // CDF is only valid with many INDEPENDENT members (the cited methodology
+  // uses 31 GFS ensemble members). ARBITER feeds ≤5 deterministic models
+  // that share data assimilation and are highly correlated — 5/5 agreement
+  // produced an 85.7% claim regardless of how close the mean sat to the
+  // bracket edge, with the sigma floor bypassed entirely. Shadow corpus:
+  // method=empirical Brier 0.0636 vs market 0.0308 (2x worse than market);
+  // method=normal 0.0860 vs 0.0899 (better than market).
   // When weights are provided, use weighted empirical CDF instead:
   //   p = (sum(w_i * 1[v_i in bracket]) + epsilon) / (sum(w_i) + 2*epsilon)
   // epsilon = 1/(n+2) to preserve Laplace-style regularization.
-  if (n >= 5) {
+  const MIN_EMPIRICAL_MEMBERS = 15;
+  if (n >= MIN_EMPIRICAL_MEMBERS) {
     if (prior?.weightBySource && prior.weightBySource.size > 0) {
       let wHit = 0;
       let wTotal = 0;

@@ -114,7 +114,8 @@ export function computeBracketProbability(
   // Empirical CDF with Laplace smoothing — only used with ≥5 distinct models.
   // Count is smoothed as (k + 1) / (n + 2) to prevent 0 or 1 extremes that
   // would make Kelly sizing blow up on tiny samples.
-  if (n >= 5) {
+  const MIN_EMPIRICAL_MEMBERS = 15; // math_v4: see worker copy — correlated deterministic models are not an ensemble
+  if (n >= MIN_EMPIRICAL_MEMBERS) {
     const hits = values.filter((v) => inBracket(v, bracket)).length;
     const smoothed = (hits + 1) / (n + 2);
     return {

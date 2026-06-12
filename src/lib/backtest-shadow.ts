@@ -113,10 +113,17 @@ export async function scoreResolvedShadows(
 
   // Pull unscored rows where the market is already resolved.
   // Use an inner join via two queries since PostgREST doesn't do joins.
+  // math_v4 FIX (2026-06-12): order NEWEST FIRST. Previously this pulled an
+  // arbitrary (stable) first-1000 batch; once 1000 rows belonging to
+  // never-resolving markets plugged the head of the queue, scoring wedged
+  // permanently — which is exactly what happened from 2026-05-01 to
+  // 2026-06-12 (8,611-row backlog, backfilled via SQL). Newest-first means
+  // fresh resolvable rows always get scored regardless of any old plug.
   const { data: unscored, error: unscoredErr } = await supabase
     .from('backtest_shadow')
     .select('id, market_id, predicted_prob')
     .is('scored_at', null)
+    .order('captured_at', { ascending: false })
     .limit(limit);
 
   if (unscoredErr) {

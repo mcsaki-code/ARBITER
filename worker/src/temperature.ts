@@ -31,6 +31,11 @@ const MIN_EDGE  = 0.08;   // 8% minimum edge
 interface TemperatureParsed {
   city: string;
   threshold_c: number;
+  /** Exact threshold in °F — preserves °F-question precision (math_v4).
+   *  Previously °F thresholds were rounded to whole °C, losing up to 0.9°F. */
+  threshold_f: number;
+  /** Unit the question (and its resolution rounding) is denominated in. */
+  unit: 'c' | 'f';
   operator: 'exact' | 'lte' | 'gte';
   date_str: string;
 }
@@ -40,9 +45,12 @@ export function parseTemperatureQuestion(question: string): TemperatureParsed | 
     /highest temperature in ([A-Za-z\s\u00C0-\u024F]+?) be (\d+)°C( or below| or above)? on ([A-Za-z]+ \d+)/i
   );
   if (matchC) {
+    const c = parseInt(matchC[2]);
     return {
       city: matchC[1].trim(),
-      threshold_c: parseInt(matchC[2]),
+      threshold_c: c,
+      threshold_f: c * 9 / 5 + 32,
+      unit: 'c',
       operator: matchC[3]?.toLowerCase().includes('below') ? 'lte'
                : matchC[3]?.toLowerCase().includes('above') ? 'gte'
                : 'exact',
@@ -58,6 +66,8 @@ export function parseTemperatureQuestion(question: string): TemperatureParsed | 
     return {
       city: matchF[1].trim(),
       threshold_c: Math.round((f - 32) * 5 / 9),
+      threshold_f: f,
+      unit: 'f',
       operator: (op.includes('lower') || op.includes('below')) ? 'lte'
                : (op.includes('higher') || op.includes('above')) ? 'gte'
                : 'exact',
@@ -77,9 +87,43 @@ export function resolveDateStr(dateStr: string): string | null {
   const day = parseInt(parts[1]);
   if (monthNum === undefined || isNaN(day)) return null;
   const now = new Date();
-  const candidate = new Date(now.getFullYear(), monthNum, day);
-  if (candidate < now) candidate.setFullYear(now.getFullYear() + 1);
+  const candidate = new Date(Date.UTC(now.getUTCFullYear(), monthNum, day));
+  // math_v4 FIX: previously rolled to NEXT YEAR the moment local midnight of
+  // the target day passed, which made every market invisible ON its target
+  // day (forecasts for next year don't exist → skippedNoForecast). Only roll
+  // forward when the date is more than 72h in the past — markets resolve
+  // within ~36h of the target date, so 72h safely distinguishes "this date
+  // already happened" from "this date is today/recent".
+  if (now.getTime() - candidate.getTime() > 72 * 3600000) {
+    candidate.setUTCFullYear(now.getUTCFullYear() + 1);
+  }
   return candidate.toISOString().split('T')[0];
+}
+
+/**
+ * math_v4 (2026-06-12): hours until the EVENT being forecast — the daily
+ * maximum temperature, which occurs mid-afternoon LOCAL time (~15:00) on
+ * the target date. The previous code measured hours to *midnight UTC* of
+ * the target date, understating lead time by ~14-21h and selecting sigma
+ * floors 2-4x too tight (0.8°F instead of 2.5-3.2°F) — the root cause of
+ * systematic tail over-confidence (see ARBITER_QA_2026-06-11.md).
+ */
+export function hoursUntilDailyHigh(targetDate: string, timezone: string | null): number {
+  let offsetMs = 0;
+  if (timezone) {
+    try {
+      // Offset = local wall time − UTC at noon UTC on the target date.
+      const probe = new Date(`${targetDate}T12:00:00Z`);
+      const local = new Date(probe.toLocaleString('en-US', { timeZone: timezone }));
+      const utc = new Date(probe.toLocaleString('en-US', { timeZone: 'UTC' }));
+      offsetMs = local.getTime() - utc.getTime();
+    } catch {
+      offsetMs = 0; // unknown tz → treat as UTC (still far better than midnight)
+    }
+  }
+  // 15:00 local on target date, expressed in UTC ms:
+  const highUtcMs = Date.parse(`${targetDate}T15:00:00Z`) - offsetMs;
+  return (highUtcMs - Date.now()) / 3600000;
 }
 
 function sigmaCForDaysOut(daysOut: number): number {
@@ -166,9 +210,9 @@ export async function analyzeTemperatureMarkets(
   }
   const recentIds = new Set((recentRows ?? []).map((r: { market_id: string }) => r.market_id));
 
-  // Pre-load all cities
-  const { data: allCities } = await supabase.from('weather_cities').select('id, name');
-  const cityList = allCities ?? [];
+  // Pre-load all cities (timezone needed for time-of-high lead computation, math_v4)
+  const { data: allCities } = await supabase.from('weather_cities').select('id, name, timezone');
+  const cityList = (allCities ?? []) as Array<{ id: string; name: string; timezone: string | null }>;
 
   // Fetch config once (bankroll + Edge #4 lag thresholds)
   const { data: cfgRows } = await supabase
@@ -243,14 +287,13 @@ export async function analyzeTemperatureMarkets(
     const targetDate = resolveDateStr(parsed.date_str);
     if (!targetDate) continue;
 
-    // Days out from today — used only as a legacy fallback.
-    // Real sigma now comes from the forecast member sample std
-    // (with a lead-time-aware floor) via forecast-ensemble.ts.
-    const daysOut = Math.round((new Date(targetDate).getTime() - Date.now()) / 86400000);
-    const hoursRemaining = Math.max(
-      0,
-      (new Date(targetDate).getTime() - Date.now()) / 3600000
-    );
+    // math_v4: lead time is measured to the EVENT (the afternoon daily high),
+    // not to midnight UTC of the target date. daysOut is calendar days,
+    // matching calibration-ingest's lead_days semantics exactly.
+    const todayUtc = new Date().toISOString().split('T')[0];
+    const daysOut = Math.max(0, Math.round(
+      (Date.parse(targetDate) - Date.parse(todayUtc)) / 86400000
+    ));
     const legacySigmaC = sigmaCForDaysOut(daysOut);
 
     // Match city
@@ -261,6 +304,9 @@ export async function analyzeTemperatureMarkets(
       cityNameLc.includes(c.name.toLowerCase())
     );
     if (!city) { skippedNoCity++; continue; }
+
+    // math_v4: effective lead time to the afternoon high (local 15:00).
+    const hoursRemaining = Math.max(0, hoursUntilDailyHigh(targetDate, city.timezone));
 
     // Fetch forecasts for city + date
     const { data: forecasts, error: fcErr } = await supabase
@@ -304,12 +350,19 @@ export async function analyzeTemperatureMarkets(
     }
 
     const T_c = parsed.threshold_c;
-    const T_f = T_c * 9 / 5 + 32;
+    const T_f = parsed.threshold_f; // math_v4: exact °F for °F questions (no °C round-trip)
     // Build a bracket range in °F from the operator.
-    // 'exact' = half-open degree window (centered on T), matching how
-    // Polymarket resolves "exactly X°C" questions (±0.5°C = ±0.9°F).
+    // Resolution rounds the observed high to the nearest whole degree IN THE
+    // QUESTION'S UNIT, so every operator gets a ±0.5-unit window:
+    //   exact:        actual ∈ [T-0.5, T+0.5)
+    //   lte ("or below"):  YES ⇔ rounded ≤ T ⇔ actual < T+0.5
+    //   gte ("or higher"): YES ⇔ rounded ≥ T ⇔ actual ≥ T-0.5
+    // math_v4 FIX: lte/gte previously used the bare threshold (no half
+    // window), systematically underestimating P(YES) by the probability
+    // mass in the missing 0.5-unit sliver — the source of fake BUY_NO
+    // edges (BUY_NO 0/10, gte 0/11 lifetime).
     let bracket: BracketRange;
-    const halfWindowF = 0.5 * 9 / 5; // 0.9°F
+    const halfWindowF = parsed.unit === 'c' ? 0.5 * 9 / 5 : 0.5; // 0.9°F or 0.5°F
     if (parsed.operator === 'exact') {
       bracket = {
         low_f: T_f - halfWindowF,
@@ -320,13 +373,13 @@ export async function analyzeTemperatureMarkets(
     } else if (parsed.operator === 'lte') {
       bracket = {
         low_f: -Infinity,
-        high_f: T_f,
+        high_f: T_f + halfWindowF,
         kind: 'at_or_below',
         label: `<=${T_c}°C`,
       };
     } else {
       bracket = {
-        low_f: T_f,
+        low_f: T_f - halfWindowF,
         high_f: Infinity,
         kind: 'at_or_above',
         label: `>=${T_c}°C`,
@@ -341,7 +394,11 @@ export async function analyzeTemperatureMarkets(
     //   3. Per-model weighted empirical CDF
     // All three degrade gracefully — if any lookup misses, it falls
     // back to raw-math behavior for just that component.
-    const leadDays = Math.max(0, Math.round(hoursRemaining / 24));
+    // math_v4: calendar-day lead — matches calibration-ingest lead_days
+    // semantics (issue date → valid date). The old round(hoursRemaining/24)
+    // mapped evening-before analyses to lead-0 buckets (day-of error stats,
+    // much tighter), corrupting the sigma blend.
+    const leadDays = daysOut;
     const monthNum = Number(targetDate.slice(5, 7));
     let prior: CalibrationPrior | undefined;
     if (calibration.enabled) {
@@ -475,6 +532,8 @@ export async function analyzeTemperatureMarkets(
       prev_analyzed_at: prev?.analyzed_at ?? null,
       flags: [
         `railway_worker_v2`,
+        `math_v4`,
+        `lead_h_${hoursRemaining.toFixed(0)}`,
         `forecast_sources_${members.length}`,
         `sigma_${sigmaCEff.toFixed(2)}C_${forecastProb.method}`,
         `sigma_source_${forecastProb.sigma_source}`,
