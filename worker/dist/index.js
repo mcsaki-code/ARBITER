@@ -19,6 +19,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const supabase_js_1 = require("@supabase/supabase-js");
 const temperature_1 = require("./temperature");
 const monitor_1 = require("./monitor");
+const ensemble_ingest_1 = require("./ensemble-ingest");
+const station_actuals_1 = require("./station-actuals");
+const kalshi_ingest_1 = require("./kalshi-ingest");
+const mm_sim_1 = require("./mm-sim");
 // ── Environment validation ───────────────────────────────────────────────────
 const REQUIRED_ENV = [
     'NEXT_PUBLIC_SUPABASE_URL',
@@ -124,6 +128,79 @@ async function runMonitorLoop() {
         await sleep(60 * 1000); // 60 seconds
     }
 }
+// ── Phase 1 (2026-06-12): true-ensemble ingest loop ──────────────────────────
+// Run-aligned: ingestEnsembleForecasts() no-ops unless a new GFS/ECMWF run
+// is available, so a 10-min cadence costs almost nothing between runs.
+async function runEnsembleLoop() {
+    await sleep(20 * 1000);
+    console.log('[worker] Starting ensemble ingest loop (checks every 10 minutes, fetches per model run)');
+    while (true) {
+        try {
+            const r = await (0, ensemble_ingest_1.ingestEnsembleForecasts)(supabase, { verbose: true });
+            if (r.errors > 0)
+                metrics.errors += r.errors;
+        }
+        catch (e) {
+            metrics.errors++;
+            console.error('[worker] Ensemble loop error:', e);
+        }
+        await sleep(10 * 60 * 1000);
+    }
+}
+// ── Phase 1: station actuals (METAR) + resolution-source backfill ────────────
+async function runStationLoop() {
+    await sleep(60 * 1000);
+    console.log('[worker] Starting station-actuals loop (every 3 hours)');
+    while (true) {
+        try {
+            const r = await (0, station_actuals_1.ingestStationActuals)(supabase, { verbose: true });
+            if (r.errors > 0)
+                metrics.errors += r.errors;
+            const b = await (0, station_actuals_1.backfillResolutionSources)(supabase, { verbose: true });
+            if (b.errors > 0)
+                metrics.errors += b.errors;
+        }
+        catch (e) {
+            metrics.errors++;
+            console.error('[worker] Station loop error:', e);
+        }
+        await sleep(3 * 60 * 60 * 1000);
+    }
+}
+// ── Phase 1: Kalshi KXHIGH snapshots (divergence signal + arb groundwork) ────
+async function runKalshiLoop() {
+    await sleep(90 * 1000);
+    console.log('[worker] Starting Kalshi ingest loop (every 30 minutes)');
+    while (true) {
+        try {
+            const r = await (0, kalshi_ingest_1.ingestKalshiSnapshots)(supabase, { verbose: true });
+            if (r.errors > 0)
+                metrics.errors += r.errors;
+        }
+        catch (e) {
+            metrics.errors++;
+            console.error('[worker] Kalshi loop error:', e);
+        }
+        await sleep(30 * 60 * 1000);
+    }
+}
+// ── Phase 1: maker paper-quote simulator (NEVER places orders) ───────────────
+async function runMmSimLoop() {
+    await sleep(2 * 60 * 1000);
+    console.log('[worker] Starting MM paper-quote sim loop (every 30 minutes, observe-only)');
+    while (true) {
+        try {
+            const r = await (0, mm_sim_1.runMmQuoteSim)(supabase, { verbose: true });
+            if (r.errors > 0)
+                metrics.errors += r.errors;
+        }
+        catch (e) {
+            metrics.errors++;
+            console.error('[worker] MM sim loop error:', e);
+        }
+        await sleep(30 * 60 * 1000);
+    }
+}
 // ── Health log loop ───────────────────────────────────────────────────────────
 async function runHealthLoop() {
     await sleep(15 * 1000); // first log after 15s
@@ -179,13 +256,17 @@ async function main() {
     // Log startup to DB
     await supabase.from('system_config').upsert([
         { key: 'railway_worker_started_at', value: new Date().toISOString() },
-        { key: 'railway_worker_version', value: '1.1.0' },
+        { key: 'railway_worker_version', value: '1.2.0' },
     ], { onConflict: 'key' });
     // Run all loops concurrently — they never return (infinite while loops)
     await Promise.all([
         runTemperatureLoop(),
         runMonitorLoop(),
         runHealthLoop(),
+        runEnsembleLoop(), // Phase 1: true ensemble members (run-aligned)
+        runStationLoop(), // Phase 1: METAR actuals + resolution sources
+        runKalshiLoop(), // Phase 1: KXHIGH snapshots
+        runMmSimLoop(), // Phase 1: maker paper-quote sim (observe-only)
     ]);
 }
 main().catch(err => {

@@ -7,6 +7,7 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import {
   computeBracketProbability,
+  computeEnsembleEcdfProbability,
   type ForecastMember,
   type BracketRange,
   type CalibrationPrior,
@@ -214,11 +215,11 @@ export async function analyzeTemperatureMarkets(
   const { data: allCities } = await supabase.from('weather_cities').select('id, name, timezone');
   const cityList = (allCities ?? []) as Array<{ id: string; name: string; timezone: string | null }>;
 
-  // Fetch config once (bankroll + Edge #4 lag thresholds)
+  // Fetch config once (bankroll + Edge #4 lag thresholds + fee rate)
   const { data: cfgRows } = await supabase
     .from('system_config')
     .select('key, value')
-    .in('key', ['paper_bankroll', 'lag_min_prob_shift', 'lag_max_price_shift', 'forecast_shift_reanalyze_f']);
+    .in('key', ['paper_bankroll', 'lag_min_prob_shift', 'lag_max_price_shift', 'forecast_shift_reanalyze_f', 'taker_fee_rate_weather']);
   const cfg: Record<string, string> = {};
   (cfgRows ?? []).forEach((r: { key: string; value: string }) => { cfg[r.key] = r.value; });
   const bankroll = parseFloat(cfg.paper_bankroll ?? '5000');
@@ -239,6 +240,9 @@ export async function analyzeTemperatureMarkets(
   };
   const LAG_MIN_PROB_SHIFT = parseNum(cfg.lag_min_prob_shift, 0.05);
   const LAG_MAX_PRICE_SHIFT = parseNum(cfg.lag_max_price_shift, 0.02);
+  // 2026 fee regime: weather taker fee = shares × rate × p(1−p).
+  // EV math must clear it — at 15¢ entries it's ~4.2% of stake.
+  const TAKER_FEE_RATE = parseNum(cfg.taker_fee_rate_weather, 0.05);
   // Forecast-mean move (°F) that justifies re-analyzing BEFORE the 4h
   // recent-window expires. This un-inverts the old behaviour where we
   // re-analyzed on MARKET moves but slept through FORECAST moves.
@@ -271,6 +275,38 @@ export async function analyzeTemperatureMarkets(
   const calibration = await loadCalibrationSnapshot(supabase);
   if (calibration.enabled) {
     log(`Calibration loaded: sigma=${calibration.rowCounts.sigma} bias=${calibration.rowCounts.bias} weights=${calibration.rowCounts.weights}`);
+  }
+
+  // ── ens_v1 (2026-06-12): preload TRUE ensemble member pools ──────
+  // Latest run per (city, valid_date, model) from ensemble_forecasts
+  // (append-only, populated by ensemble-ingest.ts). Pools from multiple
+  // models are concatenated — every member is one equally-weighted
+  // sample of tomorrow's high. When a pool has ≥ MIN_ENS_MEMBERS we use
+  // the empirical CDF instead of the normal approximation; this is the
+  // estimator the corpus replay says we need (the 3-snapshot normal
+  // path carries zero edge — k*=0).
+  const MIN_ENS_MEMBERS = 30;
+  const ensPool = new Map<string, number[]>(); // `${city_id}|${valid_date}` → members °F
+  {
+    const { data: ensRows } = await supabase
+      .from('ensemble_forecasts')
+      .select('city_id, valid_date, model, members_high_f, fetched_at')
+      .gte('valid_date', new Date().toISOString().split('T')[0])
+      .gte('fetched_at', new Date(Date.now() - 24 * 3600000).toISOString())
+      .order('fetched_at', { ascending: false })
+      .limit(3000);
+    const seen = new Set<string>();
+    for (const row of ensRows ?? []) {
+      const r = row as { city_id: string; valid_date: string; model: string; members_high_f: number[] };
+      const modelKey = `${r.city_id}|${r.valid_date}|${r.model}`;
+      if (seen.has(modelKey)) continue; // keep only the latest run per model
+      seen.add(modelKey);
+      const poolKey = `${r.city_id}|${r.valid_date}`;
+      const pool = ensPool.get(poolKey) ?? [];
+      pool.push(...(r.members_high_f ?? []));
+      ensPool.set(poolKey, pool);
+    }
+    log(`ens_v1: loaded ${ensPool.size} city-date member pools (${(ensRows ?? []).length} run rows)`);
   }
 
   let analyzed = 0, skippedRecent = 0, skippedNoCity = 0, skippedNoForecast = 0, skippedLowEdge = 0, errors = 0;
@@ -427,14 +463,45 @@ export async function analyzeTemperatureMarkets(
       };
     }
 
-    const forecastProb = computeBracketProbability(members, bracket, hoursRemaining, prior);
-    const trueProb = forecastProb.probability;
-    const sigmaFEff = forecastProb.sigma_f;
+    // ── ens_v1: prefer TRUE ensemble ECDF when a member pool exists ──
+    const pool = ensPool.get(`${city.id}|${targetDate}`);
+    const useEnsemble = !!pool && pool.length >= MIN_ENS_MEMBERS;
+    let trueProb: number;
+    let sigmaFEff: number;
+    let probMethod: string;
+    let probSigmaSource: string;
+    let ensN = 0;
+    let calibUsed = false;
+    let nCalSigma: number | null = null;
+    if (useEnsemble) {
+      const ens = computeEnsembleEcdfProbability(pool!, bracket);
+      trueProb = ens.probability;
+      sigmaFEff = ens.std_f;
+      probMethod = 'ensemble_ecdf';
+      probSigmaSource = 'ensemble';
+      ensN = ens.n;
+    } else {
+      const forecastProb = computeBracketProbability(members, bracket, hoursRemaining, prior);
+      trueProb = forecastProb.probability;
+      sigmaFEff = forecastProb.sigma_f;
+      probMethod = forecastProb.method;
+      probSigmaSource = forecastProb.sigma_source;
+      calibUsed = !!forecastProb.calibration_used;
+      nCalSigma = forecastProb.n_cal_sigma ?? null;
+    }
     const sigmaCEff = sigmaFEff * 5 / 9;
 
     const marketPrice = market.outcome_prices?.[0] ?? 0.5;
     const edge = trueProb - marketPrice;
     const absEdge = Math.abs(edge);
+
+    // ── Fee-adjusted EV per $1 staked (2026 taker-fee regime) ──────
+    // BUY_YES at price c:  EV = (p−c)/c − rate·(1−c)
+    // BUY_NO  at cost 1−c: EV = (c−p)/(1−c) − rate·c
+    const c0 = Math.min(0.99, Math.max(0.01, marketPrice));
+    const feeAdjEv = edge > 0
+      ? (trueProb - c0) / c0 - TAKER_FEE_RATE * (1 - c0)
+      : (c0 - trueProb) / (1 - c0) - TAKER_FEE_RATE * c0;
 
     // ── Edge #4: repricing-lag signal ─────────────────────────
     // repricing_lag=true means: since the previous analysis, OUR
@@ -476,8 +543,8 @@ export async function analyzeTemperatureMarkets(
       bracketLabel: bracket.label,
       predictedProb: trueProb,
       sigmaF: sigmaFEff,
-      method: forecastProb.method,
-      nMembers: members.length,
+      method: probMethod,
+      nMembers: useEnsemble ? ensN : members.length,
       meanF: avgHighF,
       leadTimeHours: hoursRemaining,
       marketPriceYes: marketPrice,
@@ -520,7 +587,7 @@ export async function analyzeTemperatureMarkets(
       confidence,
       kelly_fraction: kellyFraction,
       rec_bet_usd: recBetUsd,
-      reasoning: `[Railway-v3] Member-distribution: n=${members.length} forecasts, mean ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), sigma=${sigmaCEff.toFixed(2)}°C (${sigmaFEff.toFixed(2)}°F, method=${forecastProb.method}, σ_source=${forecastProb.sigma_source}${forecastProb.calibration_used ? ', calibrated' : ''}${forecastProb.n_cal_sigma ? `, n_cal=${forecastProb.n_cal_sigma}` : ''}, ${daysOut}d out), threshold ${T_c}°C ${parsed.operator}, P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%`,
+      reasoning: `[Railway-v4] ${useEnsemble ? `TRUE-ensemble ECDF: n=${ensN} members` : `Member-distribution: n=${members.length} forecasts`}, mean ${mu_c.toFixed(1)}°C (${avgHighF.toFixed(1)}°F), sigma=${sigmaCEff.toFixed(2)}°C (${sigmaFEff.toFixed(2)}°F, method=${probMethod}, σ_source=${probSigmaSource}${calibUsed ? ', calibrated' : ''}${nCalSigma ? `, n_cal=${nCalSigma}` : ''}, ${daysOut}d out), threshold ${T_c}°C ${parsed.operator}, P=${(trueProb*100).toFixed(1)}%, mkt=${(marketPrice*100).toFixed(2)}%, edge=${(edge*100).toFixed(1)}%, feeAdjEV=${(feeAdjEv*100).toFixed(1)}%/$ (fee rate ${TAKER_FEE_RATE})`,
       auto_eligible: confidence === 'HIGH' && members.length >= 3 && absEdge >= MIN_EDGE,
       ensemble_prob: trueProb,
       ensemble_edge: edge,
@@ -533,15 +600,17 @@ export async function analyzeTemperatureMarkets(
       flags: [
         `railway_worker_v2`,
         `math_v4`,
+        ...(useEnsemble ? ['ens_v1', `ens_members_${ensN}`] : []),
         `lead_h_${hoursRemaining.toFixed(0)}`,
         `forecast_sources_${members.length}`,
-        `sigma_${sigmaCEff.toFixed(2)}C_${forecastProb.method}`,
-        `sigma_source_${forecastProb.sigma_source}`,
+        `sigma_${sigmaCEff.toFixed(2)}C_${probMethod}`,
+        `sigma_source_${probSigmaSource}`,
         `days_out_${daysOut}`,
         `pWin_${(pWin * 100).toFixed(1)}pct`,
+        `fee_adj_ev_${(feeAdjEv * 100).toFixed(1)}pct`,
         `legacy_sigma_${legacySigmaC.toFixed(1)}C`,
-        ...(forecastProb.calibration_used ? ['calibrated_v1'] : []),
-        ...(forecastProb.method === 'empirical_weighted' ? ['weighted_ecdf'] : []),
+        ...(calibUsed ? ['calibrated_v1'] : []),
+        ...(probMethod === 'empirical_weighted' ? ['weighted_ecdf'] : []),
         ...(repricingLag ? ['repricing_lag'] : []),
         ...(forecastShiftF !== null && Math.abs(forecastShiftF) >= FORECAST_SHIFT_REANALYZE_F ? ['forecast_shift_retrigger'] : []),
       ],
@@ -550,7 +619,7 @@ export async function analyzeTemperatureMarkets(
     if (insertErr) { errors++; continue; }
 
     analyzed++;
-    log(`✅ ${parsed.city} ${parsed.operator}${T_c}°C | ${daysOut}d out σ=${sigmaCEff.toFixed(2)}°C (${forecastProb.method}) | forecast=${mu_c.toFixed(1)}°C | n=${members.length} | edge=${(edge*100).toFixed(1)}% ${direction} $${recBetUsd}`);
+    log(`✅ ${parsed.city} ${parsed.operator}${T_c}°C | ${daysOut}d out σ=${sigmaCEff.toFixed(2)}°C (${probMethod}) | forecast=${mu_c.toFixed(1)}°C | n=${useEnsemble ? ensN : members.length} | edge=${(edge*100).toFixed(1)}% feeEV=${(feeAdjEv*100).toFixed(1)}% ${direction} $${recBetUsd}`);
   }
 
   const durationMs = Date.now() - start;

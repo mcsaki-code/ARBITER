@@ -245,6 +245,29 @@ export function computeBracketProbability(
   };
 }
 
+// ── TRUE-ensemble ECDF (ens_v1, 2026-06-12) ─────────────────────
+// For real ensemble members (GFS ENS 31 / ECMWF ENS 51 via the
+// Ensemble API) the empirical CDF is the right estimator — this is
+// the methodology every documented profitable weather bot uses.
+// Laplace smoothing keeps tails off 0/1. Caller must ensure the
+// members are genuine ensemble members (n ≥ 30), NOT deterministic
+// model snapshots (see MIN_EMPIRICAL_MEMBERS above for why).
+export function computeEnsembleEcdfProbability(
+  membersF: number[],
+  bracket: BracketRange
+): { probability: number; hits: number; n: number; mean_f: number; std_f: number } {
+  const vals = membersF.filter((v) => Number.isFinite(v));
+  const n = vals.length;
+  if (n === 0) return { probability: 0.5, hits: 0, n: 0, mean_f: NaN, std_f: NaN };
+  const hits = vals.filter((v) => inBracket(v, bracket)).length;
+  const probability = clamp((hits + 1) / (n + 2), 0.02, 0.98);
+  const mean = vals.reduce((a, b) => a + b, 0) / n;
+  const std = n > 1
+    ? Math.sqrt(vals.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (n - 1))
+    : 0;
+  return { probability, hits, n, mean_f: mean, std_f: std };
+}
+
 // ── Bracket membership (inclusive low, exclusive high) ──────────
 function inBracket(v: number, b: BracketRange): boolean {
   if (b.low_f !== null && v < b.low_f) return false;
